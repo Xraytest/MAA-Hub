@@ -52,6 +52,9 @@ struct Input {
     bool down = false;        // 左键按住
     bool pressed = false;     // 本帧刚按下
     bool released = false;    // 本帧刚松开
+    bool rdown = false;       // 右键按住
+    bool rpressed = false;    // 本帧刚按下右键
+    bool rreleased = false;   // 本帧刚松开右键
     bool double_click = false;
     int wheel = 0;            // 本帧滚轮增量
     wchar_t char_input = 0;   // WM_CHAR
@@ -59,6 +62,9 @@ struct Input {
     bool shift = false;
     bool ctrl = false;
 };
+
+// 复选框三态（对应 MAA：关 / 开 / 仅生效一次）
+enum class CheckState { Off = 0, On = 1, Once = 2 };
 
 // ---------------------------------------------------------------- GUI 上下文
 class Gui {
@@ -90,6 +96,7 @@ public:
     void end() {
         // active：按住中的控件
         if (in_.released || !in_.down) active_.clear();
+        if (in_.rreleased || !in_.rdown) r_active_.clear();
     }
 
     // ------------------------------------------------------------ 图元
@@ -311,6 +318,56 @@ public:
         (void)save;
     }
 
+    // 三态复选框（对应 MAA 官方语义）：
+    //   左键 = 开/关切换；右键 = 切换「仅生效一次」（该次运行有效，不写入配置）
+    bool checkbox3(const char* id, RECT r, const std::wstring& label, CheckState& st) {
+        bool hov = hovered(r);
+        if (hov) hot_ = id;
+        if (hov && in_.pressed) active_ = id;
+        bool changed = false;
+        if (hov && active_ == id && in_.released) {
+            st = (st == CheckState::On) ? CheckState::Off : CheckState::On;
+            changed = true;
+        }
+        if (hov && in_.rpressed) r_active_ = id;
+        if (hov && r_active_ == id && in_.rreleased) {
+            st = (st == CheckState::Once) ? CheckState::Off : CheckState::Once;
+            changed = true;
+        }
+        int box = 16;
+        RECT br{ r.left, r.top + 1, r.left + box, r.top + 1 + box };
+        COLORREF fill_c = theme.panel, line_c = RGB(180, 188, 200);
+        if (st == CheckState::On) { fill_c = theme.primary; line_c = theme.primary; }
+        else if (st == CheckState::Once) { fill_c = theme.primary_light; line_c = theme.primary; }
+        round_rect(br, fill_c, line_c, 3);
+        if (st != CheckState::Off) {
+            HPEN p = CreatePen(PS_SOLID, 2, st == CheckState::On ? RGB(255, 255, 255)
+                                                                 : theme.primary);
+            HGDIOBJ old = SelectObject(dc_, p);
+            MoveToEx(dc_, br.left + 3, br.top + 8, nullptr);
+            LineTo(dc_, br.left + 6, br.top + 12);
+            LineTo(dc_, br.left + 13, br.top + 4);
+            SelectObject(dc_, old);
+            DeleteObject(p);
+            if (st == CheckState::Once) {
+                // 「仅一次」加圆点标记
+                HPEN d = CreatePen(PS_SOLID, 3, theme.primary);
+                HGDIOBJ od = SelectObject(dc_, d);
+                Ellipse(dc_, br.left + 5, br.top + 5, br.left + 11, br.top + 11);
+                SelectObject(dc_, od);
+                DeleteObject(d);
+            }
+        }
+        RECT save = clip_;
+        text(r.left + box + 8, r.top, label, theme.text, font);
+        if (st == CheckState::Once) {
+            text(r.left + box + 8 + text_size(label, font).cx + 6, r.top,
+                 L"（仅一次）", theme.primary, font_small);
+        }
+        (void)save;
+        return changed;
+    }
+
     bool checkbox(const char* id, RECT r, const std::wstring& label, bool& v) {
         // 复选框区域包含文字
         bool hov = hovered(r);
@@ -470,6 +527,7 @@ private:
     std::vector<RECT> clip_stack_;
     Input in_;
     std::string hot_;
+    std::string r_active_;   // 右键活动控件
     std::string active_;
     std::string focus_;
     bool wheel_used_ = false;

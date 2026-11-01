@@ -23,6 +23,7 @@ namespace hub {
 // 任务勾选状态（按执行器）
 struct TaskUiState {
     bool checked = false;
+    bool once = false;          // 仅生效一次（官方右键语义，不写入配置）
     bool selected = false;      // 当前选中项（右侧展示其设置，对应 MAA 左列选中）
     bool open = false;
     std::map<std::string, mj::Value> params;
@@ -116,6 +117,11 @@ private:
     std::string selected_exec_;
     std::map<std::string, std::map<std::string, TaskUiState>> task_ui_;
     std::map<std::string, float> scroll_;
+    // 左列拖拽排序（对应 MAA 的 dd:DragDrop）
+    std::map<std::string, std::vector<std::string>> task_order_;  // 执行器 -> 任务顺序
+    std::string drag_task_;      // 正在拖拽的任务名
+    int drag_y_ = -1;            // 拖拽中的鼠标 y
+    int drop_before_ = -1;       // 插入位置索引
     // 新建执行器表单
     bool show_new_exec_ = false;
     int new_kind_ = 0;
