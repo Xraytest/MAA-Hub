@@ -35,3 +35,6 @@ docs/audit-*.png
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 最终审计截图（本地产物）
+docs/final-*.png
