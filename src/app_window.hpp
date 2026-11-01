@@ -59,6 +59,9 @@ private:
     void draw_topbar(RECT r);
     void page_executor(RECT content);
     void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);
+    void draw_post_action(RECT area, const std::string& id);
+    void save_post_action(const std::string& id);
+    void load_post_action();
     void save_task_list();
     void load_task_list();       // MAA 1:1 实例页
     void page_welcome(RECT content);
@@ -130,6 +133,9 @@ private:
     int drag_y_ = -1;            // 拖拽中的鼠标 y
     int drop_before_ = -1;       // 插入位置索引
     // 新建执行器表单
+    // 「完成后动作设置」浮层（官方 TaskQueue.PostAction.Settings）
+    bool show_post_action_ = false;
+    std::map<std::string, mj::Value> post_action_;
     // 「添加新任务」浮层（官方左列底部 TaskQueue.AddTask）
     bool show_add_task_ = false;
     std::string add_task_filter_;
