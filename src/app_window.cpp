@@ -800,6 +800,32 @@ void MaaHubWindow::draw_post_action(RECT area, const std::string& id) {
     save_post_action(id);
 }
 
+// 完成后动作的人类可读描述（对应官方 PostActionSetting.ActionDescription）
+std::wstring MaaHubWindow::post_action_desc(const std::string& id) {
+    auto it = post_action_.find(id);
+    if (it == post_action_.end()) return L"\u5b8c\u6210\u540e\u65e0\u52a8\u4f5c";
+    const mj::Value& p = it->second;
+    auto on = [&](const char* k) {
+        auto* v = p.find(k);
+        return v ? v->as_bool() : false;
+    };
+    std::wstring out;
+    auto add = [&](const wchar_t* s) {
+        if (!out.empty()) out += L"\u3001";
+        out += s;
+    };
+    if (on("back_to_android_home")) add(L"\u8fd4\u56de\u4e3b\u5c4f\u5e55");
+    if (on("exit_arknights")) add(L"\u9000\u51fa\u6e38\u620f");
+    if (on("exit_emulator")) add(L"\u9000\u51fa\u6a21\u62df\u5668");
+    if (on("exit_self")) add(L"\u9000\u51fa MAA");
+    if (on("lock_screen")) add(L"\u9501\u5c4f");
+    if (on("sleep")) add(L"\u7761\u7720");
+    if (on("hibernate")) add(L"\u4f11\u7720");
+    if (on("shutdown")) add(L"\u5173\u673a");
+    if (out.empty()) return L"\u5b8c\u6210\u540e\u65e0\u52a8\u4f5c";
+    return L"\u5b8c\u6210\u540e\uff1a" + out;
+}
+
 // 持久化完成后动作（state/post-actions.json）
 void MaaHubWindow::save_post_action(const std::string& id) {
     mj::Value v = mj::Value::object();
@@ -1044,7 +1070,6 @@ void MaaHubWindow::page_executor(RECT content) {
     RECT left_col{ left_card.left + 10, left_card.top, left_card.left + 10 + LEFT_W,
                    left_card.bottom };
     RECT right_col{ left_card.right, frame.top, frame.right, frame.bottom - BAR_H };
-    RECT bottom_bar{ frame.left, frame.bottom - BAR_H, frame.right, frame.bottom };
 
     // ---------------- 左列：任务列表 ----------------
     gui_.text(left_col.left + 12, left_col.top + 12, L"\u4efb\u52a1\u5217\u8868",
@@ -1342,47 +1367,97 @@ void MaaHubWindow::page_executor(RECT content) {
     draw_task_ctx_menu();
     draw_rename_box(right_col, id);
 
-    // ---------------- 底部控制栏 ----------------
+        // ---------------- 底部控制栏（官方结构）----------------
+    // 官方：Link Start!/停止/等待&停止 是居中的 100x50 大按钮组；
+    // 左下角是完成后动作描述文本 + 齿轮图标按钮（PostActionSetting.ActionDescription）。
+    RECT bottom_bar{ frame.left, frame.bottom - BAR_H, frame.right, frame.bottom };
     gui_.fill({ bottom_bar.left, bottom_bar.top, bottom_bar.right, bottom_bar.top + 1 },
               gui_.theme.border);
+
     bool connected = conn == "connected";
-    RECT conn_btn{ bottom_bar.left + 16, bottom_bar.top + 8,
-                   bottom_bar.left + 96, bottom_bar.bottom - 8 };
-    if (gui_.button("btn-connect-exec", conn_btn, connected ? L"\u65ad\u5f00" : L"\u8fde\u63a5", 0)) {
-        if (connected) action_disconnect(id);
-        else action_connect(id);
-    }
-    RECT pa_btn{ bottom_bar.left + 106, bottom_bar.top + 8,
-                 bottom_bar.left + 226, bottom_bar.bottom - 8 };
-    if (gui_.button("btn-postaction", pa_btn, L"\u5b8c\u6210\u540e\u52a8\u4f5c", 0)) {
-        show_post_action_ = !show_post_action_;
-    }
-    COLORREF dot = connected ? gui_.theme.ok :
-                     conn == "failed" ? gui_.theme.err :
-                     conn == "connecting" ? gui_.theme.warn : gui_.theme.faint;
-    gui_.round_rect({ bottom_bar.left + 236, bottom_bar.top + 17,
-                      bottom_bar.left + 246, bottom_bar.top + 27 }, dot, dot, 5);
+    bool busy = connected && hub_->executor_status(id, 0).get_bool("busy", false);
+
+    // 左下角：完成后动作描述 + 齿轮按钮
     {
+        std::wstring desc = post_action_desc(id);
+        gui_.text_clipped({ bottom_bar.left + 16, bottom_bar.top + 6,
+                            bottom_bar.left + 250, bottom_bar.bottom - 8 },
+                          desc, gui_.theme.dim, gui_.font_small);
+        RECT gear{ bottom_bar.left + 16, bottom_bar.top + 22,
+                   bottom_bar.left + 40, bottom_bar.bottom - 6 };
+        if (gui_.button("btn-postaction-gear", gear, L"\u2699", 0)) {
+            show_post_action_ = !show_post_action_;
+        }
+    }
+
+    // 居中按钮组（官方基准 100x50；宽度按文字实测，避免裁切）
+    const int BH = 50, GAP = 5;
+    const std::wstring kLink = L"\U0001f517 Link Start!";
+    const std::wstring kStop = L"\u505c\u6b62";
+    const std::wstring kWait = L"\u7b49\u5f85 & \u505c\u6b62";
+    int bw_link = gui_.text_size(kLink, gui_.font_bold).cx + 28;
+    int bw_stop = gui_.text_size(kStop, gui_.font_bold).cx + 28;
+    int bw_wait = gui_.text_size(kWait, gui_.font_bold).cx + 28;
+    if (bw_link < 100) bw_link = 100;
+    if (bw_stop < 100) bw_stop = 100;
+    if (bw_wait < 100) bw_wait = 100;
+    bool show_wait = busy;
+    int group_w = show_wait ? bw_link + bw_stop + bw_wait + GAP * 2
+                            : bw_link + bw_stop + GAP;
+    int gx = (bottom_bar.left + bottom_bar.right - group_w) / 2;
+    int gy = bottom_bar.top + (bottom_bar.bottom - bottom_bar.top - BH) / 2;
+
+    if (busy) {
+        RECT stop_btn{ gx, gy, gx + bw_stop, gy + BH };
+        if (gui_.button("btn-stop-exec", stop_btn, kStop, 2)) {
+            post_action([this, id] { hub_->stop_executor(id); }, "\u505c\u6b62");
+        }
+        if (show_wait) {
+            RECT wait_btn{ gx + bw_stop + GAP, gy, gx + bw_stop + GAP + bw_wait, gy + BH };
+            if (gui_.button("btn-waitstop-exec", wait_btn, kWait, 0)) {
+                post_action([this, id] { hub_->stop_executor(id); },
+                            "\u7b49\u5f85\u505c\u6b62");
+            }
+        }
+    } else {
+        RECT link_btn{ gx, gy, gx + bw_link, gy + BH };
+        if (gui_.button("btn-linkstart-exec", link_btn, kLink, 1)) {
+            post_action([this, id] {
+                mj::Value st = hub_->executor_status(id);
+                if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
+                action_run_checked(id);
+            }, "\u94fe\u63a5\u5f00\u59cb");
+        }
+    }
+
+    // 右下角：连接状态 + 连接/断开（MaaHub 扩展能力）
+    {
+        COLORREF dot = connected ? gui_.theme.ok :
+                       conn == "failed" ? gui_.theme.err :
+                       conn == "connecting" ? gui_.theme.warn : gui_.theme.faint;
+        gui_.round_rect({ bottom_bar.right - 150, bottom_bar.top + 19,
+                          bottom_bar.right - 140, bottom_bar.top + 29 }, dot, dot, 5);
         std::wstring st = connected ? L"\u5df2\u8fde\u63a5" :
                           conn == "failed" ? L"\u8fde\u63a5\u5931\u8d25" :
                           conn == "connecting" ? L"\u8fde\u63a5\u4e2d\u2026" : L"\u672a\u8fde\u63a5";
-        gui_.text(bottom_bar.left + 254, bottom_bar.top + 15, st,
+        gui_.text(bottom_bar.right - 132, bottom_bar.top + 17, st,
                   connected ? gui_.theme.ok : gui_.theme.dim, gui_.font_small);
-    }
-    RECT link_btn{ bottom_bar.right - 150, bottom_bar.top + 7,
-                   bottom_bar.right - 16, bottom_bar.bottom - 7 };
-    if (connected && hub_->executor_status(id, 0).get_bool("busy", false)) {
-        if (gui_.button("btn-stop-exec", link_btn, L"\u23f9 \u505c\u6b62", 2)) {
-            post_action([this, id] { hub_->stop_executor(id); }, "\u505c\u6b62");
+        RECT conn_btn{ bottom_bar.right - 96, bottom_bar.top + 10,
+                       bottom_bar.right - 16, bottom_bar.bottom - 10 };
+        if (gui_.button("btn-connect-exec", conn_btn,
+                        connected ? L"\u65ad\u5f00" : L"\u8fde\u63a5", 0)) {
+            if (connected) action_disconnect(id);
+            else action_connect(id);
         }
-    } else if (gui_.button("btn-linkstart-exec", link_btn, L"\U0001f517 Link Start!", 1)) {
-        post_action([this, id] {
-            mj::Value st = hub_->executor_status(id);
-            if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
-            action_run_checked(id);
-        }, "\u94fe\u63a5\u5f00\u59cb");
     }
+
+    // ---------------- 浮层（最上层）----------------
+    if (show_add_task_) draw_add_task_overlay(right_col, id, kind);
+    if (show_post_action_) draw_post_action(right_col, id);
+    draw_task_ctx_menu();
+    draw_rename_box(right_col, id);
 }
+
 
 // ================================================================ 欢迎页
 void MaaHubWindow::page_welcome(RECT content) {
