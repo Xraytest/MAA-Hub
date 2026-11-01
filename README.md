@@ -45,18 +45,46 @@
   协议空间（自动战斗/队伍/模式/成功失败上限/培养道具目标）、赠送干员礼物（干员/数量/只收/全收）、
   拜访好友（备注好友/优先好友/搜索定位）、账号切换（启用账号切换）
 
-- **官方交互语义**
-  - **右键 = 仅生效一次**：左列任务与面板勾选项均为三态（关 / 开 / 仅一次），
-    对应官方 `TaskQueue.CheckBoxesNotSavedAsNull`「该选项右键选中时仅生效一次」；
-    「仅一次」运行后自动复位且不写入配置
-  - **左列拖拽排序**：按住左列任务拖动可调整执行顺序（对应官方 `dd:DragDrop`），
-    「运行勾选」与「Link Start!」按排序后的顺序执行
+- **未定制任务**：类型化通用编辑器按 catalog 声明的 type 渲染
+  （bool → 三态勾选、number → 数字步进、select → cases 单选条、array → 分号列表），
+  标签用官方 description / `option.<key>.label`，cases 用 `option.<O>.cases.<C>.label`
+  （含 UTC↔GMT 跨版本键名归一化）
 
-  其余任务走通用参数编辑器（按 catalog 声明动态生成）。
+### 官方 TaskQueueView.xaml 元素逐项覆盖
 
-- **参数归一化**：面板使用友好键名，下发前由 `Hub::normalize_task_params()` 转换为
-  MaaCore 真实参数（如 Infrast `mode` 0/1/2 → 0/10000/20000、`drones_idx` → `_NotUse/Money/...`、
-  Recruit `confirm_3..6` → `confirm` 数组、`select_tags` → `select` 数组、Mall `blacklist_str` → `blacklist` 数组）
+| 官方元素 | 实现 |
+|---|---|
+| 背景层级 RegionBrushOpacity25 / BorderBrush | ✅ 浅灰白体系，左列独立 210px 卡片 |
+| 左列 `Width=190` + `NoSelectedHighlightListBoxStyle` | ✅ 190px、无选中高亮 |
+| `Common.LabelSequence.Tip`（顺序可拖动） | ✅ 拖拽排序（按执行器持久化） |
+| `TaskItemStatus.InProgress/Completed/Error` | ✅ 任务项背景三色（官方色值） |
+| `TaskQueue.LeftClick/RightClick/TaskSettings` | ✅ 左列提示 + 右键菜单 |
+| `RunOnce/RunFromHere/Copy/Rename/Delete` | ✅ 右键菜单 5 项（含重命名内联编辑） |
+| `CheckBoxesNotSavedAsNull`(+Invert) | ✅ 右键「仅一次」三态 |
+| `AddTask` / `SelectAll` / `InverseSelected` | ✅ 添加新任务浮层 + 全选/反选 |
+| `TaskSettings` 标题 + 来源 | ✅ 右侧头部 |
+| `RunOnce` / 收起展开参数 | ✅ 单次运行 + 展开参数 |
+| `GeneralSettings` / `AdvancedSettings` | ✅ 设置区顶部切换标签（宽 220 右对齐） |
+| `LinkStart` / `Stop` / `WaitAndStop` | ✅ 居中 100×50 按钮组 |
+| `PostAction.Settings` | ✅ 完成后动作 8 项 + 描述 + ⚙ 齿轮 |
+
+### 官方交互语义
+
+- **右键 = 仅生效一次**：左列任务与面板勾选项均为三态（关 / 开 / 仅一次），
+  对应官方 `TaskQueue.CheckBoxesNotSavedAsNull`「该选项右键选中时仅生效一次」；
+  「仅一次」运行后自动复位且不写入配置
+- **左列拖拽排序**：按住左列任务拖动可调整执行顺序（对应官方 `dd:DragDrop`），
+  「运行勾选」与「Link Start!」按排序后的顺序执行
+- **左列右键菜单**：单次运行 / 从此处运行 / 重命名 / 复制 / 移出列表（官方 ContextMenu 5 项）
+- **任务参数持久化**：面板值持久化在 `state\task-params.json`，重启后保留；
+  任务别名在 `state\task-alias.json`，左列与右栏标题同步显示
+
+### 参数归一化
+
+面板使用友好键名，下发前由 `Hub::normalize_task_params()` 转换为 MaaCore 真实参数
+（如 Infrast `mode` 0/1/2 → 0/10000/20000、`drones_idx` → `_NotUse/Money/...`、
+Recruit `confirm_3..6` → `confirm` 数组、`select_tags` → `select` 数组、
+Mall `blacklist_str` → `blacklist` 数组）。
 
 ## 功能
 
