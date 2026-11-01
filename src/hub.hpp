@@ -120,7 +120,8 @@ public:
         std::string state_dir = util::exe_dir() + "\\state";
         util::ensure_dir(state_dir);
         accounts_ = std::make_unique<AccountStore>(state_dir);
-        cores_ = std::make_unique<CoreManager>(state_dir);
+        cores_ = std::make_unique<CoreManager>(state_dir,
+                                               CoreManager::default_cores_root());
         settings_ = std::make_unique<SettingsStore>(state_dir);
         load_executors();
         load_llm_config();
@@ -513,7 +514,7 @@ public:
         for (auto& id : ids) spawn_worker(id);
     }
 
-    // 首次使用时为每个可用核心类型创建一个默认执行器（开箱即用）
+    // 为每个已安装核心类型创建默认执行器（无核心时不创建，由 UI 引导拉取）
     void ensure_default_executors() {
         std::vector<ExecutorEntry> existing = executors();
         bool has_maa = false, has_end = false;

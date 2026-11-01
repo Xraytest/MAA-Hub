@@ -80,31 +80,36 @@ static void crash_log(const char* why) {
 }
 
 // 子进程模式：加载核心 DLL 查询真实版本
+// 注意：必须在核心目录上设置 DLL 搜索目录，否则 MaaCore/MaaFramework 的
+// 同目录依赖（MaaUtils/opencv/onnxruntime）无法解析。
 static int core_version_mode(const std::string& kind, const std::string& path) {
+    std::wstring wpath = util::utf8_to_wide(path);
+    // 顺序很重要：先设默认搜索策略，再注册目录；反序会让 cookie 失效（err=87）
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                             | LOAD_LIBRARY_SEARCH_USER_DIRS);
+    DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(wpath.c_str());
     HMODULE h = nullptr;
-    if (kind == "maa") {
-        std::wstring dll = util::utf8_to_wide(path + "\\MaaCore.dll");
-        h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!h) { printf(""); return 1; }
-        using Fn = const char* (*)();
-        auto f = (Fn)GetProcAddress(h, "AsstGetVersion");
-        if (!f) { FreeLibrary(h); printf(""); return 1; }
-        printf("%s", f());
-        FreeLibrary(h);
-        return 0;
+    std::wstring dll = util::utf8_to_wide(kind == "maa"
+        ? path + "\\MaaCore.dll" : path + "\\maafw\\MaaFramework.dll");
+    h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!h) {
+        fprintf(stderr, "[core-version] LoadLibrary failed: %s (err=%lu)\n",
+                util::wide_to_utf8(dll).c_str(), GetLastError());
+        if (cookie) RemoveDllDirectory(cookie);
+        return 1;
     }
-    if (kind == "maaend") {
-        std::wstring dll = util::utf8_to_wide(path + "\\maafw\\MaaFramework.dll");
-        h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!h) { printf(""); return 1; }
-        using Fn = const char* (*)();
-        auto f = (Fn)GetProcAddress(h, "MaaVersion");
-        if (!f) { FreeLibrary(h); printf(""); return 1; }
-        printf("%s", f());
+    using Fn = const char* (*)();
+    auto f = (Fn)GetProcAddress(h, kind == "maa" ? "AsstGetVersion" : "MaaVersion");
+    if (!f) {
+        fprintf(stderr, "[core-version] export not found (err=%lu)\n", GetLastError());
         FreeLibrary(h);
-        return 0;
+        if (cookie) RemoveDllDirectory(cookie);
+        return 1;
     }
-    return 2;
+    printf("%s", f());
+    FreeLibrary(h);
+    if (cookie) RemoveDllDirectory(cookie);
+    return 0;
 }
 
 int main(int argc, char** argv) {
@@ -126,6 +131,24 @@ int main(int argc, char** argv) {
         else if (a == "--port" && i + 1 < argc) g_port_override = atoi(argv[++i]);
         else if (a == "--core-version" && i + 2 < argc) {
             return core_version_mode(argv[i + 1], argv[i + 2]);
+        } else if (a == "--import-core" && i + 2 < argc) {
+            // 一次性迁移：把系统已有安装复制进 MaaHub 内部 cores 目录
+            std::string kind = argv[++i];
+            std::string path = argv[++i];
+            std::string state = util::exe_dir() + "\\state";
+            util::ensure_dir(state);
+            CoreManager cm(state, CoreManager::default_cores_root());
+            std::string id = cm.import_core(kind, path);
+            if (id.empty()) {
+                printf("IMPORT FAILED: %s 不是有效的 %s 核心目录\n",
+                       path.c_str(), kind.c_str());
+                return 1;
+            }
+            CoreInfo info;
+            cm.get(id, info);
+            printf("IMPORTED %s -> %s (version=%s)\n",
+                   path.c_str(), info.path.c_str(), info.version.c_str());
+            return 0;
         } else if (a == "--worker" && i + 2 < argc) {
             std::string kind = argv[++i];
             std::string cfg_b64 = argv[++i];

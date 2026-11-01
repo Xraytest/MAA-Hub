@@ -6,6 +6,9 @@ build/
 *.ilk
 *.exp
 
+# 内部管理的核心（MaaHub 自己拉取/导入，体积大且可按需重建）
+cores/
+
 # 运行时状态（含账号信息，不提交）
 state/
 state-*/

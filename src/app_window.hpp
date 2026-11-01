@@ -72,6 +72,7 @@ private:
     void action_stop_exec();
     void action_check_update(const std::string& core_id);
     void action_pull_core(const std::string& kind, const std::string& url);
+    void action_pull_latest(const std::string& kind);
     void action_adopt(const std::string& kind);
     void action_save_settings();
 

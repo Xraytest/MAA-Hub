@@ -8,18 +8,23 @@
 
 | 概念 | 说明 |
 |---|---|
-| **核心 (Core)** | 一个可用的 MAA / MaaEnd 程序目录。可「收养」本机已有安装，或由软件**内置拉取/更新**获得 |
-| **执行器 (Executor)** | 一个**独立的原版软件实例**：独立 worker 子进程 + 绑定一个核心 + 可选绑定一个账号。多个执行器可同时运行，实现**多账号并行** |
+| **核心 (Core)** | MAA / MaaEnd 的程序本体，**由 MaaHub 内部管理**：拉取后存放在 `<exe_dir>\cores\<kind>-<version>\`，不依赖、不使用系统中已有的安装 |
+| **执行器 (Executor)** | 一个**独立的原版软件实例**：独立 worker 子进程 + 绑定一个核心 + 可选绑定一个账号。**多个执行器可同时运行，实现多账号并行** |
 | **实例 UI** | 每个执行器都是 MAA 风格界面（任务勾选、⚙ 参数、▶ 立即运行、🔗 链接开始）。MaaEnd 实例同样使用 MAA 风格 UI |
+
+> **核心共享（重要）**：多个执行器可绑定**同一个**核心（同一 `core_id`）。磁盘上只保存一份程序文件，
+> 每个执行器是独立进程各自加载 DLL（Windows 下 DLL 代码段共享、数据段按进程私有），
+> 因此**不会重复拉取/占用磁盘，又能让多个账号同时运行**。
 
 ## 功能
 
 - **执行器管理**：左侧创建/删除/切换执行器；每个执行器独立进程，独立连接游戏窗口
-- **核心管理（内置拉取与更新）**：
+- **核心管理（内置拉取与更新，全部由 MaaHub 内部管理）**：
   - 版本探测：子进程加载 `MaaCore.dll`（AsstGetVersion）/ `MaaFramework.dll`（MaaVersion）权威查询
   - 检查更新：GitHub API 多源回退（直连 → gh-proxy → ghfast → moeyy → Mirror酱 CDK）
-  - 拉取安装：WinHTTP 下载 release zip（带进度）→ Windows 自带 `tar.exe` 解包 → 版本校验 → 登记新核心
-  - 收养本机已有安装（默认自动收养 `D:\Application\MAA`、`D:\Application\MaaEnd`）
+  - 拉取安装：WinHTTP 下载 release zip（带进度）→ Windows 自带 `tar.exe` 解包 → 版本校验
+    → **移入 `<exe_dir>\cores\<kind>-<version>\`** → 登记新核心
+  - 不使用系统中已有的 MAA/MaaEnd 安装；如需迁移可用 `--import-core` 一次性复制进内部目录
   - 默认核心切换；执行器绑定核心被删除时自动回退默认核心
 - **任务目录**：MAA 13 个 AsstApi 任务；MaaEnd 44 个 pipeline 任务（解析 interface.json）
 - **多账号**：账号 CRUD / 启用停用 / 切换；执行器绑定账号后，MAA 自动注入 `account_name`，
@@ -49,10 +54,13 @@ build.bat release     # 或 debug
 build\MaaHub.exe                  # GUI 模式：原生窗口（无任何网页特性）
 build\MaaHub.exe --check          # 干跑自检：加载核心 + 拉起全部执行器
 build\MaaHub.exe --core-version maa "D:\Application\MAA"   # 探测核心版本（子进程）
+build\MaaHub.exe --import-core maa "D:\Application\MAA"    # 一次性迁移：复制到内部 cores 目录
+build\MaaHub.exe --self-test      # 无窗口功能自检
 ```
 
-首次启动自动收养本机安装并为每个类型创建一个默认执行器。
-账号/核心/执行器持久化在 `build\state\`（`accounts.json` / `cores.json` / `executors.json` / `state.json`）。
+首次启动会为每个**已安装的内部核心**创建一个默认执行器；没有核心时 UI 引导去「核心管理」拉取。
+账号/核心/执行器持久化在 `build\state\`（`accounts.json` / `cores.json` / `executors.json` / `state.json`），
+核心本体在 `build\cores\`。
 
 ## 架构
 
@@ -110,13 +118,14 @@ tests/
 
 ## 已验证（真机，不启动游戏）
 
-- `--check` **ALL OK**：3 个执行器并发加载（2× MAA v6.13.0 + 1× MaaEnd v5.15.0-beta.1），任务目录 13/44
-- **执行器全流程**：默认实例自动创建 → UI 新建第 3 个执行器 → 独立实例页 → 持久化 → 重启恢复
-- **核心管理**：版本探测（子进程加载 DLL）、更新检查真实返回 **MAA v6.20.1**（经 gh-proxy 镜像）、
-  下载地址解析正确；删除核心后执行器自动回退默认核心仍 ALL OK
-- **MaaEnd 实例同样为 MAA 风格 UI**，44 个任务正常列出
-- 悬空指针修复：快照整体替换不再导致 UI 冻结
-- GUI 线程零阻塞：catalog 走快照缓存
+- `--check` **ALL OK**：5 个执行器并发加载（3×MAA v6.13.0 + 2×MaaEnd v5.15.0-beta.1），
+  **磁盘上仍只有 2 份核心**（多执行器共享同一 `core_id`，不重复拉取）
+- **核心内部管理**：`--import-core` 把安装复制进 `build\cores\<kind>-<version>\`，
+  之后完全不引用系统路径；远端（192.168.1.12）同样验证通过
+- 更新检查真实返回 **MAA v6.20.1**（经 gh-proxy 镜像），下载地址解析正确
+- 设置：代理串生成（`socks=host:port` / `http=host:port`）、CDK、LLM 配置落盘
+- 性能：catalog 30s TTL 缓存、status 0.4s TTL 缓存，快照平均耗时 0ms
+- MaaEnd 实例同样为 MAA 风格 UI，44 个任务正常列出
 
 ## 未验证（需启动游戏 / 需 CDK）
 
