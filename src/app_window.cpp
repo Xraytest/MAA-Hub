@@ -1290,6 +1290,31 @@ void MaaHubWindow::page_executor(RECT content) {
         }
         ry += 34;
 
+        // 官方：任务设置区顶部有「常规设置 | 高级设置」切换标签
+        // （ButtonGroup Width=220 右对齐；高级设置仅在任务有参数时可用）
+        bool has_params = false;
+        for (auto& t : tasks) {
+            if (t.get_str("name", "") != sel_task) continue;
+            if (auto* ps = t.find("params"); ps && ps->is_array() && !ps->items().empty()) {
+                has_params = true;
+            }
+            break;
+        }
+        if (has_params) {
+            const int TG_W = 220;
+            int tg_x = right_col.right - 16 - TG_W;
+            RECT tg_general{ tg_x, ry, tg_x + TG_W / 2, ry + 26 };
+            RECT tg_adv{ tg_x + TG_W / 2, ry, tg_x + TG_W, ry + 26 };
+            int gh = gui_.option_strip(("tg-" + id + "-" + sel_task).c_str(),
+                                       { tg_x, ry, tg_x + TG_W, ry + 26 },
+                                       { L"\u5e38\u89c4\u8bbe\u7f6e", L"\u9ad8\u7ea7\u8bbe\u7f6e" },
+                                       advanced_view_ ? 1 : 0);
+            if (gh == 0) advanced_view_ = false;
+            if (gh == 1) advanced_view_ = true;
+            (void)tg_general; (void)tg_adv;
+            ry += 32;
+        }
+
         TaskUiState& ui = task_ui_[id][sel_task];
         // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
         {
