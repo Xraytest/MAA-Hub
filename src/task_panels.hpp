@@ -375,7 +375,134 @@ inline bool panel_end_friends(PanelCtx& c) {
     return true;
 }
 
-inline bool draw_task_panel(PanelCtx& c) {
+// ---- Depot：仓库识别（库存保持）----
+inline bool panel_depot(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u4efb\u52a1\u884c\u4e3a");
+    c.y += 20;
+    pc_check(c, "update_before_start", L"\u4efb\u52a1\u5f00\u59cb\u524d\u66f4\u65b0\u5e93\u5b58\u6570\u636e");
+    pc_check(c, "skip_during_activity", L"\u6d3b\u52a8\u671f\u95f4\u8df3\u8fc7");
+    pc_check(c, "skip_during_resource_collection",
+             L"\u8d44\u6e90\u6536\u96c6\u9650\u65f6\u5168\u5929\u5f00\u653e\u671f\u95f4\u8df3\u8fc7");
+    pc_check(c, "only_first_insufficient_plan", L"\u4ec5\u6267\u884c\u7b2c\u4e00\u4e2a\u5e93\u5b58\u4e0d\u8db3\u7684\u8ba1\u5212");
+    pc_check(c, "sort_by_progress", L"\u6309\u5e93\u5b58\u8fbe\u6210\u7387\u6392\u5e8f\u6267\u884c");
+    pc_check(c, "count_dual_chip_as_chip_pack", L"\u82af\u7247\u7ec4\u8ba1\u5165\u53cc\u82af\u7247\u6298\u7b97");
+    c.y += 6;
+    c.g.group_title(c.x, c.y, L"\u5236\u84c4\u4e0e\u7269\u6599");
+    c.y += 20;
+    pc_check(c, "use_medicine", L"\u4f7f\u7528\u836f\u5242", L"\u8be5\u9009\u9879\u53f3\u952e\u9009\u4e2d\u65f6\u4ec5\u751f\u6548\u4e00\u6b21");
+    pc_check(c, "use_stone", L"\u4f7f\u7528\u6e90\u77f3", L"\u8be5\u9009\u9879\u4ec5\u751f\u6548\u4e00\u6b21");
+    return true;
+}
+
+// ---- OperBox：干员识别 ----
+inline bool panel_operbox(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u8bc6\u522b\u8303\u56f4");
+    c.y += 20;
+    pc_check(c, "update_all", L"\u5168\u91cf\u8bc6\u522b");
+    pc_check(c, "update_elite", L"\u7ecbe\u82f1\u5316");
+    pc_check(c, "update_skill", L"\u6280\u80fd\u7b49\u7ea7");
+    pc_check(c, "update_module", L"\u6a21\u7ec4");
+    return true;
+}
+
+// ---- Reclamation：生息演算 ----
+inline bool panel_reclamation(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u6f14\u7b97");
+    c.y += 20;
+    pc_text(c, "theme", L"\u4e3b\u9898", L"\u5982 Tales");
+    pc_number(c, "mode", L"\u6a21\u5f0f", 0, 1, 0, 9);
+    return true;
+}
+
+// ---- Copilot：自动抄作业 ----
+inline bool panel_copilot(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u4f5c\u4e1a");
+    c.y += 20;
+    pc_text(c, "copilot_file", L"\u4f5c\u4e1a\u6587\u4ef6", L"JSON \u6587\u4ef6\u8def\u5f84");
+    pc_check(c, "loop", L"\u5faa\u73af\u6267\u884c");
+    return true;
+}
+
+// ---- Custom：自定任务 ----
+inline bool panel_custom(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u4efb\u52a1\u540d\u5217\u8868");
+    c.y += 20;
+    pc_text(c, "task_names", L"\u4efb\u52a1\u540d", L"\u591a\u4e2a\u7528\u9017\u53f7\u5206\u9694");
+    return true;
+}
+
+// ---- CloseDown：关闭游戏 ----
+inline bool panel_closedown(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u5173\u95ed");
+    c.y += 20;
+    pc_check(c, "client_type", L"\u6309\u5ba2\u6237\u7aef\u7c7b\u578b\u5173\u95ed");
+    return true;
+}
+
+// ---- 通用参数编辑器（未定制任务的回退）----
+// 按 catalog 声明的类型渲染对应控件，与官方面板视觉一致：
+//   bool -> 三态勾选（支持右键仅一次）；number -> 数字步进；
+//   array -> 分号分隔文本框；其他 -> 文本框
+// 标签用官方 description（MAA catalog / MaaEnd locale 均已中文化）
+inline bool panel_generic(PanelCtx& c, const std::vector<mj::Value>* specs) {
+    c.g.group_title(c.x, c.y, L"\u9ad8\u7ea7\u8bbe\u7f6e");
+    c.y += 20;
+    if (!specs || specs->empty()) {
+        c.g.tip_line(c.x, c.y, c.right, L"\u8be5\u4efb\u52a1\u65e0\u53ef\u914d\u7f6e\u53c2\u6570");
+        c.y += 20;
+        return true;
+    }
+    for (auto& p : *specs) {
+        std::string key = p.get_str("name", "");
+        if (key.empty()) continue;
+        std::string type = p.get_str("type", "string");
+        std::string desc = p.get_str("description", "");
+        std::wstring label = desc.empty() ? gui::widen(key) : gui::widen(desc);
+        bool required = p.get_bool("required", false);
+        std::wstring tip;
+        if (required) tip = L"\u5fc5\u586b\u9879";
+        if (p.has("default")) {
+            std::wstring d = L"\u9ed8\u8ba4 " + gui::widen(mj::Value::dump(p["default"]));
+            tip = tip.empty() ? d : (tip + L" \u00b7 " + d);
+        }
+        if (type == "bool") {
+            pc_check(c, key, label, tip);
+        } else if (type == "number") {
+            pc_number(c, key, label, (int)p.get_int("default", 0), 1, 0, 999999);
+            if (!tip.empty()) { c.g.tip_line(c.x + 24, c.y, c.right, tip); c.y += 16; }
+        } else if (type == "array") {
+            std::string cur;
+            auto it = c.params.find(key);
+            if (it != c.params.end() && it->second.is_array()) {
+                for (auto& e : it->second.items()) {
+                    if (!cur.empty()) cur += ";";
+                    cur += e.as_string();
+                }
+            }
+            RECT r{ c.x, c.y, c.x + 460, c.y + 26 };
+            c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, cur,
+                           L"\u591a\u4e2a\u7528\u5206\u53f7\u5206\u9694");
+            mj::Value arr = mj::Value::array();
+            std::string part;
+            for (char ch : cur + ";") {
+                if (ch == ';') {
+                    if (!part.empty()) { arr.push(part); part.clear(); }
+                } else if (ch != ' ') {
+                    part += ch;
+                }
+            }
+            c.params[key] = arr;
+            c.y += 32;
+            if (!tip.empty()) { c.g.tip_line(c.x + 24, c.y, c.right, tip); c.y += 16; }
+        } else {
+            pc_text(c, key, label, tip);
+            if (!tip.empty()) { c.g.tip_line(c.x + 24, c.y, c.right, tip); c.y += 16; }
+        }
+    }
+    return true;
+}
+
+inline bool draw_task_panel(PanelCtx& c, const std::vector<mj::Value>* specs = nullptr) {
     if (c.task == "StartUp") return panel_startup(c);
     if (c.task == "Fight") return panel_fight(c);
     if (c.task == "Infrast") return panel_infrast(c);
@@ -384,12 +511,20 @@ inline bool draw_task_panel(PanelCtx& c) {
     if (c.task == "Award") return panel_award(c);
     if (c.task == "Roguelike") return panel_roguelike(c);
     if (c.task == "AccountSwitch") return panel_account_switch(c);
+    if (c.task == "Depot") return panel_depot(c);
+    if (c.task == "OperBox") return panel_operbox(c);
+    if (c.task == "Reclamation") return panel_reclamation(c);
+    if (c.task == "Copilot") return panel_copilot(c);
+    if (c.task == "Custom") return panel_custom(c);
+    if (c.task == "CloseDown") return panel_closedown(c);
     if (c.task == "DailyRewards") return panel_end_daily(c);
     if (c.task == "AutoCollect") return panel_end_collect(c);
     if (c.task == "ProtocolSpace") return panel_end_protocol(c);
     if (c.task == "GiftOperator") return panel_end_gift(c);
     if (c.task == "VisitFriends") return panel_end_friends(c);
     return false;
+    return panel_generic(c, specs);
+
 }
 
 } // namespace hub
