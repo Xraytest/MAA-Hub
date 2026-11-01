@@ -139,6 +139,8 @@ private:
     std::string drag_task_;      // 正在拖拽的任务名
     int drag_y_ = -1;            // 拖拽中的鼠标 y
     int drop_before_ = -1;       // 插入位置索引
+    // 任务设置区视图切换：false=常规设置 true=高级设置（官方 ButtonGroup）
+    bool advanced_view_ = false;
     // 任务项右键菜单（官方 ContextMenu）
     bool ctx_menu_open_ = false;
     int ctx_menu_x_ = 0, ctx_menu_y_ = 0;
