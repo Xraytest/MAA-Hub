@@ -7,8 +7,25 @@ namespace hub {
 
 using gui::Input;
 
-MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config)
-    : hInst_(hInst), config_(std::move(config)) {
+// 最小 CRC32（PNG 用）
+static uint32_t crc32_calc(const uint8_t* d, size_t n) {
+    static uint32_t table[256];
+    static bool init = false;
+    if (!init) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        init = true;
+    }
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) c = table[(c ^ d[i]) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config, bool offscreen)
+    : hInst_(hInst), config_(std::move(config)), offscreen_(offscreen) {
     hub_ = std::make_unique<Hub>(config_);
 }
 
@@ -38,25 +55,151 @@ bool MaaHubWindow::create() {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    int w = 1500, h = 950;
+    int w = 1280, h = 800;      // MAA 官方最小窗口 800x600
     int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
     RECT rc{ 0, 0, w, h };
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    DWORD style = offscreen_ ? (WS_POPUP & ~WS_VISIBLE) : WS_OVERLAPPEDWINDOW;
     hwnd_ = CreateWindowExW(
         0, L"MaaHubMainWindow", L"MaaHub — MAA / MaaEnd 统一管理器",
-        WS_OVERLAPPEDWINDOW,
+        style,
         (sx - w) / 2, (sy - h) / 2, rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, hInst_, nullptr);
     if (!hwnd_) return false;
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, (LONG_PTR)this);
 
     gui_.init_fonts();
-    ShowWindow(hwnd_, SW_SHOW);
+    if (offscreen_) {
+        // 移到屏幕外并保持隐藏：窗口始终不可见，仅供离屏渲染
+        SetWindowPos(hwnd_, nullptr, -32000, -32000, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(hwnd_, SW_HIDE);
+    } else {
+        ShowWindow(hwnd_, SW_SHOW);
+    }
     UpdateWindow(hwnd_);
     SetTimer(hwnd_, TIMER_REFRESH, 250, nullptr);
 
     running_ = true;
     backend_ = std::thread([this] { backend_loop(); });
+    return true;
+}
+
+// 离屏渲染：把指定页面画进内存 DC 并保存为 PNG（窗口保持隐藏）。
+// 内置最小 PNG 编码器（zlib stored block + CRC32），零第三方依赖。
+bool MaaHubWindow::render_to_file(const std::string& page, const std::string& png_path) {
+    page_ = page;
+    if (page == "executor" && selected_exec_.empty()) {
+        auto ids = hub_->executors();
+        if (!ids.empty()) selected_exec_ = ids[0].id;
+    }
+    if (char* dbg = getenv("MAAHUB_DEBUG_RENDER")) {
+        // 注意：catalog_of() 内部也要拿 snap_mtx_，绝不能在外层持锁时调用（不可重入）
+        std::vector<mj::Value> t = catalog_of("maaend");
+        {
+            std::lock_guard<std::mutex> lk(snap_mtx_);
+            fprintf(stderr, "[render] page_=%s selected=%s\n",
+                    page_.c_str(), selected_exec_.c_str());
+            if (auto* e = snap_.find("executors"); e && e->is_array()) {
+                fprintf(stderr, "[render] snapshot executors=%zu\n", e->items().size());
+                for (auto& x : e->items()) {
+                    auto* cc = x.find("catalog");
+                    fprintf(stderr, "[render]   %s kind=%s catalog=%zu\n",
+                            x.get_str("id", "").c_str(), x.get_str("kind", "").c_str(),
+                            (cc && cc->is_array()) ? cc->items().size() : 0);
+                }
+            }
+        }
+        fprintf(stderr, "[render] catalog_of(maaend)=%zu\n", t.size());
+        if (!t.empty()) {
+            fprintf(stderr, "[render]   first task name=%s display=%ls\n",
+                    t[0].get_str("name", "").c_str(),
+                    display_name("maaend", t[0].get_str("name", "")).c_str());
+        }
+    }
+    const int W = 1280, H = 800;
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    void* bits = nullptr;
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = W;
+    bi.bmiHeader.biHeight = -H;      // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    HBITMAP bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, screen);
+    if (!bmp || !bits) return false;
+    HGDIOBJ old_bmp = SelectObject(mem, bmp);
+
+    HDC save_dc = mem_dc_;
+    HBITMAP save_bmp = mem_bmp_;
+    void* save_bits = mem_bits_;
+    SIZE save_size = mem_size_;
+    mem_dc_ = mem; mem_bmp_ = bmp; mem_bits_ = bits; mem_size_ = { W, H };
+
+    RECT rc{ 0, 0, W, H };
+    on_paint(mem_dc_, rc);
+
+    mem_dc_ = save_dc; mem_bmp_ = save_bmp; mem_bits_ = save_bits; mem_size_ = save_size;
+    SelectObject(mem, old_bmp);
+
+    const uint8_t* src = (const uint8_t*)bits;
+    std::vector<uint8_t> raw;
+    raw.reserve((size_t)H * (W * 3 + 1));
+    for (int y = 0; y < H; ++y) {
+        raw.push_back(0);
+        const uint8_t* row = src + (size_t)y * W * 4;
+        for (int x = 0; x < W; ++x) {
+            raw.push_back(row[x * 4 + 2]);
+            raw.push_back(row[x * 4 + 1]);
+            raw.push_back(row[x * 4]);
+        }
+    }
+    auto be32 = [](uint32_t v, std::vector<uint8_t>& out) {
+        out.push_back((v >> 24) & 0xFF); out.push_back((v >> 16) & 0xFF);
+        out.push_back((v >> 8) & 0xFF);  out.push_back(v & 0xFF);
+    };
+    auto adler = [](const std::vector<uint8_t>& d) {
+        uint32_t a = 1, b = 0;
+        for (uint8_t byte : d) { a = (a + byte) % 65521; b = (b + a) % 65521; }
+        return (b << 16) | a;
+    };
+    std::vector<uint8_t> z;
+    z.push_back(0x78); z.push_back(0x01);
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t n = raw.size() - pos;
+        if (n > 65535) n = 65535;
+        bool last = (pos + n >= raw.size());
+        z.push_back(last ? 1 : 0);
+        z.push_back(n & 0xFF); z.push_back((n >> 8) & 0xFF);
+        z.push_back((~n) & 0xFF); z.push_back(((~n) >> 8) & 0xFF);
+        z.insert(z.end(), raw.begin() + pos, raw.begin() + pos + n);
+        pos += n;
+    }
+    be32(adler(raw), z);
+
+    std::vector<uint8_t> png;
+    const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 13, 10, 0x1A, 10 };
+    png.insert(png.end(), sig, sig + 8);
+    auto chunk = [&](const char* type, const std::vector<uint8_t>& data) {
+        std::vector<uint8_t> body(type, type + 4);
+        body.insert(body.end(), data.begin(), data.end());
+        be32((uint32_t)data.size(), png);
+        png.insert(png.end(), body.begin(), body.end());
+        be32(crc32_calc(body.data(), body.size()), png);
+    };
+    std::vector<uint8_t> ihdr;
+    be32((uint32_t)W, ihdr); be32((uint32_t)H, ihdr);
+    ihdr.push_back(8); ihdr.push_back(2); ihdr.push_back(0);
+    ihdr.push_back(0); ihdr.push_back(0);
+    chunk("IHDR", ihdr);
+    chunk("IDAT", z);
+    chunk("IEND", {});
+    util::write_file(png_path, std::string(png.begin(), png.end()));
+    DeleteObject(bmp);
+    DeleteDC(mem);
     return true;
 }
 
@@ -222,11 +365,16 @@ void MaaHubWindow::draw_sidebar(RECT r) {
     gui_.fill(r, gui_.theme.panel);
     gui_.fill({ r.right - 1, r.top, r.right, r.bottom }, gui_.theme.border);
 
-    gui_.text(r.left + 16, r.top + 14, L"🎮 MaaHub", gui_.theme.text, gui_.font_title);
-    gui_.text(r.left + 16, r.top + 40, L"统一管理器", gui_.theme.dim, gui_.font_small);
+    // 顶部标题条（Primary 渐变，对应 MAA TitleBrush）
+    RECT head{ r.left, r.top, r.right, r.top + 52 };
+    gui_.gradient_rect(head, gui_.theme.primary, gui_.theme.primary_dark);
+    RECT save0 = gui_.clip();
+    gui_.text(r.left + 14, r.top + 10, L"MaaHub", RGB(255, 255, 255), gui_.font_title);
+    gui_.text(r.left + 14, r.top + 30, L"统一管理器", RGB(230, 238, 255), gui_.font_small);
+    (void)save0;
 
     // ---- 执行器列表 ----
-    int y = r.top + 68;
+    int y = r.top + 64;
     gui_.text(r.left + 14, y, L"执行器（实例）", gui_.theme.dim, gui_.font_small);
     // 原来只有 32px 宽，"＋ 新建" 需要 46px，文本会溢出按钮；
     // 放宽到 58px（左边界 180，仍远在标题文字右侧，不会重叠）
@@ -250,8 +398,8 @@ void MaaHubWindow::draw_sidebar(RECT r) {
         bool hov = gui_.input().mouse.x >= ir.left && gui_.input().mouse.x < ir.right
                 && gui_.input().mouse.y >= ir.top && gui_.input().mouse.y < ir.bottom;
         bool sel = selected_exec_ == id;
-        if (sel) gui_.round_rect(ir, gui_.theme.primary_light, gui_.theme.primary, 8);
-        else if (hov) gui_.round_rect(ir, gui_.theme.hover, gui_.theme.border, 8);
+        if (sel) gui_.round_rect(ir, gui_.theme.primary_light, gui_.theme.primary, 4);
+        else if (hov) gui_.round_rect(ir, gui_.theme.hover, gui_.theme.border, 4);
         else gui_.round_rect(ir, gui_.theme.panel, gui_.theme.border, 8);
 
         gui_.text(ir.left + 8, ir.top + 5, kind == "maa" ? L"⚔️" : L"🛰️", gui_.theme.text, gui_.font);
@@ -341,8 +489,8 @@ void MaaHubWindow::draw_sidebar(RECT r) {
         bool hov = gui_.input().mouse.x >= ir.left && gui_.input().mouse.x < ir.right
                 && gui_.input().mouse.y >= ir.top && gui_.input().mouse.y < ir.bottom;
         bool active = page_ == n.page;
-        if (active) gui_.round_rect(ir, gui_.theme.primary_light, gui_.theme.primary, 8);
-        else if (hov) gui_.round_rect(ir, gui_.theme.hover, gui_.theme.border, 8);
+        if (active) gui_.round_rect(ir, gui_.theme.primary_light, gui_.theme.primary, 4);
+        else if (hov) gui_.round_rect(ir, gui_.theme.hover, gui_.theme.border, 4);
         else gui_.round_rect(ir, gui_.theme.panel, gui_.theme.panel, 8);
         gui_.text(ir.left + 12, ir.top + 9, n.icon, gui_.theme.text, gui_.font);
         gui_.text(ir.left + 40, ir.top + 9, n.label,
@@ -392,7 +540,101 @@ void MaaHubWindow::draw_topbar(RECT r) {
     }
 }
 
-// ================================================================ 实例页（MAA 风格）
+// MAA 官方任务显示名（取自 MaaWpfGui/Res/Localizations/zh-cn.xaml 的 TaskQueue.Task.*）
+std::wstring MaaHubWindow::display_name(const std::string& kind, const std::string& task) {
+    if (kind == "maa") {
+        if (task == "StartUp") return L"\u5f00\u59cb\u5524\u9192";
+        if (task == "CloseDown") return L"\u5173\u95ed\u6e38\u620f";
+        if (task == "Fight") return L"\u7406\u667a\u4f5c\u6218";
+        if (task == "Infrast") return L"\u57fa\u5efa\u6362\u73ed";
+        if (task == "Recruit") return L"\u81ea\u52a8\u516c\u62db";
+        if (task == "Mall") return L"\u4fe1\u7528\u6536\u652f";
+        if (task == "Award") return L"\u9886\u53d6\u5956\u52b1";
+        if (task == "Roguelike") return L"\u81ea\u52a8\u8089\u9e54";
+        if (task == "Copilot") return L"\u81ea\u52a8\u6284\u4f5c\u4e1a";
+        if (task == "Depot") return L"\u4ed3\u5e93\u8bc6\u522b";
+        if (task == "OperBox") return L"\u5e72\u5458\u8bc6\u522b";
+        if (task == "Reclamation") return L"\u751f\u606f\u6f14\u7b97";
+        if (task == "Custom") return L"\u81ea\u5b9a\u4efb\u52a1";
+    } else {
+if (task == "AccountSwitch") return L"🔑自动切换账号";
+        if (task == "AdbAutoFightTest") return L"🧪战斗测试";
+        if (task == "AeroSalvage") return L"🎈浮空回收";
+        if (task == "AndroidOpenGame") return L"🎮打开游戏（安卓端）";
+        if (task == "AutoCollect") return L"🧺自动采集";
+        if (task == "AutoDeliveryPreferZipline") return L"送货时优先使用滑索";
+        if (task == "AutoDeliveryRiskAcknowledgement") return L"我已知悉可能的后果";
+        if (task == "AutoEcoFarm") return L"🌾生态农场";
+        if (task == "AutoEssence") return L"🎱基质刷取";
+        if (task == "AutoSell") return L"💰售卖弹性物资";
+        if (task == "AutoStockStaple") return L"🏪购买稳定物资";
+        if (task == "AutoStockpile") return L"📦自动囤货";
+        if (task == "BakerEntry") return L"💬会话消息嘴替";
+        if (task == "BatchAddFriends") return L"👥批量添加好友";
+        if (task == "BatchDeleteFriends") return L"🗑️批量删除好友";
+        if (task == "BatchUseDetector") return L"🧭批量探测器";
+        if (task == "ClaimSimulationRewards") return L"📦领取模拟空间奖励";
+        if (task == "CloseGame") return L"❌关闭游戏（安卓端）";
+        if (task == "CloseGamePC") return L"❌关闭游戏（PC）";
+        if (task == "Crafting") return L"🧪简易制作";
+        if (task == "CreditShopping") return L"🛍️信用点购物";
+        if (task == "DailyRewards") return L"📅日常奖励领取";
+        if (task == "DecomposeWeaponEssence") return L"分解武器基质";
+        if (task == "DeliveryJobs") return L"🚚转交委托";
+        if (task == "DevTest") return L"🧪开发测试";
+        if (task == "DijiangRewards") return L"🎁基建任务";
+        if (task == "EnvironmentMonitoring") return L"🌿环境监测";
+        if (task == "EssenceFilter") return L"🔒基质筛选锁定";
+        if (task == "GearAssembly") return L"🔧装备制造";
+        if (task == "GiftOperator") return L"🎁赠送干员礼物";
+        if (task == "ImportBluePrints") return L"📐一键导入蓝图";
+        if (task == "IntelArchive") return L"📁情报档案库";
+        if (task == "ItemTransfer") return L"🐌库存转移";
+        if (task == "LaunchGameLinux") return L"启动游戏（Linux）";
+        if (task == "LevelUpOperator") return L"📈干员升级";
+        if (task == "OutpostTrading") return L"🛒据点交易";
+        if (task == "ProtocolSpace") return L"⚔️协议空间";
+        if (task == "PullCountCalculator") return L"🧮抽数计算";
+        if (task == "PuzzleSolver") return L"🧩解拼图";
+        if (task == "ReadAllWiki") return L"📖百科已读";
+        if (task == "RealTimeTask") return L"🤖实时开荒辅助";
+        if (task == "ReceiveProdManual") return L"🌾简制手册领取";
+        if (task == "ResourceRecycleStation") return L"🦉资源回收站";
+        if (task == "SanityExtractor") return L"💾萃取理智";
+        if (task == "SeizeDeliveryJobs") return L"🏍️抢委托送货";
+        if (task == "SeizeDeliveryJobsCommissionSource") return L"委托接收点";
+        if (task == "SeizeDeliveryJobsDeliveryPointOriginLodespring") return L"矿脉源区送货点";
+        if (task == "SeizeDeliveryJobsDeliveryPointOriginiumSciencePark") return L"源石研究园送货点";
+        if (task == "SeizeDeliveryJobsDeliveryPointPowerPlateau") return L"供能高地送货点";
+        if (task == "SeizeDeliveryJobsDeliveryPointTestArea") return L"试验园区送货点";
+        if (task == "SeizeDeliveryJobsDeliveryPointWulingCity") return L"武陵城送货点";
+        if (task == "SeizeDeliveryJobsPostProcessing") return L"抢单结束后的操作";
+        if (task == "SeizeDeliveryJobsRefreshLimit") return L"抢单刷新次数上限";
+        if (task == "SeizeDeliveryJobsRepeatCount") return L"送货次数";
+        if (task == "SeizeDeliveryJobsReward") return L"接取价格不低于：";
+        if (task == "SeizeDeliveryJobsSpecifyDeliveryPoint") return L"指定送货点";
+        if (task == "SharedZiplineDelete") return L"✂️删除共享滑索";
+        if (task == "SimpleProductionBatch") return L"🔨批量简易制作";
+        if (task == "StashBackpack") return L"🎒存放背包";
+        if (task == "SwitchTeam") return L"🔄切换编队";
+        if (task == "TrialOfSwordmancy") return L"🗡️选剑演武";
+        if (task == "UmbralMonument") return L"🗿影拓丰碑";
+        if (task == "VisitFriends") return L"🤝拜访好友";
+        if (task == "WeaponUpgrade") return L"🔫升级武器";
+        if (task == "WebEvent202605") return L"🎁自动共贺庆典网页活动";
+        if (task == "ZiplineImport") return L"🚡导入/更新滑索坐标";
+    }
+    return gui::widen(task);
+}
+
+// MaaEnd 内部入口任务（官方 GUI 不展示，无 label）
+inline bool maaend_hidden_task(const std::string& t) {
+    return t == "SellProduct" || t == "SimpleProductionBatchStart";
+}
+
+// ================================================================ 实例页（MAA 1:1 布局）
+// 复刻 MAA 官方 TaskQueueView：左列 190px 任务列表 + 右侧任务设置 + 底部控制栏。
+// 配色/圆角(4)/控件高(28)/外边距(20) 对齐 HandyControl Light 主题。
 void MaaHubWindow::page_executor(RECT content) {
     mj::Value ex;
     if (!find_executor(selected_exec_, ex)) { page_welcome(content); return; }
@@ -400,135 +642,214 @@ void MaaHubWindow::page_executor(RECT content) {
     std::string kind = ex.get_str("kind", "");
     std::string conn = ex.get_str("conn", "unknown");
     std::string version = ex.get_str("version", "");
-    std::string last_error = ex.get_str("last_error", "");
     std::string acc_label = ex.get_str("account_label", "");
     bool daily_done = ex.get_bool("daily_done_today", false);
     int64_t task_count = ex.get_int("task_count", 0);
-    std::string core_name = ex.get_str("core_name", "");
     std::string core_version = ex.get_str("core_version", "");
 
-    std::vector<mj::Value> tasks = catalog_of(kind);
-
-    // ---- 信息条 ----
-    RECT info{ content.left, content.top, content.right, content.top + 64 };
-    gui_.panel(info);
-    int ix = info.left + 16;
-    COLORREF def_col = gui_.theme.text;
-    auto field = [&](const std::wstring& k, const std::wstring& v, COLORREF c) {
-        gui_.text(ix, info.top + 10, k, gui_.theme.dim, gui_.font_small);
-        gui_.text(ix, info.top + 30, v, c, gui_.font);
-        ix += 150;
-    };
-    field(L"版本", gui::widen(version.empty() ? "-" : version), def_col);
-    field(L"核心", gui::widen(core_name + (core_version.empty() ? "" : " " + core_version)), def_col);
-    field(L"绑定账号", acc_label.empty() ? L"未绑定" : gui::widen(acc_label), def_col);
-    field(L"今日日常", daily_done ? L"✅ 已完成" : L"⏳ 未完成",
-          daily_done ? gui_.theme.ok : gui_.theme.warn);
-    field(L"任务数", std::to_wstring(task_count), def_col);
-    field(L"连接", gui::widen(conn == "connected" ? "已连接" :
-                              conn == "failed" ? "失败" :
-                              conn == "connecting" ? "连接中" :
-                              conn == "disconnected" ? "未连接" : "未知"),
-          conn == "connected" ? gui_.theme.ok : conn == "failed" ? gui_.theme.err : gui_.theme.dim);
-    if (!last_error.empty()) {
-        RECT save = gui_.clip();
-        gui_.text_clipped({ info.left + 16, info.bottom - 22, info.right - 16, info.bottom - 4 },
-                          L"⚠ " + gui::widen(last_error), gui_.theme.err, gui_.font_small);
-        (void)save;
+    std::vector<mj::Value> all_tasks = catalog_of(kind);
+    std::vector<mj::Value> tasks;   // 过滤内部入口任务
+    for (auto& t : all_tasks) {
+        if (kind == "maaend" && maaend_hidden_task(t.get_str("name", ""))) continue;
+        tasks.push_back(t);
     }
 
-    // ---- 工具栏 ----
-    int ty = info.bottom + 12;
-    RECT tb1{ content.left, ty, content.left + 130, ty + 30 };
-    RECT tb2{ content.left + 140, ty, content.left + 210, ty + 30 };
-    RECT tb3{ content.left + 220, ty, content.left + 290, ty + 30 };
-    if (gui_.button("tb-run", tb1, L"▶ 运行勾选", 1)) action_run_checked(id);
-    if (gui_.button("tb-all", tb2, L"全选", 0)) {
+    // 外框：Margin 20 + 白色 Region 卡片 + 圆角 4
+    RECT frame{ content.left, content.top, content.right, content.bottom };
+    gui_.round_rect(frame, gui_.theme.panel, gui_.theme.border, 4);
+
+    const int LEFT_W = 190;                 // MAA TaskList Width=190
+    const int BAR_H = 44;
+    RECT left_col{ frame.left, frame.top, frame.left + LEFT_W, frame.bottom - BAR_H };
+    RECT right_col{ frame.left + LEFT_W, frame.top, frame.right, frame.bottom - BAR_H };
+    RECT bottom_bar{ frame.left, frame.bottom - BAR_H, frame.right, frame.bottom };
+
+    gui_.fill({ left_col.right, left_col.top, left_col.right + 1, left_col.bottom },
+              gui_.theme.border);
+
+    // ---------------- 左列：任务列表 ----------------
+    gui_.text(left_col.left + 12, left_col.top + 12, L"\u4efb\u52a1\u5217\u8868",
+              gui_.theme.text, gui_.font_bold);
+    gui_.text(left_col.left + 12, left_col.top + 32,
+              L"\u5de6\u952e\u8bbe\u7f6e \u00b7 \u52fe\u9009\u542f\u7528",
+              gui_.theme.faint, gui_.font_small);
+
+    int hy = left_col.top + 52;
+    RECT sel_all{ left_col.left + 12, hy, left_col.left + 72, hy + 22 };
+    RECT sel_none{ left_col.left + 78, hy, left_col.left + 138, hy + 22 };
+    if (gui_.button("tb-all", sel_all, L"\u5168\u9009", 0)) {
         for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = true;
     }
-    if (gui_.button("tb-none", tb3, L"全不选", 0)) {
+    if (gui_.button("tb-none", sel_none, L"\u5168\u4e0d\u9009", 0)) {
         for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = false;
     }
-    {
-        RECT save = gui_.clip();
-        gui_.text_clipped({ content.right - 420, ty + 8, content.right, ty + 26 },
-                          L"勾选复选框启用任务，⚙ 展开参数，▶ 立即运行",
-                          gui_.theme.dim, gui_.font_small);
-        (void)save;
-    }
 
-    // ---- 任务列表（MAA 风格）----
-    int list_top = ty + 40;
-    int item_h = 46;
+    int list_top = hy + 30;
+    int item_h = 32;
+    int n = (int)tasks.size();
     gui_.begin_scroll(("tasks-" + id).c_str(),
-                      { content.left, list_top, content.right, content.bottom },
-                      (int)tasks.size() * item_h + 16, scroll_["tasks-" + id]);
-    int y = list_top + 6 - (int)scroll_["tasks-" + id];
-    for (auto& t : tasks) {
+                      { left_col.left, list_top, left_col.right, left_col.bottom - 6 },
+                      n * item_h + 8, scroll_["tasks-" + id]);
+    int y = list_top + 4 - (int)scroll_["tasks-" + id];
+    for (int ti = 0; ti < n; ++ti) {
+        auto& t = tasks[ti];
         std::string name = t.get_str("name", "");
         TaskUiState& ui = task_ui_[id][name];
-        std::wstring desc = gui::widen(t.get_str("description", ""));
         if (y + item_h < list_top) { y += item_h; continue; }
-        // 本行实际绘制内容的底边（item 卡片 + 展开时的参数面板），
-        // 用滚动裁剪区判断，避免末行被裁一半（原来是拿 content.bottom 比较）
-        int row_content_h = item_h - 6;
-        if (ui.open) {
-            int ph = 28;
-            if (auto* ps0 = t.find("params"); ps0 && ps0->is_array() && !ps0->items().empty())
-                ph = (int)ps0->items().size() * 32 + 10;
-            row_content_h += 6 + ph;
+        if (y > left_col.bottom) break;
+        RECT item{ left_col.left + 8, y, left_col.right - 8, y + item_h - 4 };
+        bool hov = gui_.input().mouse.x >= item.left && gui_.input().mouse.x < item.right
+                && gui_.input().mouse.y >= item.top && gui_.input().mouse.y < item.bottom;
+        COLORREF fill_c = ui.checked ? gui_.theme.primary_light : gui_.theme.panel;
+        COLORREF line_c = ui.checked ? gui_.theme.primary : gui_.theme.border;
+        if (hov && !ui.checked) fill_c = gui_.theme.hover;
+        gui_.round_rect(item, fill_c, line_c, 4);
+        RECT cbr{ item.left + 8, item.top + 5, item.left + 200, item.top + 25 };
+        std::wstring label = display_name(kind, name);
+        gui_.checkbox(("cb-" + id + "-" + name).c_str(), cbr, label, ui.checked);
+        gui_.text(item.right - 24, item.top + 7, std::to_wstring(ti + 1),
+                  gui_.theme.faint, gui_.font_small);
+        if (hov && gui_.input().pressed) {
+            for (auto& kv : task_ui_[id]) kv.second.selected = false;
+            ui.selected = true;
         }
-        if (!gui_.row_fully_visible(y, row_content_h)) break;
+        y += item_h;
+    }
+    gui_.end_scroll();
 
-        RECT item{ content.left, y, content.right, y + item_h - 6 };
-        gui_.round_rect(item, ui.checked ? gui_.theme.panel : RGB(250, 251, 253),
-                        gui_.theme.border, 8);
-        RECT cbr{ item.left + 12, item.top + 12, item.left + 240, item.top + 32 };
-        std::wstring lbl = gui::widen(name) + L"  " + desc;
-        gui_.checkbox(("cb-" + id + "-" + name).c_str(), cbr, lbl, ui.checked);
-        RECT rr{ item.right - 190, item.top + 8, item.right - 50, item.top + 32 };
-        if (gui_.button(("run-" + id + "-" + name).c_str(), rr, L"▶ 立即运行", 0)) {
+    // ---------------- 右侧：任务设置 ----------------
+    std::string sel_task;
+    for (auto& t : tasks) {
+        std::string nm = t.get_str("name", "");
+        if (task_ui_[id][nm].selected) { sel_task = nm; break; }
+    }
+    if (sel_task.empty() && !tasks.empty()) sel_task = tasks[0].get_str("name", "");
+
+    int rx = right_col.left + 16;
+    int ry = right_col.top + 12;
+    if (!sel_task.empty()) {
+        gui_.text(rx, ry, display_name(kind, sel_task), gui_.theme.text, gui_.font_title);
+        std::wstring desc;
+        for (auto& t : tasks) {
+            if (t.get_str("name", "") == sel_task) desc = gui::widen(t.get_str("description", ""));
+        }
+        if (!desc.empty()) {
+            RECT save = gui_.clip();
+            gui_.text_clipped({ rx + 260, ry + 4, right_col.right - 16, ry + 24 },
+                              desc, gui_.theme.dim, gui_.font_small);
+            (void)save;
+        }
+        ry += 34;
+
+        TaskUiState& ui = task_ui_[id][sel_task];
+        RECT run_btn{ rx, ry, rx + 120, ry + 28 };
+        if (gui_.button(("run-" + id + "-" + sel_task).c_str(), run_btn,
+                        L"\u25b6 \u5355\u6b21\u8fd0\u884c", 1)) {
             mj::Value params = mj::Value::object();
             for (auto& kv : ui.params) params.set(kv.first, kv.second);
-            action_run(id, name, params);
+            action_run(id, sel_task, params);
         }
-        RECT gr{ item.right - 42, item.top + 8, item.right - 14, item.top + 32 };
-        if (gui_.button(("gear-" + id + "-" + name).c_str(), gr, L"⚙", 0)) ui.open = !ui.open;
+        RECT gear_btn{ rx + 130, ry, rx + 230, ry + 28 };
+        if (gui_.button(("gear-" + id + "-" + sel_task).c_str(), gear_btn,
+                        ui.open ? L"\u6536\u8d77\u53c2\u6570" : L"\u5c55\u5f00\u53c2\u6570", 0)) {
+            ui.open = !ui.open;
+        }
+        ry += 40;
 
         if (ui.open) {
-            int py = item.bottom + 6;
-            RECT pbody{ item.left, py, item.right, py + 8 };
-            if (auto* ps = t.find("params"); ps && ps->is_array() && !ps->items().empty()) {
-                int ph = (int)ps->items().size() * 32 + 10;
-                pbody.bottom = py + ph;
-                gui_.round_rect(pbody, RGB(250, 251, 253), gui_.theme.border, 6);
-                int ry2 = py + 6;
+            mj::Value spec = mj::Value::object();
+            for (auto& t : tasks) {
+                if (t.get_str("name", "") == sel_task) spec = t;
+            }
+            if (auto* ps = spec.find("params"); ps && ps->is_array() && !ps->items().empty()) {
+                int ph = (int)ps->items().size() * 36 + 16;
+                RECT pbody{ rx, ry, right_col.right - 16, ry + ph };
+                gui_.round_rect(pbody, gui_.theme.panel, gui_.theme.border, 4);
+                gui_.text(pbody.left + 12, pbody.top + 8, L"\u9ad8\u7ea7\u8bbe\u7f6e",
+                          gui_.theme.dim, gui_.font_small);
+                int py = pbody.top + 28;
                 for (auto& p : ps->items()) {
                     std::string pn = p.get_str("name", "");
-                    gui_.text(pbody.left + 14, ry2 + 4, gui::widen(pn), gui_.theme.dim, gui_.font_small);
-                    RECT ir{ pbody.left + 170, ry2, pbody.left + 460, ry2 + 24 };
+                    gui_.text(pbody.left + 14, py + 5, gui::widen(pn),
+                              gui_.theme.dim, gui_.font_small);
+                    RECT ir{ pbody.left + 190, py, pbody.left + 460, py + 26 };
                     std::string edit;
                     auto it = ui.params.find(pn);
                     if (it != ui.params.end()) edit = mj::Value::dump(it->second);
                     else if (p.has("default")) edit = mj::Value::dump(p["default"]);
                     std::wstring hint;
-                    if (p.has("default")) hint = L"默认 " + gui::widen(mj::Value::dump(p["default"]));
-                    gui_.text_input(("p-" + id + "-" + name + "-" + pn).c_str(), ir, edit, hint.c_str());
+                    if (p.has("default")) {
+                        hint = L"\u9ed8\u8ba4 " + gui::widen(mj::Value::dump(p["default"]));
+                    }
+                    gui_.text_input(("p-" + id + "-" + sel_task + "-" + pn).c_str(),
+                                    ir, edit, hint.c_str());
                     mj::Value pv;
                     ui.params[pn] = mj::try_parse(edit, pv) ? pv : mj::Value(edit);
-                    ry2 += 32;
+                    py += 36;
                 }
-                y = pbody.bottom + 6;
+                ry = pbody.bottom + 12;
             } else {
-                pbody.bottom = py + 28;
-                gui_.round_rect(pbody, RGB(250, 251, 253), gui_.theme.border, 6);
-                gui_.text(pbody.left + 14, py + 7, L"该任务无可配置参数", gui_.theme.dim, gui_.font_small);
-                y = pbody.bottom + 6;
+                RECT pbody{ rx, ry, right_col.right - 16, ry + 40 };
+                gui_.round_rect(pbody, gui_.theme.panel, gui_.theme.border, 4);
+                gui_.text(pbody.left + 14, pbody.top + 12,
+                          L"\u8be5\u4efb\u52a1\u65e0\u53ef\u914d\u7f6e\u53c2\u6570",
+                          gui_.theme.dim, gui_.font_small);
+                ry = pbody.bottom + 12;
             }
         }
-        y += item_h;
+
+        // 实例信息条
+        RECT info{ rx, ry, right_col.right - 16, ry + 30 };
+        gui_.round_rect(info, gui_.theme.row_alt, gui_.theme.border, 4);
+        int ix = info.left + 12;
+        COLORREF def_col = gui_.theme.text;
+        auto field = [&](const std::wstring& k, const std::wstring& v, COLORREF col) {
+            gui_.text(ix, info.top + 8, k, gui_.theme.dim, gui_.font_small);
+            gui_.text(ix, info.top + 18, v, col, gui_.font);
+            ix += 130;
+        };
+        field(L"\u7248\u672c", gui::widen(version.empty() ? "-" : version), def_col);
+        field(L"\u6838\u5fc3", gui::widen(core_version.empty() ? "-" : core_version), def_col);
+        field(L"\u8d26\u53f7", acc_label.empty() ? L"\u672a\u7ed1\u5b9a" : gui::widen(acc_label), def_col);
+        field(L"\u4eca\u65e5\u65e5\u5e38", daily_done ? L"\u5df2\u5b8c\u6210" : L"\u672a\u5b8c\u6210",
+              daily_done ? gui_.theme.ok : gui_.theme.warn);
+        field(L"\u4efb\u52a1\u6570", std::to_wstring(task_count), def_col);
+    } else {
+        gui_.text(rx, ry + 8, L"\u8be5\u5b9e\u4f8b\u6ca1\u6709\u53ef\u7528\u4efb\u52a1",
+                  gui_.theme.dim, gui_.font);
     }
-    gui_.end_scroll();
+
+    // ---------------- 底部控制栏 ----------------
+    gui_.fill({ bottom_bar.left, bottom_bar.top, bottom_bar.right, bottom_bar.top + 1 },
+              gui_.theme.border);
+    bool connected = conn == "connected";
+    RECT conn_btn{ bottom_bar.left + 16, bottom_bar.top + 8,
+                   bottom_bar.left + 96, bottom_bar.bottom - 8 };
+    if (gui_.button("btn-connect-exec", conn_btn, connected ? L"\u65ad\u5f00" : L"\u8fde\u63a5", 0)) {
+        if (connected) action_disconnect(id);
+        else action_connect(id);
+    }
+    COLORREF dot = connected ? gui_.theme.ok :
+                     conn == "failed" ? gui_.theme.err :
+                     conn == "connecting" ? gui_.theme.warn : gui_.theme.faint;
+    gui_.round_rect({ bottom_bar.left + 106, bottom_bar.top + 17,
+                      bottom_bar.left + 116, bottom_bar.top + 27 }, dot, dot, 5);
+    {
+        std::wstring st = connected ? L"\u5df2\u8fde\u63a5" :
+                          conn == "failed" ? L"\u8fde\u63a5\u5931\u8d25" :
+                          conn == "connecting" ? L"\u8fde\u63a5\u4e2d\u2026" : L"\u672a\u8fde\u63a5";
+        gui_.text(bottom_bar.left + 124, bottom_bar.top + 15, st,
+                  connected ? gui_.theme.ok : gui_.theme.dim, gui_.font_small);
+    }
+    RECT link_btn{ bottom_bar.right - 150, bottom_bar.top + 7,
+                   bottom_bar.right - 16, bottom_bar.bottom - 7 };
+    if (gui_.button("btn-linkstart-exec", link_btn, L"\U0001f517 Link Start!", 1)) {
+        post_action([this, id] {
+            mj::Value st = hub_->executor_status(id);
+            if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
+            action_run_checked(id);
+        }, "\u94fe\u63a5\u5f00\u59cb");
+    }
 }
 
 // ================================================================ 欢迎页

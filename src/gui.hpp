@@ -15,21 +15,33 @@
 namespace gui {
 
 // ---------------------------------------------------------------- 主题
+// 配色与控件尺寸取自 MAA 官方 GUI（HandyControl Light 主题，见
+// MaaAssistantArknights/src/MaaWpfGui/Res/Theme.xaml -> HandyControl Light.xaml）
+// Primary #326cf3 / Background #eeeeee / Region #ffffff / Border #e0e0e0
+// PrimaryText #212121 / SecondaryText #757575 / ThirdlyText #bdbdbd
+// Success #2db84d / Warning #e9af20 / Danger #db3340 / Accent #f8491e
+// 控件高 28、圆角 4、内边距 (10,5)、左列宽 190、外框 Margin 20
 struct Theme {
-    COLORREF bg = RGB(243, 245, 249);
-    COLORREF panel = RGB(255, 255, 255);
-    COLORREF border = RGB(227, 232, 240);
-    COLORREF text = RGB(31, 39, 51);
-    COLORREF dim = RGB(122, 134, 153);
-    COLORREF primary = RGB(46, 124, 246);
-    COLORREF primary_dark = RGB(27, 95, 217);
-    COLORREF primary_light = RGB(232, 241, 254);
-    COLORREF ok = RGB(34, 181, 115);
-    COLORREF warn = RGB(245, 166, 35);
-    COLORREF err = RGB(229, 72, 77);
-    COLORREF hover = RGB(240, 244, 250);
-    COLORREF input_bg = RGB(255, 255, 255);
-    COLORREF row_alt = RGB(250, 251, 253);
+    COLORREF bg = RGB(0xEE, 0xEE, 0xEE);            // BackgroundColor
+    COLORREF panel = RGB(0xFF, 0xFF, 0xFF);         // RegionColor
+    COLORREF border = RGB(0xE0, 0xE0, 0xE0);        // BorderColor
+    COLORREF text = RGB(0x21, 0x21, 0x21);          // PrimaryTextColor
+    COLORREF dim = RGB(0x75, 0x75, 0x75);           // SecondaryTextColor
+    COLORREF faint = RGB(0xBD, 0xBD, 0xBD);         // ThirdlyTextColor
+    COLORREF primary = RGB(0x32, 0x6C, 0xF3);       // PrimaryColor
+    COLORREF primary_dark = RGB(0x32, 0x6C, 0xF3);  // DarkPrimaryColor
+    COLORREF primary_light = RGB(0xF3, 0xFB, 0xFF); // LightPrimaryColor
+    COLORREF ok = RGB(0x2D, 0xB8, 0x4D);            // SuccessColor
+    COLORREF ok_light = RGB(0xF3, 0xFF, 0xF6);      // LightSuccessColor
+    COLORREF warn = RGB(0xE9, 0xAF, 0x20);          // WarningColor
+    COLORREF warn_light = RGB(0xFF, 0xFC, 0xF5);    // LightWarningColor
+    COLORREF err = RGB(0xDB, 0x33, 0x40);           // DangerColor
+    COLORREF err_light = RGB(0xFF, 0xF6, 0xF7);     // LightDangerColor
+    COLORREF accent = RGB(0xF8, 0x49, 0x1E);        // AccentColor
+    COLORREF hover = RGB(0xF5, 0xF5, 0xF5);         // DarkDefaultColor（悬停底）
+    COLORREF input_bg = RGB(0xFF, 0xFF, 0xFF);      // DefaultColor
+    COLORREF row_alt = RGB(0xEE, 0xEE, 0xEE);       // SecondaryRegionColor
+    COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）
 };
 
 inline std::wstring widen(const std::string& s) { return util::utf8_to_wide(s); }
@@ -95,6 +107,21 @@ public:
         SelectObject(dc_, old);
         DeleteObject(p);
     }
+    // 水平渐变填充（对应 MAA TitleBrush/PrimaryBrush 的 LinearGradientBrush）
+    void gradient_rect(RECT r, COLORREF c1, COLORREF c2) {
+        TRIVERTEX tv[2]{};
+        tv[0].x = r.left;  tv[0].y = r.top;
+        tv[0].Red = (USHORT)(GetRValue(c1) * 257);
+        tv[0].Green = (USHORT)(GetGValue(c1) * 257);
+        tv[0].Blue = (USHORT)(GetBValue(c1) * 257);
+        tv[1].x = r.right; tv[1].y = r.bottom;
+        tv[1].Red = (USHORT)(GetRValue(c2) * 257);
+        tv[1].Green = (USHORT)(GetGValue(c2) * 257);
+        tv[1].Blue = (USHORT)(GetBValue(c2) * 257);
+        GRADIENT_RECT gr{ 0, 1 };
+        GradientFill(dc_, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
+    }
+
     void round_rect(RECT r, COLORREF fill_c, COLORREF border_c, int radius) {
         HBRUSH b = CreateSolidBrush(fill_c);
         HPEN p = CreatePen(PS_INSIDEFRAME, 1, border_c);

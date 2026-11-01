@@ -124,11 +124,21 @@ int main(int argc, char** argv) {
     bool check_only = false;
     bool self_test = false;
     bool startup_bench = false;
+    bool offscreen = false;
+    bool dump_render = false;
+    std::string dump_render_path;
+    std::string dump_page;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--check") check_only = true;
         else if (a == "--self-test") self_test = true;
         else if (a == "--startup-bench") startup_bench = true;
+        else if (a == "--offscreen") offscreen = true;
+        else if (a == "--dump-render" && i + 1 < argc) {
+            dump_render = true;
+            dump_render_path = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-') dump_page = argv[++i];
+        }
         else if (a == "--config" && i + 1 < argc) config_path = argv[++i];
         else if (a == "--port" && i + 1 < argc) g_port_override = atoi(argv[++i]);
         else if (a == "--core-version" && i + 2 < argc) {
@@ -189,6 +199,32 @@ int main(int argc, char** argv) {
         double fp = (t1 - t0) * 1000;
         printf(fp < 200 ? "BENCH PASS\n" : "BENCH FAIL\n");
         return fp < 200 ? 0 : 1;
+    }
+
+    // ---------------- 离屏渲染转储（无可见窗口，输出 PNG 供验证） ----------------
+    if (dump_render) {
+        // 进程内直接构造窗口对象但不创建 HWND：调用其页面绘制到内存 DC。
+        // 需要 app_window 暴露一个纯渲染入口，这里通过 offscreen 窗口 + 内存 DC 完成。
+        HINSTANCE hInst = GetModuleHandleW(nullptr);
+        MaaHubWindow win(hInst, config, /*offscreen=*/true);
+        if (!win.create()) {
+            printf("DUMP FAILED: create\n");
+            return 1;
+        }
+        std::string page = dump_page.empty() ? "executor" : dump_page;
+        // 等待**所有**执行器的核心加载与目录刷新完成（否则任务列表为空）
+        for (int i = 0; i < 120; ++i) {
+            Sleep(100);
+            bool all_ready = true;
+            for (auto& e : win.debug_executors()) {
+                mj::Value cat = win.debug_catalog(e.id, /*ttl=*/0);
+                if (!(cat.is_array() && !cat.items().empty())) { all_ready = false; break; }
+            }
+            if (all_ready) break;
+        }
+        win.debug_refresh_snapshot();   // 强制拉一次完整快照（含 catalog）
+        win.render_to_file(page, dump_render_path);
+        return 0;
     }
 
     // ---------------- 干跑自检（控制台） ----------------
@@ -313,7 +349,7 @@ int main(int argc, char** argv) {
 
     // ---------------- GUI 模式（原生窗口） ----------------
     HINSTANCE hInst = GetModuleHandleW(nullptr);
-    MaaHubWindow win(hInst, config);
+    MaaHubWindow win(hInst, config, offscreen);
     if (!win.create()) {
         MessageBoxW(nullptr, L"窗口创建失败", L"MaaHub", MB_ICONERROR);
         return 1;

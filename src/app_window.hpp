@@ -23,16 +23,25 @@ namespace hub {
 // 任务勾选状态（按执行器）
 struct TaskUiState {
     bool checked = false;
+    bool selected = false;      // 当前选中项（右侧展示其设置，对应 MAA 左列选中）
     bool open = false;
     std::map<std::string, mj::Value> params;
 };
 
 class MaaHubWindow {
 public:
-    MaaHubWindow(HINSTANCE hInst, mj::Value config);
+    MaaHubWindow(HINSTANCE hInst, mj::Value config, bool offscreen = false);
     ~MaaHubWindow();
 
     bool create();
+    // 离屏渲染指定页面到 PNG（窗口不可见，仅用于验证）
+    bool render_to_file(const std::string& page, const std::string& png_path);
+    // 调试用访问器（--dump-render 等待目录就绪）
+    std::vector<ExecutorEntry> debug_executors() { return hub_->executors(); }
+    mj::Value debug_catalog(const std::string& id, double ttl = 0) {
+        return hub_->executor_catalog(id, ttl);
+    }
+    void debug_refresh_snapshot() { refresh_snapshot(); }
     int run();
 
 private:
@@ -44,13 +53,16 @@ private:
     // 页面
     void draw_sidebar(RECT r);
     void draw_topbar(RECT r);
-    void page_executor(RECT content);       // MAA 风格实例页
+    void page_executor(RECT content);       // MAA 1:1 实例页
     void page_welcome(RECT content);
     void page_accounts(RECT content);
     void page_cores(RECT content);
     void page_planner(RECT content);
     void page_events(RECT content);
     void page_settings(RECT content);
+
+    // MAA 官方任务显示名（取自 MaaWpfGui Res/Localizations/zh-cn.xaml）
+    static std::wstring display_name(const std::string& kind, const std::string& task);
 
     // 后台
     void backend_loop();
@@ -86,6 +98,7 @@ private:
     HWND hwnd_ = nullptr;
     std::unique_ptr<Hub> hub_;
     mj::Value config_;
+    bool offscreen_ = false;   // 离屏模式：窗口永不显示（仅测试/渲染用）
 
     int sidebar_w_ = 250;
     int topbar_h_ = 56;
