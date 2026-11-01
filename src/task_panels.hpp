@@ -52,6 +52,24 @@ struct PanelCtx {
         return v.is_string() ? v.as_string() : def;
     }
     void set_str(const std::string& k, const std::string& v) { params[k] = mj::Value(v); }
+
+    // 用官方 catalog 声明的 default 预填充尚未设置的参数
+    // （官方面板打开时就应显示默认值，而不是空白/0）
+    void apply_defaults(const std::vector<mj::Value>* specs) {
+        if (!specs) return;
+        for (auto& p : *specs) {
+            std::string key = p.get_str("name", "");
+            if (key.empty() || !p.has("default")) continue;
+            if (params.find(key) != params.end()) continue;
+            mj::Value d = p["default"];
+            // MAA 用 INT_MAX 表示"无限"；归一化为 -1，UI 显示"无限"
+            if (d.is_number() && d.as_int() >= 2147483647) {
+                params[key] = mj::Value((int64_t)-1);
+            } else {
+                params[key] = d;
+            }
+        }
+    }
 };
 
 // ---- 通用小部件 ----
@@ -87,6 +105,42 @@ inline void pc_text(PanelCtx& c, const std::string& key, const std::wstring& lab
     c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, v,
                    hint.empty() ? nullptr : hint.c_str());
     c.set_str(key, v);
+    c.y += 32;
+}
+
+// 作战次数：-1 = 无限（MAA 官方语义），显示"无限"
+inline void pc_times(PanelCtx& c, const std::string& key, const std::wstring& label) {
+    int v = c.get_int(key, -1);
+    if (v >= 2147483647) { v = -1; c.set_int(key, -1); }   // 兼容历史脏值
+    bool inf = (v < 0);
+    RECT r{ c.x, c.y, c.x + 460, c.y + 26 };
+    c.g.text(r.left, r.top + (r.bottom - r.top - 17) / 2, label,
+             c.g.theme.text, c.g.font);
+    RECT ir{ r.left + 150, r.top, r.right - 150, r.bottom };
+    std::string edit = inf ? std::string() : std::to_string(v);
+    c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), ir, edit,
+                   inf ? L"\u65e0\u9650" : nullptr);
+    if (!inf) {
+        int nv = v;
+        try { nv = std::stoi(edit); } catch (...) { nv = v; }
+        if (nv < 0) nv = 0;
+        v = nv;
+    }
+    RECT minus_b{ r.right - 146, r.top, r.right - 114, r.bottom };
+    RECT plus_b{ r.right - 110, r.top, r.right - 78, r.bottom };
+    if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-m").c_str(),
+                   minus_b, L"-", 0)) {
+        if (!inf) v = (v - 1 < 0) ? 0 : v - 1;
+    }
+    if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-p").c_str(),
+                   plus_b, L"+", 0)) {
+        if (!inf) v += 1;
+    }
+    CheckState inf_st = inf ? CheckState::On : CheckState::Off;
+    RECT inf_r{ r.right - 70, r.top, r.right, r.bottom };
+    c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key + "-inf").c_str(),
+                  inf_r, L"\u65e0\u9650", inf_st);
+    c.set_int(key, inf_st == CheckState::On ? -1 : v);
     c.y += 32;
 }
 
@@ -133,7 +187,7 @@ inline bool panel_fight(PanelCtx& c) {
     c.g.group_title(c.x, c.y, L"关卡与次数");
     c.y += 20;
     pc_text(c, "stage", L"关卡", L"如 1-7；留空为 当前/上次");
-    pc_number(c, "times", L"作战次数", 5, 1, 1, 9999);
+    pc_times(c, "times", L"作战次数");
     pc_radio(c, "series", { L"×1", L"×2", L"×3", L"×4", L"×5", L"×6" }, 3);
     c.y += 6;
     c.g.group_title(c.x, c.y, L"行为");
@@ -522,6 +576,8 @@ inline bool panel_generic(PanelCtx& c, const std::vector<mj::Value>* specs) {
 }
 
 inline bool draw_task_panel(PanelCtx& c, const std::vector<mj::Value>* specs = nullptr) {
+    // 先用官方 default 预填充，保证面板打开即显示默认值
+    c.apply_defaults(specs);
     if (c.task == "StartUp") return panel_startup(c);
     if (c.task == "Fight") return panel_fight(c);
     if (c.task == "Infrast") return panel_infrast(c);
