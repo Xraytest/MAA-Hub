@@ -30,6 +30,7 @@ MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config, bool offscreen)
     : hInst_(hInst), config_(std::move(config)), offscreen_(offscreen) {
     hub_ = std::make_unique<Hub>(config_);
     load_task_list();
+    load_post_action();
 }
 
 MaaHubWindow::~MaaHubWindow() {
@@ -744,6 +745,78 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
 }
 
 // 持久化任务列表（state/task-lists.json）
+// 完成后动作设置（官方 TaskQueue.PostAction.*）
+// 全部任务执行完后的收尾动作：返回主屏/退出游戏/退出模拟器/退出 MAA/锁屏/睡眠/休眠/关机
+void MaaHubWindow::draw_post_action(RECT area, const std::string& id) {
+    RECT mask{ area.left, area.top, area.right, area.bottom };
+    gui_.fill(mask, RGB(0x10, 0x10, 0x10));
+    RECT card{ area.left + 60, area.top + 40, area.right - 60, area.bottom - 40 };
+    gui_.round_rect(card, gui_.theme.panel, gui_.theme.border, 4);
+
+    gui_.text(card.left + 16, card.top + 14, L"\u5b8c\u6210\u540e\u52a8\u4f5c\u8bbe\u7f6e",
+              gui_.theme.text, gui_.font_title);
+    gui_.text(card.left + 16, card.top + 40,
+              L"\u5168\u90e8\u4efb\u52a1\u6267\u884c\u5b8c\u6210\u540e\u7684\u6536\u5c3e\u52a8\u4f5c",
+              gui_.theme.dim, gui_.font_small);
+    RECT close_btn{ card.right - 76, card.top + 12, card.right - 16, card.top + 36 };
+    if (gui_.button("postaction-close", close_btn, L"\u5173\u95ed", 0)) {
+        show_post_action_ = false;
+        return;
+    }
+
+    mj::Value& p = post_action_[id];
+    auto getb = [&](const char* k) -> bool {
+        auto* v = p.find(k);
+        return v ? v->as_bool() : false;
+    };
+
+    int y = card.top + 70;
+    const int row_h = 30;
+    struct Item { const char* key; const wchar_t* label; const wchar_t* tip; };
+    const Item items[] = {
+        { "back_to_android_home", L"\u8fd4\u56de \u6a21\u62df\u5668 \u4e3b\u5c4f\u5e55", nullptr },
+        { "exit_arknights",       L"\u9000\u51fa \u660e\u65e5\u65b9\u821e", nullptr },
+        { "exit_emulator",        L"\u9000\u51fa \u6a21\u62df\u5668", nullptr },
+        { "exit_self",            L"\u9000\u51fa MAA", nullptr },
+        { "lock_screen",          L"\u9501\u5c4f",
+          L"\u52fe\u9009\u540e\uff0c\u4ec5\u5f53\u6ca1\u6709\u5176\u4ed6 MAA \u5b9e\u4f8b\u8fd0\u884c\u65f6\u624d\u4f1a\u6267\u884c" },
+        { "sleep",                L"\u7761\u7720", nullptr },
+        { "hibernate",            L"\u4f11\u7720",
+          L"\u9700\u5728 Windows \u7535\u6e90\u9009\u9879\u4e2d\u542f\u7528\u4f11\u7720\u529f\u80fd\uff0c\u5426\u5219\u8be5\u529f\u80fd\u65e0\u6548\u3002" },
+        { "shutdown",             L"\u5173\u673a", nullptr },
+    };
+    for (auto& it : items) {
+        CheckState st = getb(it.key) ? CheckState::On : CheckState::Off;
+        RECT r{ card.left + 20, y, card.right - 20, y + 22 };
+        gui_.checkbox3(("pa-" + id + "-" + it.key).c_str(), r, it.label, st);
+        p.set(it.key, st == CheckState::On);
+        y += row_h;
+        if (it.tip) {
+            gui_.tip_line(card.left + 44, y - 6, card.right - 20, it.tip);
+            y += 16;
+        }
+    }
+    save_post_action(id);
+}
+
+// 持久化完成后动作（state/post-actions.json）
+void MaaHubWindow::save_post_action(const std::string& id) {
+    mj::Value v = mj::Value::object();
+    for (auto& kv : post_action_) v.set(kv.first, kv.second);
+    util::write_file(util::exe_dir() + "\\state\\post-actions.json",
+                     mj::Value::dump_pretty(v));
+}
+
+void MaaHubWindow::load_post_action() {
+    std::string content;
+    if (!util::read_file(util::exe_dir() + "\\state\\post-actions.json", content)) return;
+    mj::Value v;
+    if (!mj::try_parse(content, v)) return;
+    for (auto& kv : v.members()) {
+        if (kv.second.is_object()) post_action_[kv.first] = kv.second;
+    }
+}
+
 void MaaHubWindow::save_task_list() {
     mj::Value v = mj::Value::object();
     for (auto& kv : task_list_) {
@@ -1044,14 +1117,7 @@ void MaaHubWindow::page_executor(RECT content) {
         if (ui.open) {
             // 官方任务面板（1:1 复刻 MaaWpfGui TaskQueue/*.xaml）
             // 先用滚动区域承载，避免长面板超出可视区
-            int panel_top = ry;
-            int panel_h = (right_col.bottom - 12) - panel_top;
-            if (panel_h < 80) panel_h = 80;
-            gui_.begin_scroll(("panel-" + id + "-" + sel_task).c_str(),
-                              { rx, panel_top, right_col.right - 16, right_col.bottom - 12 },
-                              2000, scroll_["panel-" + id + "-" + sel_task]);
-            int saved_y = ry;
-            // 找到选中任务的 catalog 声明（供通用面板按类型渲染）
+            // 选中任务的 catalog 声明（供通用面板按类型渲染 + 估算滚动高度）
             const mj::Value* spec = nullptr;
             for (auto& t : tasks) {
                 if (t.get_str("name", "") == sel_task) { spec = &t; break; }
@@ -1060,6 +1126,18 @@ void MaaHubWindow::page_executor(RECT content) {
             if (spec) {
                 if (auto* ps = spec->find("params"); ps && ps->is_array()) specs = ps->items();
             }
+            int panel_top = ry;
+            int panel_h = (right_col.bottom - 12) - panel_top;
+            if (panel_h < 80) panel_h = 80;
+            // 内容高度按参数个数估算（每项约 36-40px，含分组标题），
+            // 不再用固定 2000——避免内容更高时被裁剪、或过短时出现空滚动
+            int est_rows = (int)specs.size() + 8;
+            int content_h = est_rows * 40 + 80;
+            if (content_h < panel_h) content_h = panel_h;
+            gui_.begin_scroll(("panel-" + id + "-" + sel_task).c_str(),
+                              { rx, panel_top, right_col.right - 16, right_col.bottom - 12 },
+                              content_h, scroll_["panel-" + id + "-" + sel_task]);
+            int saved_y = ry;
             PanelCtx pctx{ gui_, rx, ry, right_col.right - 16, ui.params, id, sel_task };
             bool custom = draw_task_panel(pctx, &specs);
             ry = pctx.y;
@@ -1102,6 +1180,7 @@ void MaaHubWindow::page_executor(RECT content) {
 
     // ---------------- 添加新任务浮层 ----------------
     if (show_add_task_) draw_add_task_overlay(right_col, id, kind);
+    if (show_post_action_) draw_post_action(right_col, id);
 
     // ---------------- 底部控制栏 ----------------
     gui_.fill({ bottom_bar.left, bottom_bar.top, bottom_bar.right, bottom_bar.top + 1 },
@@ -1113,16 +1192,21 @@ void MaaHubWindow::page_executor(RECT content) {
         if (connected) action_disconnect(id);
         else action_connect(id);
     }
+    RECT pa_btn{ bottom_bar.left + 106, bottom_bar.top + 8,
+                 bottom_bar.left + 226, bottom_bar.bottom - 8 };
+    if (gui_.button("btn-postaction", pa_btn, L"\u5b8c\u6210\u540e\u52a8\u4f5c", 0)) {
+        show_post_action_ = !show_post_action_;
+    }
     COLORREF dot = connected ? gui_.theme.ok :
                      conn == "failed" ? gui_.theme.err :
                      conn == "connecting" ? gui_.theme.warn : gui_.theme.faint;
-    gui_.round_rect({ bottom_bar.left + 106, bottom_bar.top + 17,
-                      bottom_bar.left + 116, bottom_bar.top + 27 }, dot, dot, 5);
+    gui_.round_rect({ bottom_bar.left + 236, bottom_bar.top + 17,
+                      bottom_bar.left + 246, bottom_bar.top + 27 }, dot, dot, 5);
     {
         std::wstring st = connected ? L"\u5df2\u8fde\u63a5" :
                           conn == "failed" ? L"\u8fde\u63a5\u5931\u8d25" :
                           conn == "connecting" ? L"\u8fde\u63a5\u4e2d\u2026" : L"\u672a\u8fde\u63a5";
-        gui_.text(bottom_bar.left + 124, bottom_bar.top + 15, st,
+        gui_.text(bottom_bar.left + 254, bottom_bar.top + 15, st,
                   connected ? gui_.theme.ok : gui_.theme.dim, gui_.font_small);
     }
     RECT link_btn{ bottom_bar.right - 150, bottom_bar.top + 7,
