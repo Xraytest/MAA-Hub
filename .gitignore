@@ -24,3 +24,7 @@ Thumbs.db
 desktop.ini
 *.log
 maahub-crash.log
+
+# 沙盒探针（本地临时，勿提交）
+_sandbox/
+_download/
