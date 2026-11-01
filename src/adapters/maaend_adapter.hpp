@@ -194,7 +194,13 @@ public:
             agent_error_ = "interface.json has no agent list";
             return false;
         }
-        bool any = false;
+        // 并行拉起所有 agent：串行时每个 agent 的固定等待会叠加（实测 2 个 agent ~5s）
+        struct AgentJob {
+            std::string child;
+            std::string exe;
+            std::string identifier;
+        };
+        std::vector<AgentJob> jobs;
         for (auto& spec : agents->items()) {
             std::string child = spec.get_str("child_exec", "");
             if (child.empty()) continue;
@@ -208,37 +214,71 @@ public:
                 }
                 exe += ".exe";
             }
-            std::string identifier = new_uuid();
-            // PATH 注入 maafw（cpp-algo 静态链接 maafw 中的 DLL）
-            std::wstring env_block = util::make_env_block(util::utf8_to_wide(st_.install_dir + "\\maafw"));
-            std::wstring cmd = L"\"" + util::utf8_to_wide(exe) + L"\" " + util::utf8_to_wide(identifier);
-            util::ProcHandle proc;
-            if (!util::spawn_process(cmd, util::utf8_to_wide(st_.install_dir), env_block, proc)) {
-                agent_error_ = "spawn failed: " + exe;
-                continue;
-            }
-            agent_procs_.push_back(proc);
-            // IPC 连接（client 侧 bind，server 连过来），带重试
-            void* client = nullptr;
-            for (int attempt = 0; attempt < 4; ++attempt) {
-                Sleep(attempt == 0 ? 2500 : 2000);
-                void* sb = fn_.MaaStringBufferCreate();
-                fn_.MaaStringBufferSetEx(sb, identifier.c_str(), identifier.size());
-                client = afn_.MaaAgentClientCreateV2(sb);
-                if (client) {
-                    afn_.MaaAgentClientSetTimeout(client, 8000);
-                    if (afn_.MaaAgentClientBindResource(client, res_)) {
-                        if (afn_.MaaAgentClientConnect(client)) break;
-                    }
-                    afn_.MaaAgentClientDestroy(client);
-                    client = nullptr;
+            jobs.push_back({ child, exe, new_uuid() });
+        }
+        if (jobs.empty()) return false;
+
+        std::mutex res_mtx;
+        std::vector<void*> clients(jobs.size(), nullptr);
+        std::vector<std::string> errors(jobs.size());
+        std::vector<std::thread> threads;
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            threads.emplace_back([&, i] {
+                auto& job = jobs[i];
+                // PATH 注入 maafw（cpp-algo 静态链接 maafw 中的 DLL）
+                std::wstring env_block = util::make_env_block(
+                    util::utf8_to_wide(st_.install_dir + "\\maafw"));
+                std::wstring cmd = L"\"" + util::utf8_to_wide(job.exe) + L"\" "
+                                   + util::utf8_to_wide(job.identifier);
+                util::ProcHandle proc;
+                if (!util::spawn_process(cmd, util::utf8_to_wide(st_.install_dir),
+                                         env_block, proc)) {
+                    std::lock_guard<std::mutex> lk(res_mtx);
+                    errors[i] = "spawn failed: " + job.exe;
+                    return;
                 }
-            }
-            if (client) {
-                agent_clients_.push_back(client);
+                {
+                    std::lock_guard<std::mutex> lk(proc_mtx_);
+                    agent_procs_.push_back(proc);
+                }
+                // IPC 连接（client 侧 bind，server 连过来）：
+                // 轮询等待而非固定 sleep——agent 就绪即可立即连上，无需空等 2.5s
+                void* client = nullptr;
+                for (int attempt = 0; attempt < 120; ++attempt) {   // 最长 6s
+                    void* sb = fn_.MaaStringBufferCreate();
+                    fn_.MaaStringBufferSetEx(sb, job.identifier.c_str(),
+                                             job.identifier.size());
+                    client = afn_.MaaAgentClientCreateV2(sb);
+                    if (client) {
+                        afn_.MaaAgentClientSetTimeout(client, 8000);
+                        if (afn_.MaaAgentClientBindResource(client, res_)) {
+                            if (afn_.MaaAgentClientConnect(client)) break;
+                        }
+                        afn_.MaaAgentClientDestroy(client);
+                        client = nullptr;
+                    }
+                    if (!proc.alive()) break;
+                    Sleep(50);
+                }
+                std::lock_guard<std::mutex> lk(res_mtx);
+                if (client) {
+                    clients[i] = client;
+                } else {
+                    errors[i] = "agent " + job.child + " did not connect";
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+
+        bool any = false;
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            if (clients[i]) {
+                std::lock_guard<std::mutex> lk(cli_mtx_);
+                agent_clients_.push_back(clients[i]);
                 any = true;
-            } else {
-                agent_error_ = "agent " + child + " did not connect";
+            } else if (!errors[i].empty()) {
+                std::lock_guard<std::mutex> lk(err_mtx_);
+                if (agent_error_.empty()) agent_error_ = errors[i];
             }
         }
         return any && !agent_clients_.empty();
@@ -532,6 +572,9 @@ private:
     void* ctrl_ = nullptr;
     SinkT sink_ = nullptr;
     std::vector<util::ProcHandle> agent_procs_;
+    std::mutex proc_mtx_;      // 保护 agent_procs_
+    std::mutex cli_mtx_;      // 保护 agent_clients_
+    std::mutex err_mtx_;      // 保护 agent_error_
     std::vector<void*> agent_clients_;
     std::string agent_error_;
     Fn fn_;

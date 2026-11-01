@@ -56,7 +56,18 @@ build\MaaHub.exe --check          # 干跑自检：加载核心 + 拉起全部�
 build\MaaHub.exe --core-version maa "D:\Application\MAA"   # 探测核心版本（子进程）
 build\MaaHub.exe --import-core maa "D:\Application\MAA"    # 一次性迁移：复制到内部 cores 目录
 build\MaaHub.exe --self-test      # 无窗口功能自检
+build\MaaHub.exe --startup-bench  # 启动性能基准（无窗口）
 ```
+
+**启动性能**：渐进式加载——启动先产出「即时快照」（只读持久化文件，**约 3ms**），
+左侧执行器立即可见；worker 进程与核心加载在后台**并行**进行（约 1.3s），
+就绪后增量刷新版本/任务数。基准：`--startup-bench`（要求 `first_paint < 200ms`）。
+
+关键优化：
+- 执行器 worker 并行启动（原为串行，N 个执行器耗时线性叠加）
+- MaaEnd agent（go-service / cpp-algo）并行拉起，且用 50ms 轮询替代固定 2.5s 空等
+- `catalog` 30s TTL、`status` 0.4s TTL 缓存，避免每次快照做大 JSON 管道往返
+- 退出时并行关停 worker（避免 MaaEnd agent 拖住进程）
 
 首次启动会为每个**已安装的内部核心**创建一个默认执行器；没有核心时 UI 引导去「核心管理」拉取。
 账号/核心/执行器持久化在 `build\state\`（`accounts.json` / `cores.json` / `executors.json` / `state.json`），

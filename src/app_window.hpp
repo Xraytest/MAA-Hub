@@ -56,6 +56,7 @@ private:
     void backend_loop();
     void post_action(std::function<void()> fn, const std::string& busy_text);
     void refresh_snapshot();
+    void refresh_snapshot_fast();   // 即时快照：只读持久化文件，启动首帧用
     void set_notice(const std::string& s);
 
     // 动作

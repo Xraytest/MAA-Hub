@@ -123,10 +123,12 @@ int main(int argc, char** argv) {
     std::string config_path;
     bool check_only = false;
     bool self_test = false;
+    bool startup_bench = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--check") check_only = true;
         else if (a == "--self-test") self_test = true;
+        else if (a == "--startup-bench") startup_bench = true;
         else if (a == "--config" && i + 1 < argc) config_path = argv[++i];
         else if (a == "--port" && i + 1 < argc) g_port_override = atoi(argv[++i]);
         else if (a == "--core-version" && i + 2 < argc) {
@@ -164,6 +166,30 @@ int main(int argc, char** argv) {
     }
 
     mj::Value config = load_config(config_path);
+
+    // ---------------- 启动性能基准（纯无头，不创建窗口） ----------------
+    if (startup_bench) {
+        double t0 = util::now_sec();
+        Hub hub(config);
+        hub.ensure_default_executors();
+        mj::Value fast = hub.snapshot_fast();     // 首帧：只读持久化
+        double t1 = util::now_sec();
+        hub.start_all();                          // 并行拉起 worker + 加载核心
+        double t2 = util::now_sec();
+        hub.refresh_catalogs();
+        mj::Value full = hub.snapshot();          // 完整快照
+        double t3 = util::now_sec();
+        int n_exec = 0;
+        if (auto* e = fast.find("executors"); e && e->is_array()) {
+            n_exec = (int)e->items().size();
+        }
+        printf("[startup] first_paint=%.0fms start_all=%.0fms full_ready=%.0fms executors=%d\n",
+               (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t0) * 1000, n_exec);
+        (void)full;
+        double fp = (t1 - t0) * 1000;
+        printf(fp < 200 ? "BENCH PASS\n" : "BENCH FAIL\n");
+        return fp < 200 ? 0 : 1;
+    }
 
     // ---------------- 干跑自检（控制台） ----------------
     if (check_only) {
