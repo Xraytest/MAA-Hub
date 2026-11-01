@@ -67,6 +67,7 @@ private:
     void load_task_alias();
     std::string kind_of(const std::string& id) const;
     void save_post_action(const std::string& id);
+    std::wstring post_action_desc(const std::string& id);
     void load_post_action();
     void save_task_list();
     void load_task_list();       // MAA 1:1 实例页
