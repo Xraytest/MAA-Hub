@@ -653,21 +653,29 @@ void MaaHubWindow::page_cores(RECT content) {
         std::lock_guard<std::mutex> lk(snap_mtx_);
         snap = snap_;
     }
-    RECT bar{ content.left, content.top, content.right, content.top + 40 };
+    RECT bar{ content.left, content.top, content.right, content.top + 64 };
     gui_.panel(bar);
     int bx = bar.left + 14;
     if (gui_.button("core-check", { bx, bar.top + 8, bx + 120, bar.top + 32 }, L"🔄 检查更新", 1)) {
         action_check_update("");
     }
     bx += 130;
-    if (gui_.button("core-adopt-maa", { bx, bar.top + 8, bx + 150, bar.top + 32 },
-                    L"＋ 收养 MAA 安装", 0)) {
-        action_adopt("maa");
+    if (gui_.button("core-pull-maa", { bx, bar.top + 8, bx + 180, bar.top + 32 },
+                    L"⬇ 拉取 MAA 核心", 1, dl_progress_.load() < 0)) {
+        action_pull_latest("maa");
     }
-    bx += 160;
-    if (gui_.button("core-adopt-end", { bx, bar.top + 8, bx + 150, bar.top + 32 },
-                    L"＋ 收养 MaaEnd 安装", 0)) {
-        action_adopt("maaend");
+    bx += 190;
+    if (gui_.button("core-pull-end", { bx, bar.top + 8, bx + 180, bar.top + 32 },
+                    L"⬇ 拉取 MaaEnd 核心", 1, dl_progress_.load() < 0)) {
+        action_pull_latest("maaend");
+    }
+    // 内部目录提示 + 共享核心说明
+    {
+        std::wstring root = L"核心目录：" + gui::widen(hub_->cores().cores_root());
+        RECT save = gui_.clip();
+        gui_.text_clipped({ bar.left + 14, bar.top + 40, bar.right - 14, bar.top + 60 },
+                          root, gui_.theme.dim, gui_.font_small);
+        (void)save;
     }
     if (!core_msg_.empty()) {
         RECT save = gui_.clip();
@@ -733,7 +741,15 @@ void MaaHubWindow::page_cores(RECT content) {
     gui_.begin_scroll("core-scroll", { panel.left + 10, ty, panel.right - 10, panel.bottom - 10 },
                       (int)cores.size() * row_h + 10, scroll_["core"]);
     int ry = ty + 6 - (int)scroll_["core"];
-    if (cores.empty()) gui_.text(panel.left + 16, ry + 6, L"尚未登记核心", gui_.theme.dim, gui_.font_small);
+    if (cores.empty()) {
+        gui_.text(panel.left + 16, ry + 6,
+                  L"尚未安装核心 — 请点击上方「拉取 MAA 核心 / 拉取 MaaEnd 核心」",
+                  gui_.theme.warn, gui_.font);
+        ry += 26;
+        gui_.text(panel.left + 16, ry + 6,
+                  L"核心由 MaaHub 内部管理（存放在上面的核心目录），不依赖系统已有安装",
+                  gui_.theme.dim, gui_.font_small);
+    }
     for (auto& c : cores) {
         if (ry + row_h < ty) { ry += row_h; continue; }
         if (ry > panel.bottom) break;
@@ -1181,15 +1197,32 @@ void MaaHubWindow::action_pull_core(const std::string& kind, const std::string& 
     }
 }
 
-void MaaHubWindow::action_adopt(const std::string& kind) {
-    std::string path = kind == "maa" ? "D:\\Application\\MAA" : "D:\\Application\\MaaEnd";
-    std::string id = hub_->cores().adopt(kind, path);
-    if (id.empty()) {
-        set_notice("收养失败：" + path + " 不是有效的"
-                   + (kind == "maa" ? "MAA" : "MaaEnd") + "目录");
-    } else {
-        set_notice("已收养核心：" + path);
+void MaaHubWindow::action_pull_latest(const std::string& kind) {
+    // 检查更新 -> 有新版则直接拉取安装到内部 cores 目录
+    AppSettings st = hub_->app_settings();
+    std::string current;
+    {
+        CoreInfo c = hub_->cores().default_core(kind);
+        if (!c.id.empty()) current = c.version;
     }
+    UpdateInfo ui = CoreManager::check_update(kind, current, st.mirrorchyan_cdk, &st);
+    ui.kind = kind;
+    update_info_ = ui;
+    has_update_info_ = true;
+    if (!ui.ok) {
+        set_notice("更新检查失败：" + ui.error);
+        return;
+    }
+    if (!ui.has_update) {
+        set_notice("已是最新版本 " + ui.latest);
+        return;
+    }
+    if (ui.download_url.empty()) {
+        set_notice("未找到可用的下载地址");
+        return;
+    }
+    set_notice("开始拉取 " + ui.latest);
+    action_pull_core(kind, ui.download_url);
 }
 
 // ================================================================ 设置页

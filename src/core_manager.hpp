@@ -6,6 +6,7 @@
 #pragma once
 #include <windows.h>
 #include <winhttp.h>
+#include <shellapi.h>
 
 #include <atomic>
 #include <mutex>
@@ -73,10 +74,61 @@ struct UpdateInfo {
 
 class CoreManager {
 public:
-    explicit CoreManager(std::string state_dir) : dir_(std::move(state_dir)) {
+    // state_dir: 登记表目录（<exe_dir>\state）
+    // cores_root: 核心实际存放根目录（<exe_dir>\cores），由 MaaHub 内部管理
+    CoreManager(std::string state_dir, std::string cores_root)
+        : dir_(std::move(state_dir)), cores_root_(std::move(cores_root)) {
+        util::ensure_dir(cores_root_);
         load();
-        if (cores_.empty()) adopt_defaults();
     }
+
+    // 核心根目录（UI 展示用）
+    const std::string& cores_root() const { return cores_root_; }
+
+    // 内部核心根目录：<exe_dir>\cores
+    static std::string default_cores_root() {
+        return util::exe_dir() + "\\cores";
+    }
+
+    // 递归复制目录（用于一次性导入）
+    static bool copy_tree(const std::string& src, const std::string& dst) {
+        util::ensure_dir(dst);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(util::utf8_to_wide(src + "\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        bool ok = true;
+        do {
+            std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            std::string s = src + "\\" + util::wide_to_utf8(name);
+            std::string d = dst + "\\" + util::wide_to_utf8(name);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!copy_tree(s, d)) { ok = false; break; }
+            } else {
+                if (!CopyFileW(util::utf8_to_wide(s).c_str(),
+                               util::utf8_to_wide(d).c_str(), FALSE)) {
+                    ok = false;
+                    break;
+                }
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        return ok;
+    }
+
+    static void remove_tree(const std::string& path) {
+        std::wstring p = util::utf8_to_wide(path);
+        // SHFileOperation 需要双 null 结尾
+        std::vector<wchar_t> buf(p.begin(), p.end());
+        buf.push_back(L'\0');
+        buf.push_back(L'\0');
+        SHFILEOPSTRUCTW op{};
+        op.wFunc = FO_DELETE;
+        op.pFrom = buf.data();
+        op.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_SILENT;
+        SHFileOperationW(&op);
+    }
+
 
     // ---------------------------------------------------------------- 查询
     std::vector<CoreInfo> list(const std::string& kind = "") const {
@@ -107,19 +159,32 @@ public:
         return CoreInfo{};
     }
 
-    // ---------------------------------------------------------------- 登记
-    // 收养一个已有安装目录
-    std::string adopt(const std::string& kind, const std::string& path,
-                      const std::string& name = "") {
-        if (!valid_core_dir(kind, path)) return "";
+    // ---------------------------------------------------------------- 导入（一次性迁移）
+    // 把系统里已有的安装**复制**进 MaaHub 内部 cores 目录后登记。
+    // 仅由 --import-core 显式触发；默认流程不接触系统安装。
+    std::string import_core(const std::string& kind, const std::string& src_path) {
+        if (!valid_core_dir(kind, src_path)) return "";
+        std::string version = probe_version(kind, src_path);
+        std::string dest = cores_root_ + "\\" + kind + "-" + (version.empty() ? "unknown" : version);
+        // 目标已存在则加后缀
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (auto& x : cores_) {
+                if (x.path == dest) {
+                    dest = cores_root_ + "\\" + kind + "-" + version + "-" + random_hex(4);
+                    break;
+                }
+            }
+        }
+        if (!copy_tree(src_path, dest)) return "";
         CoreInfo c;
         c.id = "core-" + random_hex(8);
         c.kind = kind;
-        c.path = path;
-        c.name = name.empty() ? (std::string(kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + " (" + path + ")") : name;
-        c.source = "adopt";
+        c.path = dest;
+        c.name = (kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + (" " + version);
+        c.source = "import";
         c.created_at = util::now_sec();
-        c.version = probe_version(kind, path);
+        c.version = version;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             bool has_default = false;
@@ -333,7 +398,7 @@ public:
         auto set_stage = [&](const std::string& s) { if (stage) *stage = s; };
         set_stage("准备下载");
 
-        std::string tmp = util::exe_dir() + "\\..\\_download";
+        std::string tmp = default_cores_root() + "\\.tmp";
         util::ensure_dir(tmp);
         std::string zip = tmp + "\\core.zip";
         if (!http_download(url, zip, progress, settings)) {
@@ -368,17 +433,38 @@ public:
         std::string core_dir = find_core_dir(kind, out_dir);
         if (core_dir.empty()) return "";
 
-        // 移到持久位置 cores\<kind>-<version>
-        CoreManager self(dir_of_state());
+        // 移入 MaaHub 内部 cores 目录：<cores_root>\<kind>-<version>
+        CoreManager self(dir_of_state(), default_cores_root());
+        std::string version = probe_version(kind, core_dir);
+        std::string dest = self.cores_root_ + "\\" + kind + "-"
+                           + (version.empty() ? "unknown" : version);
+        {
+            std::lock_guard<std::mutex> lk(self.mtx_);
+            for (auto& x : self.cores_) {
+                if (x.path == dest) {
+                    dest = self.cores_root_ + "\\" + kind + "-" + version + "-" + random_hex(4);
+                    break;
+                }
+            }
+        }
+        // 先清理可能残留的同名目标
+        remove_tree(dest);
+        // MoveFileEx 支持跨卷（MOVEFILE_COPY_ALLOWED）
+        if (!MoveFileExW(util::utf8_to_wide(core_dir).c_str(),
+                         util::utf8_to_wide(dest).c_str(),
+                         MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
+            return "";
+        }
         CoreInfo c;
         c.id = "core-" + random_hex(8);
         c.kind = kind;
-        c.path = core_dir;
-        c.name = display_name.empty() ? (std::string(kind == "maa" ? "MAA" : "MaaEnd") + " " + probe_version(kind, core_dir))
-                                      : display_name;
+        c.path = dest;
+        c.name = display_name.empty()
+            ? (std::string(kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + " " + version)
+            : display_name;
         c.source = "download";
         c.created_at = util::now_sec();
-        c.version = probe_version(kind, core_dir);
+        c.version = version;
         c.is_default = false;
         {
             std::lock_guard<std::mutex> lk(self.mtx_);
@@ -414,7 +500,6 @@ public:
 
 private:
     static std::string dir_of_state() {
-        // 与构造一致：exe 目录下的 state
         return util::exe_dir() + "\\state";
     }
 
@@ -439,17 +524,6 @@ private:
             queue = next;
         }
         return "";
-    }
-
-    void adopt_defaults() {
-        struct Def { const char* kind; const char* path; };
-        const Def defs[] = {
-            { "maa", "D:\\Application\\MAA" },
-            { "maaend", "D:\\Application\\MaaEnd" },
-        };
-        for (auto& d : defs) {
-            if (valid_core_dir(d.kind, d.path)) adopt(d.kind, d.path);
-        }
     }
 
     void load() {
@@ -639,6 +713,7 @@ private:
     }
 
     std::string dir_;
+    std::string cores_root_;
     mutable std::mutex mtx_;
     std::vector<CoreInfo> cores_;
 };
