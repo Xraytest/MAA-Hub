@@ -285,6 +285,77 @@ public:
         return mj::Value::array();
     }
 
+    // 把 UI 面板的辅助键转换为 MaaCore/MaaEnd 真实参数名
+    // （面板用更友好的键，下发前在此归一化）
+    static mj::Value normalize_task_params(const std::string& kind,
+                                           const std::string& task,
+                                           const mj::Value& in) {
+        mj::Value out = in;
+        if (kind != "maa") return out;
+        auto num = [&](const std::string& k, int def) -> int64_t {
+            auto* v = in.find(k);
+            return (v && v->is_number()) ? v->as_int() : def;
+        };
+        auto boolean = [&](const std::string& k, bool def) -> bool {
+            auto* v = in.find(k);
+            return (v && (v->is_bool() || v->is_number())) ? v->as_bool() : def;
+        };
+        if (task == "Infrast") {
+            // mode: 0默认 / 10000自定义 / 20000轮换
+            int m = (int)num("mode", 0);
+            out.set("mode", (int64_t)(m == 1 ? 10000 : m == 2 ? 20000 : 0));
+            // drones: 索引 -> MAA 字符串
+            static const char* kDrones[] = { "_NotUse", "Money", "SyntheticJade",
+                                             "CombatRecord", "Chip" };
+            int d = (int)num("drones_idx", 0);
+            if (d < 0 || d > 4) d = 0;
+            out.set("drones", std::string(kDrones[d]));
+        }
+        if (task == "Recruit") {
+            // confirm_3..6 -> confirm 数组；select_tags -> select 数组
+            mj::Value confirm = mj::Value::array();
+            mj::Value select = mj::Value::array();
+            for (int lv = 3; lv <= 6; ++lv) {
+                std::string k = "confirm_" + std::to_string(lv);
+                if (boolean(k, false)) confirm.push((int64_t)lv);
+            }
+            std::string tags = in.get_str("select_tags", "");
+            std::string cur;
+            for (char ch : tags + ";") {
+                if (ch == ';') {
+                    if (!cur.empty()) {
+                        try { select.push((int64_t)std::stoi(cur)); } catch (...) {}
+                        cur.clear();
+                    }
+                } else if (ch != ' ') {
+                    cur += ch;
+                }
+            }
+            out.set("confirm", std::move(confirm));
+            out.set("select", std::move(select));
+        }
+        if (task == "Mall") {
+            // blacklist_str -> blacklist 数组；buy_first 字符串 -> 数组
+            std::string bl = in.get_str("blacklist_str", "");
+            if (!bl.empty()) {
+                mj::Value arr = mj::Value::array();
+                std::string cur;
+                for (char ch : bl + ";") {
+                    if (ch == ';') {
+                        if (!cur.empty()) { arr.push(cur); cur.clear(); }
+                    } else if (ch != ' ') {
+                        cur += ch;
+                    }
+                }
+                out.set("blacklist", std::move(arr));
+            }
+        }
+        if (task == "StartUp") {
+            // account_name_set 只是面板开关，真实参数 account_name 由账号注入提供
+        }
+        return out;
+    }
+
     int64_t run_on_executor(const std::string& id, const std::string& task,
                             const mj::Value& params) {
         auto w = worker_of(id);
@@ -296,9 +367,10 @@ public:
         if (!e.account_id.empty()) has_acc = accounts_->get(e.account_id, acc);
         static const std::vector<std::string> aware_tasks = { "StartUp", "CloseDown", "AccountSwitch" };
         bool is_aware = std::find(aware_tasks.begin(), aware_tasks.end(), task) != aware_tasks.end();
+        mj::Value normalized = normalize_task_params(e.kind, task, params);
         mj::Value final_params = (is_aware || has_acc)
-            ? AccountStore::apply_to_task(e.kind, task, params, has_acc ? &acc : nullptr)
-            : params;
+            ? AccountStore::apply_to_task(e.kind, task, normalized, has_acc ? &acc : nullptr)
+            : normalized;
         mj::Value req = mj::Value::object();
         req.set("task", task);
         req.set("params", final_params);

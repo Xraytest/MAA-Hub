@@ -16,6 +16,36 @@
 > 每个执行器是独立进程各自加载 DLL（Windows 下 DLL 代码段共享、数据段按进程私有），
 > 因此**不会重复拉取/占用磁盘，又能让多个账号同时运行**。
 
+## 单实例配置页面（与 MAA 官方 1:1）
+
+依据 MaaAssistantArknights 官方 GUI 源码复刻（`src/MaaWpfGui/Views/UI/TaskQueueView.xaml`、
+`Views/UserControl/TaskQueue/*.xaml`、`Res/Localizations/zh-cn.xaml`、HandyControl Light 主题）：
+
+- **布局**：外框 Margin 20 + 白色卡片 + 圆角 4；左列 **190px** 任务列表（官方 `TaskList Width=190`），
+  左键选中=右侧显示该任务设置，勾选=启用；底部控制栏（连接/断开 + 状态点 + 🔗 Link Start!）
+- **配色**：Primary `#326cf3`、Background `#eeeeee`、Border `#e0e0e0`、PrimaryText `#212121`、
+  SecondaryText `#757575`、ThirdlyText `#bdbdbd`、Success `#2db84d`、Warning `#e9af20`、
+  Danger `#db3340`、Accent `#f8491e`；控件高 28、圆角 4、内边距 (10,5)
+- **官方任务名**：MAA 13 个（开始唤醒/理智作战/基建换班/…）；MaaEnd 66 个（🏍️抢委托送货/💰售卖弹性物资/…），
+  直接读本机 cores 的 `locales/*/zh_cn.json`；隐藏内部入口任务（SellProduct 等）
+- **任务专属设置面板**（`src/task_panels.hpp`，逐项复刻官方控件与文案）：
+
+  | 任务 | 面板内容 |
+  |---|---|
+  | 开始唤醒 | 账号切换 / 是否启动客户端 / 客户端类型（官服·Bilibili·txwy·YoStarEN/JP/KR）/ 自动检测连接 |
+  | 理智作战 | 理智与材料（最大理智药、最大吃石头、上报企鹅）/ 关卡与次数（关卡、作战次数、代理倍率 ×1~×6）/ 行为（博朗台模式、隐藏代理倍率、源石保存、隐藏不开放关卡） |
+  | 基建换班 | 基建模式（默认/自定义/轮换）/ 无人机（不使用·贸易站·制造站·发电站·办公室）/ 宿舍心情阈值 / 会客室与宿舍 / 跨设施组合（红松骑士团·感知信息·人间烟火·深海猎人） |
+  | 自动公招 | 招募次数 / 刷新 3 星 Tags / 保留许可 / 自动确认 3-6 星 / 加急许可 / Tag 策略 |
+  | 信用收支 | 访问好友 / 一日一次 / 借助战赚信用 / 信用交易所 / 只买打折 / 溢出无视黑名单 / 信用下限 / 黑名单 |
+  | 领取奖励 | 每日每周、邮件、免费单抽、幸运墙、开采许可、周年月卡、限时签到（含官方提示） |
+  | MaaEnd 账号切换 | 启用账号切换（用执行器绑定的账号） |
+
+  其余任务走通用参数编辑器（按 catalog 声明动态生成）。
+
+- **参数归一化**：面板使用友好键名，下发前由 `Hub::normalize_task_params()` 转换为
+  MaaCore 真实参数（如 Infrast `mode` 0/1/2 → 0/10000/20000、`drones_idx` → `_NotUse/Money/...`、
+  Recruit `confirm_3..6` → `confirm` 数组、`select_tags` → `select` 数组、Mall `blacklist_str` → `blacklist` 数组）
+
 ## 功能
 
 - **执行器管理**：左侧创建/删除/切换执行器；每个执行器独立进程，独立连接游戏窗口

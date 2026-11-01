@@ -1,5 +1,6 @@
 // MaaHub 原生窗口应用实现
 #include "app_window.hpp"
+#include "task_panels.hpp"
 
 #include <windowsx.h>
 
@@ -92,30 +93,6 @@ bool MaaHubWindow::render_to_file(const std::string& page, const std::string& pn
     if (page == "executor" && selected_exec_.empty()) {
         auto ids = hub_->executors();
         if (!ids.empty()) selected_exec_ = ids[0].id;
-    }
-    if (char* dbg = getenv("MAAHUB_DEBUG_RENDER")) {
-        // 注意：catalog_of() 内部也要拿 snap_mtx_，绝不能在外层持锁时调用（不可重入）
-        std::vector<mj::Value> t = catalog_of("maaend");
-        {
-            std::lock_guard<std::mutex> lk(snap_mtx_);
-            fprintf(stderr, "[render] page_=%s selected=%s\n",
-                    page_.c_str(), selected_exec_.c_str());
-            if (auto* e = snap_.find("executors"); e && e->is_array()) {
-                fprintf(stderr, "[render] snapshot executors=%zu\n", e->items().size());
-                for (auto& x : e->items()) {
-                    auto* cc = x.find("catalog");
-                    fprintf(stderr, "[render]   %s kind=%s catalog=%zu\n",
-                            x.get_str("id", "").c_str(), x.get_str("kind", "").c_str(),
-                            (cc && cc->is_array()) ? cc->items().size() : 0);
-                }
-            }
-        }
-        fprintf(stderr, "[render] catalog_of(maaend)=%zu\n", t.size());
-        if (!t.empty()) {
-            fprintf(stderr, "[render]   first task name=%s display=%ls\n",
-                    t[0].get_str("name", "").c_str(),
-                    display_name("maaend", t[0].get_str("name", "")).c_str());
-        }
     }
     const int W = 1280, H = 800;
     HDC screen = GetDC(nullptr);
@@ -339,13 +316,19 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
     draw_sidebar(sidebar);
     draw_topbar(topbar);
 
-    if (page_ == "executor" && !selected_exec_.empty()) page_executor(content);
-    else if (page_ == "accounts") page_accounts(content);
-    else if (page_ == "cores") page_cores(content);
-    else if (page_ == "planner") page_planner(content);
-    else if (page_ == "events") page_events(content);
-    else if (page_ == "settings") page_settings(content);
-    else page_welcome(content);
+    try {
+        if (page_ == "executor" && !selected_exec_.empty()) page_executor(content);
+        else if (page_ == "accounts") page_accounts(content);
+        else if (page_ == "cores") page_cores(content);
+        else if (page_ == "planner") page_planner(content);
+        else if (page_ == "events") page_events(content);
+        else if (page_ == "settings") page_settings(content);
+        else page_welcome(content);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[paint] EXCEPTION in page %s: %s\n", page_.c_str(), e.what());
+    } catch (...) {
+        fprintf(stderr, "[paint] UNKNOWN EXCEPTION in page %s\n", page_.c_str());
+    }
 
     gui_.end();
     input_.pressed = false;
@@ -757,45 +740,27 @@ void MaaHubWindow::page_executor(RECT content) {
         ry += 40;
 
         if (ui.open) {
-            mj::Value spec = mj::Value::object();
-            for (auto& t : tasks) {
-                if (t.get_str("name", "") == sel_task) spec = t;
-            }
-            if (auto* ps = spec.find("params"); ps && ps->is_array() && !ps->items().empty()) {
-                int ph = (int)ps->items().size() * 36 + 16;
-                RECT pbody{ rx, ry, right_col.right - 16, ry + ph };
-                gui_.round_rect(pbody, gui_.theme.panel, gui_.theme.border, 4);
-                gui_.text(pbody.left + 12, pbody.top + 8, L"\u9ad8\u7ea7\u8bbe\u7f6e",
-                          gui_.theme.dim, gui_.font_small);
-                int py = pbody.top + 28;
-                for (auto& p : ps->items()) {
-                    std::string pn = p.get_str("name", "");
-                    gui_.text(pbody.left + 14, py + 5, gui::widen(pn),
-                              gui_.theme.dim, gui_.font_small);
-                    RECT ir{ pbody.left + 190, py, pbody.left + 460, py + 26 };
-                    std::string edit;
-                    auto it = ui.params.find(pn);
-                    if (it != ui.params.end()) edit = mj::Value::dump(it->second);
-                    else if (p.has("default")) edit = mj::Value::dump(p["default"]);
-                    std::wstring hint;
-                    if (p.has("default")) {
-                        hint = L"\u9ed8\u8ba4 " + gui::widen(mj::Value::dump(p["default"]));
-                    }
-                    gui_.text_input(("p-" + id + "-" + sel_task + "-" + pn).c_str(),
-                                    ir, edit, hint.c_str());
-                    mj::Value pv;
-                    ui.params[pn] = mj::try_parse(edit, pv) ? pv : mj::Value(edit);
-                    py += 36;
-                }
-                ry = pbody.bottom + 12;
-            } else {
-                RECT pbody{ rx, ry, right_col.right - 16, ry + 40 };
-                gui_.round_rect(pbody, gui_.theme.panel, gui_.theme.border, 4);
-                gui_.text(pbody.left + 14, pbody.top + 12,
-                          L"\u8be5\u4efb\u52a1\u65e0\u53ef\u914d\u7f6e\u53c2\u6570",
-                          gui_.theme.dim, gui_.font_small);
-                ry = pbody.bottom + 12;
-            }
+            // 官方任务面板（1:1 复刻 MaaWpfGui TaskQueue/*.xaml）
+            // 先用滚动区域承载，避免长面板超出可视区
+            int panel_top = ry;
+            int panel_h = (right_col.bottom - 12) - panel_top;
+            if (panel_h < 80) panel_h = 80;
+            gui_.begin_scroll(("panel-" + id + "-" + sel_task).c_str(),
+                              { rx, panel_top, right_col.right - 16, right_col.bottom - 12 },
+                              2000, scroll_["panel-" + id + "-" + sel_task]);
+            int saved_y = ry;
+            PanelCtx pctx{ gui_, rx, ry, right_col.right - 16, ui.params, id, sel_task };
+            bool custom = draw_task_panel(pctx);
+            ry = pctx.y;
+            int used = ry - saved_y;
+            gui_.end_scroll();
+            // 面板边框（按实际内容高度）
+            RECT pbody{ rx, panel_top, right_col.right - 16,
+                        panel_top + (used > 0 ? used + 8 : 40) };
+            // 先画边框会盖住内容，这里只画左侧竖线作视觉分隔
+            gui_.fill({ rx - 8, panel_top, rx - 7, pbody.bottom }, gui_.theme.border);
+            ry = pbody.bottom + 12;
+            (void)custom;
         }
 
         // 实例信息条
@@ -1355,6 +1320,33 @@ void MaaHubWindow::refresh_snapshot_fast() {
     std::lock_guard<std::mutex> lk(snap_mtx_);
     snap_ = std::move(v);
     ++snap_version_;
+}
+
+// 测试用：选中指定任务并展开其参数面板（按任务类型挑选执行器）
+void MaaHubWindow::debug_select_task(const std::string& task) {
+    // MaaEnd 专属任务 -> 选 maaend 执行器；否则选 maa 执行器
+    static const char* kEndOnly[] = { "AccountSwitch", "DailyRewards", "CreditShopping",
+                                      "AutoCollect", "ProtocolSpace", "GiftOperator",
+                                      "VisitFriends", "BatchAddFriends", "ReadAllWiki" };
+    bool want_end = false;
+    for (auto* t : kEndOnly) {
+        if (task == t) { want_end = true; break; }
+    }
+    auto ids = hub_->executors();
+    std::string pick;
+    for (auto& e : ids) {
+        if ((e.kind == "maaend") == want_end) { pick = e.id; break; }
+    }
+    if (pick.empty() && !ids.empty()) pick = ids[0].id;
+    if (pick.empty()) return;
+    selected_exec_ = pick;
+    auto& m = task_ui_[selected_exec_];
+    for (auto& kv : m) kv.second.selected = false;
+    TaskUiState& ui = m[task];
+    ui.selected = true;
+    ui.open = true;
+    fprintf(stderr, "[render] selected exec=%s task=%s open=%d\n",
+            selected_exec_.c_str(), task.c_str(), (int)ui.open);
 }
 
 void MaaHubWindow::refresh_snapshot() {

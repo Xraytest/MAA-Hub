@@ -231,6 +231,16 @@ public:
     }
 
     // ------------------------------------------------------------ 控件
+    // 分组标题（对应 MAA 设置区的 GroupBox / 分隔小标题）
+    void group_title(int x, int y, const std::wstring& label) {
+        RECT save = clip_;
+        text(x, y, label, theme.dim, font_small);
+        (void)save;
+    }
+    void divider(RECT r) {
+        fill({ r.left, r.top, r.right, r.top + 1 }, theme.border);
+    }
+
     // style: 0 normal, 1 primary, 2 danger, 3 warn
     bool button(const char* id, RECT r, const std::wstring& label_text, int style = 0,
                 bool enabled = true) {
@@ -265,6 +275,40 @@ public:
         text(tx, ty, lbl, txt, f);
         pop_clip();
         return click;
+    }
+
+    // 横向选项条（单选，返回点击索引，未点击 -1）已在下方 option_strip
+
+    // 数字输入框：左侧标签 + 中间输入 + 右侧 +/- 步进按钮
+    void number_input(const char* id, RECT r, const std::wstring& label,
+                      int& value, int step = 1, int min_v = 0, int max_v = 9999) {
+        int lw = 150;
+        RECT save = clip_;
+        text(r.left, r.top + (r.bottom - r.top - 17) / 2, label, theme.text, font);
+        (void)save;
+        RECT ir{ r.left + lw, r.top, r.right - 76, r.bottom };
+        std::string edit = std::to_string(value);
+        text_input(id, ir, edit, nullptr);
+        int nv = value;
+        try { nv = std::stoi(edit); } catch (...) { nv = value; }
+        if (nv < min_v) nv = min_v;
+        if (nv > max_v) nv = max_v;
+        value = nv;
+        RECT minus_b{ r.right - 72, r.top, r.right - 40, r.bottom };
+        RECT plus_b{ r.right - 36, r.top, r.right - 4, r.bottom };
+        if (button((std::string(id) + "-m").c_str(), minus_b, L"-", 0)) {
+            value = (value - step < min_v) ? min_v : value - step;
+        }
+        if (button((std::string(id) + "-p").c_str(), plus_b, L"+", 0)) {
+            value = (value + step > max_v) ? max_v : value + step;
+        }
+    }
+
+    // 提示行（对应 MAA 的 Tip 文本，三级文字色）
+    void tip_line(int x, int y, int right, const std::wstring& text) {
+        RECT save = clip_;
+        text_clipped({ x, y, right, y + 16 }, text, theme.faint, font_small);
+        (void)save;
     }
 
     bool checkbox(const char* id, RECT r, const std::wstring& label, bool& v) {
