@@ -29,7 +29,7 @@ set SRCS=%ROOT%\src\main.cpp %ROOT%\src\worker_main.cpp %ROOT%\src\app_window.cp
 
 REM Native Win32 GUI, zero third-party deps
 set CLFLAGS=/nologo /EHsc /std:c++17 /W3 /utf-8 /Fo:%ROOT%\build\ /Fe:%ROOT%\build\MaaHub.exe
-set LINKFLAGS=gdi32.lib user32.lib shell32.lib winhttp.lib advapi32.lib
+set LINKFLAGS=gdi32.lib user32.lib shell32.lib winhttp.lib advapi32.lib msimg32.lib
 
 if /i "%CONFIG%"=="debug" (
     set CLFLAGS=%CLFLAGS% /Zi /Od
