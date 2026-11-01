@@ -78,11 +78,13 @@ public:
 
     void init_fonts() {
         if (font) return;
-        font = make_font(14, false);
-        font_bold = make_font(14, true);
-        font_small = make_font(12, false);
-        font_title = make_font(16, true);
-        font_big = make_font(15, true);
+        // 字号对齐 MAA 官方 WPF 规格：正文 12pt≈16px、辅助 11pt≈15px、
+        // 标题 14pt≈19px、大标题 15pt≈20px（96DPI 下 1pt = 1.333px）
+        font = make_font(16, false);
+        font_bold = make_font(16, true);
+        font_small = make_font(15, false);
+        font_title = make_font(19, true);
+        font_big = make_font(20, true);
     }
 
     // ------------------------------------------------------------ 帧

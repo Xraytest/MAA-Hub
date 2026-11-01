@@ -376,9 +376,9 @@ void MaaHubWindow::draw_sidebar(RECT r) {
     // ---- 执行器列表 ----
     int y = r.top + 64;
     gui_.text(r.left + 14, y, L"执行器（实例）", gui_.theme.dim, gui_.font_small);
-    // 原来只有 32px 宽，"＋ 新建" 需要 46px，文本会溢出按钮；
-    // 放宽到 58px（左边界 180，仍远在标题文字右侧，不会重叠）
-    RECT add_btn{ r.right - 70, y - 4, r.right - 12, y + 18 };
+    // 按钮宽度按当前字体实测，避免字号变化后文本溢出
+    int add_w = gui_.text_size(L"＋ 新建", gui_.font).cx + 20;
+    RECT add_btn{ r.right - 12 - add_w, y - 4, r.right - 12, y + 18 };
     if (gui_.button("new-exec", add_btn, L"＋ 新建", 1)) show_new_exec_ = !show_new_exec_;
     y += 24;
 
@@ -1551,8 +1551,26 @@ void MaaHubWindow::backend_loop() {
             PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
         } else {
             refresh_snapshot();
+            poll_task_states();   // 同步左列任务状态点（运行中 -> 完成/出错）
             PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
             Sleep(500);
+        }
+    }
+}
+
+// 轮询各执行器的运行任务状态：任务结束后把「运行中」转为「完成/出错」
+void MaaHubWindow::poll_task_states() {
+    auto ids = hub_->executors();
+    for (auto& e : ids) {
+        std::string running = hub_->running_task_of(e.id);
+        if (running.empty()) continue;
+        mj::Value st = hub_->executor_status(e.id, 0);
+        // worker 已停止/停止中，或该执行器没有正在跑的任务 => 结束
+        bool busy = st.get_bool("busy", false);
+        if (!busy) {
+            std::string err = st.get_str("last_error", "");
+            hub_->set_task_result(e.id, running, err.empty() ? "ok" : "error");
+            hub_->set_running_task(e.id, "");
         }
     }
 }
@@ -1632,6 +1650,7 @@ void MaaHubWindow::action_stop(const std::string& id) {
 void MaaHubWindow::action_run(const std::string& id, const std::string& task,
                               const mj::Value& params) {
     int64_t tid = hub_->run_on_executor(id, task, params);
+    if (tid <= 0) hub_->set_task_result(id, task, "error");
     set_notice(tid > 0 ? task + " 已启动 (task " + std::to_string(tid) + ")"
                        : task + " 启动失败：" + hub_->executor_status(id).get_str("last_error", ""));
 }
