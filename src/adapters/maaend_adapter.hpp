@@ -39,12 +39,227 @@ public:
             mj::Value v;
             if (mj::try_parse(content, v)) interface_ = std::move(v);
         }
+        // 先设置本地化目录，scan_tasks 才能注入官方中文标签
+        set_label_install_dir(st_.install_dir + "\\locales");
         catalog_ = scan_tasks();
         st_.task_count = (int64_t)catalog_.size();
         return true;
     }
 
     // ------------------------------------------------------------ 任务目录
+    // 把一个 task 引用的 option 转成 UI 可用的参数描述列表
+    // MaaEnd 的 option 定义在同文件 "option" 节：{name: {type, cases:[{name,option}], default}}
+    static mj::Value task_option_specs(const mj::Value& task, const mj::Value& file_data) {
+        mj::Value arr = mj::Value::array();
+        const mj::Value* opts = file_data.find("option");
+        if (!opts || !opts->is_object()) return arr;
+        const mj::Value* refs = task.find("option");
+        if (!refs || !refs->is_array()) return arr;
+        for (auto& r : refs->items()) {
+            if (!r.is_string()) continue;
+            std::string key = r.as_string();
+            auto it = opts->members().find(key);
+            if (it == opts->members().end()) continue;
+            const mj::Value& spec = it->second;
+            if (!spec.is_object()) continue;
+            std::string type = spec.get_str("type", "");
+            mj::Value item = mj::Value::object();
+            item.set("name", mj::Value(key));
+            item.set("type", mj::Value(option_ui_type(type)));
+            std::string lbl = option_label(task.get_str("name", ""), key);
+            if (!lbl.empty()) item.set("description", mj::Value(lbl));
+            if (auto* cases = spec.find("cases"); cases && cases->is_array()) {
+                mj::Value names = mj::Value::array();
+                for (auto& cs : cases->items()) {
+                    std::string cn = cs.is_object() ? cs.get_str("name", "")
+                                                    : (cs.is_string() ? cs.as_string() : "");
+                    if (cn.empty()) continue;
+                    // 优先用官方 cases 中文名，缺失时回退枚举名
+                    std::string cl = case_label(task.get_str("name", ""), key, cn);
+                    names.push(cl.empty() ? cn : cl);
+                }
+                if (!names.items().empty()) item.set("cases", std::move(names));
+            }
+            if (spec.has("default")) item.set("default", spec["default"]);
+            arr.push(std::move(item));
+        }
+        return arr;
+    }
+
+    // 官方 option 中文标签：读 <install_dir>\locales\**\zh_cn.json
+    // 键优先级：option.<key>.label > task.<task>.option.<key>.label > 空（回退 key）
+    static std::string option_label(const std::string& task, const std::string& key) {
+        static std::map<std::string, std::string> cache;
+        static bool loaded = false;
+        std::string ck = task + "|" + key;
+        auto ci = cache.find(ck);
+        if (ci != cache.end()) return ci->second;
+        if (!loaded) {
+            loaded = true;
+            load_option_labels(cache);
+        }
+        auto it = cache.find(ck);
+        std::string v = it == cache.end() ? "" : it->second;
+        cache[ck] = v;
+        return v;
+    }
+
+    // 大小写/分隔符/UTC-GMT 变体归一化，缓解不同版本间键名差异
+    static std::string norm_case_key(const std::string& s) {
+        std::string o;
+        for (char ch : s) {
+            if (ch == '_' || ch == '-' || ch == ' ') continue;
+            o += (char)toupper((unsigned char)ch);
+        }
+        // UTC 与 GMT 在不同版本间混用
+        size_t p;
+        while ((p = o.find("UTC")) != std::string::npos) o.replace(p, 3, "GMT");
+        return o;
+    }
+
+    static std::string case_label(const std::string& task, const std::string& key,
+                                  const std::string& case_name) {
+        static std::map<std::string, std::string> cache;
+        static bool loaded = false;
+        std::string ck = task + "|" + key + "|" + case_name;
+        auto ci = cache.find(ck);
+        if (ci != cache.end()) return ci->second;
+        if (!loaded) {
+            loaded = true;
+            load_case_labels(cache);
+        }
+        // 依次尝试 task 专属、通配、归一化匹配
+        std::string v;
+        auto it = cache.find(ck);
+        if (it != cache.end()) v = it->second;
+        if (v.empty()) {
+            auto it2 = cache.find("*|" + key + "|" + case_name);
+            if (it2 != cache.end()) v = it2->second;
+        }
+        if (v.empty()) {
+            auto it3 = cache.find(norm_case_key(key) + "|" + norm_case_key(case_name));
+            if (it3 != cache.end()) v = it3->second;
+        }
+        cache[ck] = v;
+        return v;
+    }
+
+    static void load_case_labels(std::map<std::string, std::string>& cache) {
+        std::string root = label_dir_ref();
+        std::vector<std::string> files;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(util::utf8_to_wide(root + "\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            std::wstring n = fd.cFileName;
+            if (n == L"." || n == L"..") continue;
+            std::string sub = root + "\\" + util::wide_to_utf8(n);
+            WIN32_FIND_DATAW fd2;
+            HANDLE h2 = FindFirstFileW(util::utf8_to_wide(sub + "\\zh_cn.json").c_str(), &fd2);
+            if (h2 != INVALID_HANDLE_VALUE) {
+                files.push_back(sub + "\\zh_cn.json");
+                FindClose(h2);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        for (auto& fp : files) {
+            std::string content;
+            if (!util::read_file(fp, content)) continue;
+            mj::Value j;
+            if (!mj::try_parse(content, j)) continue;
+            for (auto& kv : j.members()) {
+                if (!kv.second.is_string()) continue;
+                const std::string& k = kv.first;
+                if (k.size() < 7 || k.substr(k.size() - 6) != ".label") continue;
+                std::string body = k.substr(0, k.size() - 6);   // 去掉 .label
+                size_t cp = body.find(".cases.");
+                if (cp == std::string::npos) continue;
+                std::string head = body.substr(0, cp);           // option.<O> 或 task.<T>.option.<O>
+                std::string cn = body.substr(cp + 7);
+                if (cn.empty()) continue;
+                std::string ok;
+                std::string tk;
+                if (head.rfind("option.", 0) == 0) {
+                    ok = head.substr(7);
+                    cache["*|" + ok + "|" + cn] = kv.second.as_string();
+                    cache["|" + ok + "|" + cn] = kv.second.as_string();
+                } else if (head.rfind("task.", 0) == 0) {
+                    std::string rest = head.substr(5);
+                    size_t op = rest.find(".option.");
+                    if (op == std::string::npos) continue;
+                    tk = rest.substr(0, op);
+                    ok = rest.substr(op + 8);
+                    cache[tk + "|" + ok + "|" + cn] = kv.second.as_string();
+                } else {
+                    continue;
+                }
+                if (ok.empty()) continue;
+                // 归一化键（UTC/GMT 等变体），便于跨版本匹配
+                std::string nk = norm_case_key(ok) + "|" + norm_case_key(cn);
+                if (cache.find(nk) == cache.end()) cache[nk] = kv.second.as_string();
+            }
+        }
+    }
+
+    static void load_option_labels(std::map<std::string, std::string>& cache) {
+        std::string root = label_dir_ref();
+        std::vector<std::string> files;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(util::utf8_to_wide(root + "\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            std::wstring n = fd.cFileName;
+            if (n == L"." || n == L"..") continue;
+            std::string sub = root + "\\" + util::wide_to_utf8(n);
+            WIN32_FIND_DATAW fd2;
+            HANDLE h2 = FindFirstFileW(util::utf8_to_wide(sub + "\\zh_cn.json").c_str(), &fd2);
+            if (h2 != INVALID_HANDLE_VALUE) {
+                files.push_back(sub + "\\zh_cn.json");
+                FindClose(h2);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        for (auto& fp : files) {
+            std::string content;
+            if (!util::read_file(fp, content)) continue;
+            mj::Value j;
+            if (!mj::try_parse(content, j)) continue;
+            for (auto& kv : j.members()) {
+                if (!kv.second.is_string()) continue;
+                const std::string& k = kv.first;
+                if (k.rfind("option.", 0) == 0 && k.size() > 7
+                    && k.substr(k.size() - 6) == ".label") {
+                    cache["*|" + k.substr(7, k.size() - 7 - 6)] = kv.second.as_string();
+                } else if (k.rfind("task.", 0) == 0 && k.find(".option.") != std::string::npos
+                           && k.size() > 6 && k.substr(k.size() - 6) == ".label") {
+                    std::string rest = k.substr(5, k.size() - 5 - 6);
+                    size_t dot = rest.find(".option.");
+                    if (dot != std::string::npos) {
+                        std::string tk = rest.substr(0, dot);
+                        std::string ok = rest.substr(dot + 8);
+                        cache[tk + "|" + ok] = kv.second.as_string();
+                    }
+                }
+            }
+        }
+    }
+
+    static std::string& label_dir_ref() {
+        static std::string dir;
+        return dir;
+    }
+    static void set_label_install_dir(const std::string& d) { label_dir_ref() = d; }
+
+    // MaaEnd option type -> UI 控件类型
+    static std::string option_ui_type(const std::string& t) {
+        if (t == "switch" || t == "checkbox") return "bool";
+        if (t == "input") return "string";
+        if (t == "select") return "select";
+        return "string";
+    }
+
     std::vector<mj::Value> scan_tasks() const {
         std::vector<mj::Value> out;
         std::vector<std::string> imports;
@@ -71,7 +286,9 @@ public:
                     tv.set("name", mj::Value(name));
                     tv.set("kind", mj::Value(is_preset ? "preset" : "task"));
                     tv.set("description", mj::Value("来自 " + rel));
-                    tv.set("params", mj::Value::array());
+                    // 从同文件 option 节读取该任务引用的选项定义，
+                    // 让 UI 能按类型渲染控件（原来硬编码为空数组，导致任务无可配置界面）
+                    tv.set("params", task_option_specs(t, data));
                     out.push_back(std::move(tv));
                 }
             }
@@ -82,6 +299,7 @@ public:
     // ------------------------------------------------------------ 加载
     bool load() override {
         if (!st_.available) return false;
+        set_label_install_dir(st_.install_dir + "\\locales");
         std::string maafw = st_.install_dir + "\\maafw";
         std::wstring dll = util::utf8_to_wide(st_.core_dll);
         HMODULE h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
