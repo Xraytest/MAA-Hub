@@ -372,11 +372,20 @@ public:
         mj::Value final_params = (is_aware || has_acc)
             ? AccountStore::apply_to_task(e.kind, task, normalized, has_acc ? &acc : nullptr)
             : normalized;
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            running_task_[id] = task;
+        }
         mj::Value req = mj::Value::object();
         req.set("task", task);
         req.set("params", final_params);
         mj::Value r;
-        if (!w->call("run", req, 60000, r)) return 0;
+        bool ok = w->call("run", req, 60000, r);
+        if (!ok) {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            running_task_.erase(id);
+            return 0;
+        }
         int64_t tid = r.get_int("task_id", 0);
         if (has_acc && tid > 0) accounts_->mark_run(e.account_id);
         return tid;
@@ -628,6 +637,39 @@ public:
         }
         schedule_save();
         return true;
+    }
+
+    // ---------------------------------------------------------------- 任务运行状态
+    // 左列任务状态点用：当前运行中的任务名 + 最近一次结果
+    std::string running_task_of(const std::string& exec_id) const {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        auto it = running_task_.find(exec_id);
+        return it == running_task_.end() ? std::string() : it->second;
+    }
+
+    void set_running_task(const std::string& exec_id, const std::string& task) {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        if (task.empty()) running_task_.erase(exec_id);
+        else running_task_[exec_id] = task;
+    }
+
+    std::string last_task_result(const std::string& exec_id, const std::string& task) const {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        auto e = task_result_.find(exec_id);
+        if (e == task_result_.end()) return "";
+        auto t = e->second.find(task);
+        return t == e->second.end() ? "" : t->second;
+    }
+
+    void set_task_result(const std::string& exec_id, const std::string& task,
+                         const std::string& result) {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        if (result.empty()) {
+            auto e = task_result_.find(exec_id);
+            if (e != task_result_.end()) e->second.erase(task);
+        } else {
+            task_result_[exec_id][task] = result;
+        }
     }
 
     // ---------------------------------------------------------------- 任务参数持久化
@@ -958,6 +1000,8 @@ private:
     std::mutex data_mtx_;
     std::map<std::string, mj::Value> data_;
 
+    std::map<std::string, std::string> running_task_;   // exec_id -> 当前运行任务
+    std::map<std::string, std::map<std::string, std::string>> task_result_;
     mutable std::mutex tp_mtx_;
     std::map<std::string, std::map<std::string, std::map<std::string, mj::Value>>>
         task_params_;   // exec_id -> task -> key -> value

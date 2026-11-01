@@ -68,6 +68,7 @@ private:
 
     // 后台
     void backend_loop();
+    void poll_task_states();
     void post_action(std::function<void()> fn, const std::string& busy_text);
     void refresh_snapshot();
     void refresh_snapshot_fast();   // 即时快照：只读持久化文件，启动首帧用
