@@ -727,9 +727,10 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
     }
     gui_.end_scroll();
 
-    // 底部：全选 / 全不选
-    RECT sel_all{ card.left + 16, card.bottom - 44, card.left + 96, card.bottom - 16 };
-    RECT sel_none{ card.left + 104, card.bottom - 44, card.left + 184, card.bottom - 16 };
+    // 底部：全选 / 反选（与左列底部按钮组一致）
+    int half2 = (card.right - card.left - 32) / 2;
+    RECT sel_all{ card.left + 16, card.bottom - 44, card.left + 16 + half2, card.bottom - 16 };
+    RECT sel_inv{ card.left + 16 + half2 + 4, card.bottom - 44, card.right - 16, card.bottom - 16 };
     if (gui_.button("addtask-all", sel_all, L"\u5168\u9009", 0)) {
         task_list_[id].clear();
         for (auto& t : all) {
@@ -739,8 +740,21 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
         }
         save_task_list();
     }
-    if (gui_.button("addtask-none", sel_none, L"\u5168\u4e0d\u9009", 0)) {
-        task_list_[id].clear();
+    if (gui_.button("addtask-inverse", sel_inv, L"\u53cd\u9009", 0)) {
+        // 确保有初始集合，再逐个取反
+        if (task_list_.find(id) == task_list_.end()) {
+            for (auto& t : all) {
+                std::string s = t.get_str("name", "");
+                if (kind == "maaend" && maaend_hidden_task(s)) continue;
+                task_list_[id].insert(s);
+            }
+        }
+        for (auto& t : all) {
+            std::string s = t.get_str("name", "");
+            if (kind == "maaend" && maaend_hidden_task(s)) continue;
+            if (task_list_[id].count(s)) task_list_[id].erase(s);
+            else task_list_[id].insert(s);
+        }
         save_task_list();
     }
 }
@@ -1078,14 +1092,19 @@ void MaaHubWindow::page_executor(RECT content) {
               L"\u5de6\u952e \u4efb\u52a1\u8bbe\u7f6e \u00b7 \u53f3\u952e \u4ece\u6b64\u5904\u8fd0\u884c",
               gui_.theme.faint, gui_.font_small);
 
+    // 官方底部按钮组：全选 | 反选（并排各半宽、外圆角、高 30）
     int hy = left_col.top + 52;
-    RECT sel_all{ left_col.left + 12, hy, left_col.left + 72, hy + 22 };
-    RECT sel_none{ left_col.left + 78, hy, left_col.left + 138, hy + 22 };
+    int half = (left_col.right - left_col.left - 24) / 2;
+    RECT sel_all{ left_col.left + 12, hy, left_col.left + 12 + half, hy + 30 };
+    RECT sel_inv{ left_col.left + 12 + half + 4, hy, left_col.right - 12, hy + 30 };
     if (gui_.button("tb-all", sel_all, L"\u5168\u9009", 0)) {
         for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = true;
     }
-    if (gui_.button("tb-none", sel_none, L"\u5168\u4e0d\u9009", 0)) {
-        for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = false;
+    if (gui_.button("tb-inverse", sel_inv, L"\u53cd\u9009", 0)) {
+        for (auto& t : tasks) {
+            TaskUiState& s = task_ui_[id][t.get_str("name", "")];
+            s.checked = !s.checked;
+        }
     }
 
     int list_top = hy + 30;
