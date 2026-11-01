@@ -45,6 +45,10 @@ struct Theme {
     COLORREF status_error = RGB(0xFF, 0x66, 0x66);    // Error 红
     COLORREF input_bg = RGB(0xFF, 0xFF, 0xFF);      // DefaultColor
     COLORREF row_alt = RGB(0xEE, 0xEE, 0xEE);       // SecondaryRegionColor
+    // 官方背景层级：窗口/左列卡片 = RegionBrushOpacity25(#40FFFFFF)
+    // 叠加在系统白底上约等于 #FBFBFB；内容区沿用该色而非纯白
+    COLORREF card_bg = RGB(0xFB, 0xFB, 0xFB);      // RegionBrushOpacity25 混合结果
+    COLORREF card_bg_soft = RGB(0xF6, 0xF6, 0xF6); // 次级卡片（略深一档）
     COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）
 };
 

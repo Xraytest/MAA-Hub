@@ -1028,18 +1028,23 @@ void MaaHubWindow::page_executor(RECT content) {
         tasks.swap(sorted);
     }
 
-    // 外框：Margin 20 + 白色 Region 卡片 + 圆角 4
+    // 官方结构：页面 Margin 20 无背景；左列是独立卡片
+    //   <Border Width="210" MaxWidth="210" Background="RegionBrushOpacity25"
+    //            BorderBrush="BorderBrush" BorderThickness="1" CornerRadius="4">
+    //     <Grid Width="190"> … 任务列表 + 40px 添加任务行 …
+    // 右栏（任务设置）没有独立卡片背景，直接放在页面背景上。
     RECT frame{ content.left, content.top, content.right, content.bottom };
-    gui_.round_rect(frame, gui_.theme.panel, gui_.theme.border, 4);
-
-    const int LEFT_W = 190;                 // MAA TaskList Width=190
+    const int LEFT_CARD_W = 210;            // 官方 Border Width=210
+    const int LEFT_W = 190;                 // 官方 Grid Width=190
     const int BAR_H = 44;
-    RECT left_col{ frame.left, frame.top, frame.left + LEFT_W, frame.bottom - BAR_H };
-    RECT right_col{ frame.left + LEFT_W, frame.top, frame.right, frame.bottom - BAR_H };
+    // 左列独立卡片（含圆角与 1px 边框）
+    RECT left_card{ frame.left, frame.top, frame.left + LEFT_CARD_W, frame.bottom - BAR_H };
+    gui_.round_rect(left_card, gui_.theme.card_bg, gui_.theme.border, 4);
+    // 左列内容区（卡片内 190px，左右各留 10px）
+    RECT left_col{ left_card.left + 10, left_card.top, left_card.left + 10 + LEFT_W,
+                   left_card.bottom };
+    RECT right_col{ left_card.right, frame.top, frame.right, frame.bottom - BAR_H };
     RECT bottom_bar{ frame.left, frame.bottom - BAR_H, frame.right, frame.bottom };
-
-    gui_.fill({ left_col.right, left_col.top, left_col.right + 1, left_col.bottom },
-              gui_.theme.border);
 
     // ---------------- 左列：任务列表 ----------------
     gui_.text(left_col.left + 12, left_col.top + 12, L"\u4efb\u52a1\u5217\u8868",
@@ -1144,7 +1149,7 @@ void MaaHubWindow::page_executor(RECT content) {
         } else if (hov) {
             fill_c = gui_.theme.hover;           line_c = gui_.theme.border;
         } else {
-            fill_c = gui_.theme.panel;           line_c = gui_.theme.border;
+            fill_c = gui_.theme.card_bg_soft;    line_c = gui_.theme.border;
         }
         if (drag_task_ == name) fill_c = gui_.theme.primary_light;
         gui_.round_rect(item, fill_c, line_c, 4);
@@ -1178,9 +1183,9 @@ void MaaHubWindow::page_executor(RECT content) {
     }
     gui_.end_scroll();
 
-    // 左列底部 40px 行：「+ 添加新任务」（官方 TaskQueue.AddTask）
+    // 左列底部 40px 行：「+ 添加新任务」（官方 RowDefinition Height="40"）
     {
-        RECT add_row{ left_col.left, left_col.bottom, left_col.right, frame.bottom - BAR_H };
+        RECT add_row{ left_col.left, left_col.bottom - 40, left_col.right, left_col.bottom };
         gui_.fill({ add_row.left, add_row.top, add_row.right, add_row.top + 1 },
                   gui_.theme.border);
         RECT add_tasks_btn{ add_row.left + 8, add_row.top + 6,
