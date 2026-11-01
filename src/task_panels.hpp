@@ -467,6 +467,25 @@ inline bool panel_generic(PanelCtx& c, const std::vector<mj::Value>* specs) {
         }
         if (type == "bool") {
             pc_check(c, key, label, tip);
+        } else if (type == "select" && p.has("cases")) {
+            // 官方枚举：用单选条呈现（cases 已本地化）
+            std::vector<std::wstring> opts;
+            for (auto& cs : p["cases"].items()) {
+                if (cs.is_string()) opts.push_back(gui::widen(cs.as_string()));
+            }
+            if (!opts.empty()) {
+                // 当前值按 cases 索引匹配（兼容存枚举名或中文名）
+                std::string cur = c.get_str(key);
+                int sel = 0;
+                for (size_t i = 0; i < opts.size(); ++i) {
+                    std::string w = util::wide_to_utf8(opts[i]);
+                    if (w == cur) { sel = (int)i; break; }
+                }
+                pc_radio(c, key, opts, sel);
+                // 回写为选中项的中文名（与 cases 展示一致）
+                c.set_str(key, util::wide_to_utf8(opts[sel]));
+                if (!tip.empty()) { c.g.tip_line(c.x + 24, c.y, c.right, tip); c.y += 16; }
+            }
         } else if (type == "number") {
             pc_number(c, key, label, (int)p.get_int("default", 0), 1, 0, 999999);
             if (!tip.empty()) { c.g.tip_line(c.x + 24, c.y, c.right, tip); c.y += 16; }
@@ -522,9 +541,8 @@ inline bool draw_task_panel(PanelCtx& c, const std::vector<mj::Value>* specs = n
     if (c.task == "ProtocolSpace") return panel_end_protocol(c);
     if (c.task == "GiftOperator") return panel_end_gift(c);
     if (c.task == "VisitFriends") return panel_end_friends(c);
-    return false;
+    // 未定制任务：按 catalog 类型渲染通用面板（与官方视觉一致）
     return panel_generic(c, specs);
-
 }
 
 } // namespace hub

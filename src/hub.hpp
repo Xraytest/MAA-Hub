@@ -470,7 +470,7 @@ public:
                 j.set("core_version", core.version);
             }
             // 浠诲姟鐩綍锛堝悗鍙扮嚎绋嬫煡璇紝UI 鍙蹇収锛岀粷涓嶉樆濉炴覆鏌擄級
-            j.set("catalog", executor_catalog(id));
+            j.set("catalog", executor_catalog(id, 0));
             execs.push(std::move(j));
         }
         v.set("executors", std::move(execs));
