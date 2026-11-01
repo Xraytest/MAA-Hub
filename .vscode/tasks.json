@@ -1,0 +1,41 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "MaaHub: Build (Release)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\build.bat",
+            "args": ["release"],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$msCompile"],
+            "detail": "MSVC  release 构建 build\\MaaHub.exe"
+        },
+        {
+            "label": "MaaHub: Build (Debug)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\build.bat",
+            "args": ["debug"],
+            "group": "build",
+            "problemMatcher": ["$msCompile"],
+            "detail": "MSVC debug 构建（/Zi /Od，可断点）"
+        },
+        {
+            "label": "MaaHub: Self-Check (no game)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\build\\MaaHub.exe",
+            "args": ["--check"],
+            "group": "test",
+            "problemMatcher": [],
+            "detail": "干跑自检：加载核心、拉起全部执行器 worker、读取任务目录"
+        },
+        {
+            "label": "MaaHub: Test (executors)",
+            "type": "shell",
+            "command": "python",
+            "args": ["${workspaceFolder}\\tests\\executor_state_test.py"],
+            "group": "test",
+            "problemMatcher": [],
+            "detail": "执行器持久化 / 核心回退 / 多实例并发加载测试"
+        }
+    ]
+}

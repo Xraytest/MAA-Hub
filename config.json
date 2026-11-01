@@ -1,0 +1,59 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8780
+  },
+  "apps": {
+    "maa": {
+      "enabled": true,
+      "install_dir": "D:\\Application\\MAA",
+      "display_name": "MAA (明日方舟)",
+      "game_exe": "D:\\HypergryphGame\\Arknights\\Arknights.exe",
+      "game_window_class": "UnityWndClass",
+      "game_window_title_regex": "Arknights",
+      "connect": {
+        "mode": "win32",
+        "screencap_method": 32,
+        "mouse_method": 1,
+        "keyboard_method": 1
+      },
+      "adb": {
+        "adb_path": "",
+        "address": "",
+        "config": "General"
+      }
+    },
+    "maaend": {
+      "enabled": true,
+      "install_dir": "D:\\Application\\MaaEnd",
+      "display_name": "MaaEnd (终末地)",
+      "game_exe": "D:\\HypergryphGame\\Arknights Endfield\\Endfield.exe",
+      "game_window_class": "UnityWndClass",
+      "game_window_title_regex": "Endfield",
+      "connect": {
+        "mode": "win32",
+        "screencap_method": 32,
+        "mouse_method": 1,
+        "keyboard_method": 1
+      }
+    }
+  },
+  "llm": {
+    "enabled": false,
+    "provider": "openai-compatible",
+    "base_url": "https://api.deepseek.com",
+    "api_key": "",
+    "model": "deepseek-chat",
+    "temperature": 0.2,
+    "max_tokens": 2000,
+    "timeout_sec": 60
+  },
+  "storage": {
+    "state_dir": "state",
+    "max_events": 500
+  },
+  "safety": {
+    "require_confirm": true,
+    "max_plan_steps": 12
+  }
+}

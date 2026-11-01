@@ -1,0 +1,44 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "MaaHub: Run (GUI)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\MaaHub.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}\\build",
+            "console": "externalTerminal",
+            "preLaunchTask": "MaaHub: Build (Debug)"
+        },
+        {
+            "name": "MaaHub: Self-Check",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\MaaHub.exe",
+            "args": ["--check"],
+            "cwd": "${workspaceFolder}\\build",
+            "console": "integratedTerminal",
+            "preLaunchTask": "MaaHub: Build (Debug)"
+        },
+        {
+            "name": "MaaHub: Worker (debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\MaaHub.exe",
+            "args": ["--worker", "maa", "e30="],
+            "cwd": "${workspaceFolder}\\build",
+            "console": "integratedTerminal",
+            "preLaunchTask": "MaaHub: Build (Debug)"
+        },
+        {
+            "name": "MaaHub: Core Version Probe",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\build\\MaaHub.exe",
+            "args": ["--core-version", "maa", "D:\\Application\\MAA"],
+            "cwd": "${workspaceFolder}\\build",
+            "console": "integratedTerminal"
+        }
+    ]
+}

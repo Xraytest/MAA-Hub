@@ -1,0 +1,364 @@
+// MaaHub 零依赖立即模式 GUI 框架（Win32 + GDI 双缓冲）
+// 特性：按钮/复选框/文本输入/选项条/滚动区域/卡片面板、CJK 字体、剪裁栈、
+//       热激活焦点跟踪、后台线程数据快照友好（渲染只读快照）
+#pragma once
+#include <windows.h>
+#include <algorithm>
+#include <codecvt>
+#include <deque>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "util.hpp"
+
+namespace gui {
+
+// ---------------------------------------------------------------- 主题
+struct Theme {
+    COLORREF bg = RGB(243, 245, 249);
+    COLORREF panel = RGB(255, 255, 255);
+    COLORREF border = RGB(227, 232, 240);
+    COLORREF text = RGB(31, 39, 51);
+    COLORREF dim = RGB(122, 134, 153);
+    COLORREF primary = RGB(46, 124, 246);
+    COLORREF primary_dark = RGB(27, 95, 217);
+    COLORREF primary_light = RGB(232, 241, 254);
+    COLORREF ok = RGB(34, 181, 115);
+    COLORREF warn = RGB(245, 166, 35);
+    COLORREF err = RGB(229, 72, 77);
+    COLORREF hover = RGB(240, 244, 250);
+    COLORREF input_bg = RGB(255, 255, 255);
+    COLORREF row_alt = RGB(250, 251, 253);
+};
+
+inline std::wstring widen(const std::string& s) { return util::utf8_to_wide(s); }
+
+// ---------------------------------------------------------------- 输入
+struct Input {
+    POINT mouse{ 0, 0 };
+    bool down = false;        // 左键按住
+    bool pressed = false;     // 本帧刚按下
+    bool released = false;    // 本帧刚松开
+    bool double_click = false;
+    int wheel = 0;            // 本帧滚轮增量
+    wchar_t char_input = 0;   // WM_CHAR
+    int vk = 0;               // WM_KEYDOWN
+    bool shift = false;
+    bool ctrl = false;
+};
+
+// ---------------------------------------------------------------- GUI 上下文
+class Gui {
+public:
+    Theme theme;
+    HFONT font = nullptr;       // 14px
+    HFONT font_bold = nullptr;  // 14px 粗体
+    HFONT font_small = nullptr; // 12px
+    HFONT font_title = nullptr; // 16px 粗体
+    HFONT font_big = nullptr;   // 15px 粗体
+
+    void init_fonts() {
+        if (font) return;
+        font = make_font(14, false);
+        font_bold = make_font(14, true);
+        font_small = make_font(12, false);
+        font_title = make_font(16, true);
+        font_big = make_font(15, true);
+    }
+
+    // ------------------------------------------------------------ 帧
+    void begin(const Input& in) {
+        in_ = in;
+        hot_.clear();
+
+        wheel_used_ = false;
+    }
+
+    void end() {
+        // active：按住中的控件
+        if (in_.released || !in_.down) active_.clear();
+    }
+
+    // ------------------------------------------------------------ 图元
+    void fill(RECT r, COLORREF c) {
+        HBRUSH b = CreateSolidBrush(c);
+        FillRect(dc_, &r, b);
+        DeleteObject(b);
+    }
+    void frame(RECT r, COLORREF c, int thickness = 1) {
+        HPEN p = CreatePen(PS_INSIDEFRAME, thickness, c);
+        HGDIOBJ old = SelectObject(dc_, p);
+        HGDIOBJ oldb = SelectObject(dc_, GetStockObject(NULL_BRUSH));
+        Rectangle(dc_, r.left, r.top, r.right, r.bottom);
+        SelectObject(dc_, oldb);
+        SelectObject(dc_, old);
+        DeleteObject(p);
+    }
+    void round_rect(RECT r, COLORREF fill_c, COLORREF border_c, int radius) {
+        HBRUSH b = CreateSolidBrush(fill_c);
+        HPEN p = CreatePen(PS_INSIDEFRAME, 1, border_c);
+        HGDIOBJ ob = SelectObject(dc_, b);
+        HGDIOBJ op = SelectObject(dc_, p);
+        RoundRect(dc_, r.left, r.top, r.right, r.bottom, radius, radius);
+        SelectObject(dc_, ob);
+        SelectObject(dc_, op);
+        DeleteObject(b);
+        DeleteObject(p);
+    }
+    SIZE text_size(const std::wstring& s, HFONT f) {
+        SIZE sz{ 0, 0 };
+        HGDIOBJ old = SelectObject(dc_, f);
+        GetTextExtentPoint32W(dc_, s.c_str(), (int)s.size(), &sz);
+        SelectObject(dc_, old);
+        return sz;
+    }
+    void text(int x, int y, const std::wstring& s, COLORREF c, HFONT f) {
+        RECT rc = clip_;
+        SetTextColor(dc_, c);
+        SetBkMode(dc_, TRANSPARENT);
+        HGDIOBJ old = SelectObject(dc_, f);
+        // 手动逐行（支持 \n）
+        size_t start = 0;
+        int ly = y;
+        while (start <= s.size()) {
+            size_t nl = s.find(L'\n', start);
+            std::wstring line = s.substr(start, nl == std::wstring::npos ? std::wstring::npos : nl - start);
+            ExtTextOutW(dc_, x, ly, ETO_CLIPPED, &rc, line.c_str(), (UINT)line.size(), nullptr);
+            if (nl == std::wstring::npos) break;
+            start = nl + 1;
+            SIZE sz = text_size(L"A", f);
+            ly += sz.cy + 2;
+        }
+        SelectObject(dc_, old);
+    }
+    void text_clipped(RECT r, const std::wstring& s, COLORREF c, HFONT f, bool ellipsis = true) {
+        SIZE sz = text_size(s, f);
+        if (ellipsis && sz.cx > r.right - r.left) {
+            std::wstring t = s;
+            while (t.size() > 1) {
+                t.pop_back();
+                SIZE s2 = text_size(t + L"…", f);
+                if (s2.cx <= r.right - r.left) { t += L"…"; break; }
+            }
+            text(r.left, r.top + (r.bottom - r.top - sz.cy) / 2, t, c, f);
+        } else {
+            text(r.left, r.top + (r.bottom - r.top - sz.cy) / 2, s, c, f);
+        }
+    }
+
+    // ------------------------------------------------------------ 命中测试
+    bool hovered(RECT r) const {
+        return PtInRect(&r, in_.mouse) && PtInRect(&clip_, in_.mouse);
+    }
+
+    // ------------------------------------------------------------ 滚动区域
+    // 注意：滚动通过调用方在绘制时手动减去 scroll 值实现（见 scroll_offset()），
+    // 不使用 SetViewportOrigin，保证鼠标命中测试与视觉位置一致。
+    void begin_scroll(const char* id, RECT r, int content_h, float& scroll_y) {
+        scroll_rect_ = r;
+        scroll_id_ = id;
+        scroll_y_ = &scroll_y;
+        if (hovered(r) && in_.wheel && !wheel_used_) {
+            *scroll_y_ -= in_.wheel * 40.0f;
+            wheel_used_ = true;
+        }
+        int max_scroll = content_h - (r.bottom - r.top);
+        if (max_scroll < 0) max_scroll = 0;
+        if (*scroll_y_ < 0) *scroll_y_ = 0;
+        if (*scroll_y_ > max_scroll) *scroll_y_ = (float)max_scroll;
+        push_clip(r);
+    }
+    void end_scroll() { pop_clip(); }
+
+    // 当前滚动偏移（绘制 item 时从 y 中减去）
+    int scroll_offset() const { return scroll_y_ ? (int)*scroll_y_ : 0; }
+
+    // ------------------------------------------------------------ 控件
+    // style: 0 normal, 1 primary, 2 danger, 3 warn
+    bool button(const char* id, RECT r, const std::wstring& label_text, int style = 0,
+                bool enabled = true) {
+        bool hov = hovered(r) && enabled;
+        if (hov) hot_ = id;
+        bool click = false;
+        if (hov && in_.pressed) active_ = id;
+        if (hov && active_ == id && in_.released) click = true;
+
+        COLORREF fill = theme.panel, border = theme.border, txt = theme.text;
+        if (style == 1) { fill = theme.primary; border = theme.primary; txt = RGB(255, 255, 255); }
+        else if (style == 2) { fill = RGB(254, 242, 242); border = theme.err; txt = theme.err; }
+        else if (style == 3) { fill = RGB(255, 248, 235); border = theme.warn; txt = RGB(180, 120, 10); }
+        if (!enabled) { fill = RGB(245, 246, 248); border = theme.border; txt = RGB(160, 168, 178); }
+        else if (hov) { fill = (style == 1) ? theme.primary_dark : theme.hover; }
+
+        round_rect(r, fill, active_ == id && hov ? theme.primary : border, 6);
+        SIZE sz = text_size(label_text, font);
+        int tx = r.left + ((r.right - r.left) - sz.cx) / 2;
+        int ty = r.top + ((r.bottom - r.top) - sz.cy) / 2;
+        RECT save = clip_;
+        text(tx, ty, label_text, txt, font);
+        clip_ = save;
+        return click;
+    }
+
+    bool checkbox(const char* id, RECT r, const std::wstring& label, bool& v) {
+        // 复选框区域包含文字
+        bool hov = hovered(r);
+        if (hov) hot_ = id;
+        if (hov && in_.pressed) active_ = id;
+        bool click = false;
+        if (hov && active_ == id && in_.released) {
+            v = !v;
+            click = true;
+        }
+        int box = 16;
+        RECT br{ r.left, r.top + 1, r.left + box, r.top + 1 + box };
+        round_rect(br, v ? theme.primary : RGB(255, 255, 255),
+                   v ? theme.primary : RGB(180, 188, 200), 3);
+        if (v) {
+            // 画勾
+            HPEN p = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+            HGDIOBJ old = SelectObject(dc_, p);
+            MoveToEx(dc_, br.left + 3, br.top + 8, nullptr);
+            LineTo(dc_, br.left + 6, br.top + 12);
+            LineTo(dc_, br.left + 13, br.top + 4);
+            SelectObject(dc_, old);
+            DeleteObject(p);
+        }
+        RECT save = clip_;
+        text(r.left + box + 8, r.top, label, theme.text, font);
+        clip_ = save;
+        return click;
+    }
+
+    void text_input(const char* id, RECT r, std::string& value, const wchar_t* hint = nullptr) {
+        bool hov = hovered(r);
+        if (hov) hot_ = id;
+        if (hov && in_.pressed) {
+            active_ = id;
+            focus_ = id;
+        }
+        bool focused = focus_ == id;
+        round_rect(r, theme.input_bg, focused ? theme.primary : theme.border, 5);
+        std::wstring w = widen(value);
+        RECT save = clip_;
+        if (w.empty() && hint) {
+            text(r.left + 8, r.top + (r.bottom - r.top - 17) / 2, hint, RGB(170, 178, 190), font);
+        } else {
+            // 水平滚动以露出光标
+            int maxw = r.right - r.left - 14;
+            SIZE sz = text_size(w, font);
+            int x = r.left + 7;
+            if (sz.cx > maxw) x = r.left + 7 - (sz.cx - maxw) - 8;
+            text(x, r.top + (r.bottom - r.top - 17) / 2, w, theme.text, font);
+            if (focused && (GetTickCount() / 530) % 2 == 0) {
+                SIZE cs = text_size(w, font);
+                int cx = std::min<int>(x + cs.cx + 1, (int)r.right - 3);
+                HPEN p = CreatePen(PS_SOLID, 1, theme.text);
+                HGDIOBJ old = SelectObject(dc_, p);
+                MoveToEx(dc_, cx, r.top + 6, nullptr);
+                LineTo(dc_, cx, r.bottom - 6);
+                SelectObject(dc_, old);
+                DeleteObject(p);
+            }
+        }
+        clip_ = save;
+        // 键盘输入
+        if (focused) {
+            if (in_.char_input) {
+                if (in_.char_input >= 32 || in_.char_input == L'\t') {
+                    value.push_back((char)in_.char_input);
+                } else if (in_.char_input == L'\b' && !value.empty()) {
+                    // UTF-8 backspace: drop last complete UTF-8 char
+                    size_t n = value.size();
+                    while (n > 0 && ((unsigned char)value[n - 1] & 0xC0) == 0x80) --n;
+                    if (n > 0) --n;
+                    value.resize(n);
+                }
+            }
+            if (in_.vk == VK_RETURN || in_.vk == VK_ESCAPE) focus_.clear();
+            if (in_.vk == VK_DELETE) value.clear();
+        }
+    }
+
+    // 横向选项条：返回点击的索引，未点击返回 -1
+    int option_strip(const char* id, RECT r, const std::vector<std::wstring>& opts, int cur) {
+        int n = (int)opts.size();
+        int gap = 4;
+        int w = (r.right - r.left - gap * (n - 1)) / n;
+        int clicked = -1;
+        for (int i = 0; i < n; ++i) {
+            RECT ir{ r.left + i * (w + gap), r.top, r.left + i * (w + gap) + w, r.bottom };
+            bool hov = hovered(ir);
+            if (hov) hot_ = id + std::to_string(i);
+            if (hov && in_.pressed) active_ = id + std::to_string(i);
+            bool sel = (i == cur);
+            COLORREF fill = sel ? theme.primary_light : RGB(255, 255, 255);
+            COLORREF border = sel ? theme.primary : theme.border;
+            COLORREF txt = sel ? theme.primary_dark : theme.dim;
+            round_rect(ir, fill, border, 5);
+            RECT save = clip_;
+            text_clipped(ir, opts[i], txt, font_small);
+            clip_ = save;
+            if (hov && active_ == id + std::to_string(i) && in_.released) clicked = i;
+        }
+        return clicked;
+    }
+
+    // ------------------------------------------------------------ 卡片
+    void panel(RECT r, const std::wstring& title = L"") {
+        round_rect(r, theme.panel, theme.border, 10);
+        if (!title.empty()) {
+            RECT save = clip_;
+            text(r.left + 18, r.top + 14, title, theme.text, font_bold);
+            clip_ = save;
+        }
+    }
+
+    // ------------------------------------------------------------ 剪裁栈
+    void push_clip(RECT r) {
+        RECT inter;
+        IntersectRect(&inter, &clip_, &r);
+        clip_stack_.push_back(clip_);
+        clip_ = inter;
+    }
+    void pop_clip() {
+        if (!clip_stack_.empty()) {
+            clip_ = clip_stack_.back();
+            clip_stack_.pop_back();
+        }
+    }
+    RECT clip() const { return clip_; }
+
+    // ------------------------------------------------------------ 渲染目标
+    void set_dc(HDC dc, RECT client) {
+        dc_ = dc;
+        clip_ = client;
+    }
+
+    Input input() const { return in_; }
+
+private:
+    static HFONT make_font(int px, bool bold) {
+        return CreateFontW(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
+                           FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS,
+                           L"Microsoft YaHei");
+    }
+
+    HDC dc_ = nullptr;
+    RECT clip_{ 0, 0, 0, 0 };
+    std::vector<RECT> clip_stack_;
+    Input in_;
+    std::string hot_;
+    std::string active_;
+    std::string focus_;
+    bool wheel_used_ = false;
+    // 滚动
+    RECT scroll_rect_{};
+    const char* scroll_id_ = nullptr;
+    float* scroll_y_ = nullptr;
+};
+
+} // namespace gui

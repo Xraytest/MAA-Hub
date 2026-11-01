@@ -1,0 +1,23 @@
+# 构建产物
+build/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# 运行时状态（含账号信息，不提交）
+state/
+state-*/
+
+# 下载缓存
+_download/
+
+# VS Code
+.vs/
+
+# 系统
+Thumbs.db
+desktop.ini
+*.log
+maahub-crash.log
