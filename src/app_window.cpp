@@ -528,7 +528,15 @@ void MaaHubWindow::draw_topbar(RECT r) {
             else action_connect(selected_exec_);
         }
         RECT lr{ r.right - 228, r.top + 10, r.right - 20, r.bottom - 10 };
-        if (gui_.button("btn-linkstart", lr, L"\U0001f517 Link Start!", 1, has_cur)) {
+        bool running = has_cur && cur.get_bool("busy", false);
+        if (running) {
+            // 运行中：按钮变为「停止」（官方 Common.Stop）
+            if (gui_.button("btn-stop", lr, L"\u23f9 \u505c\u6b62", 2, has_cur)) {
+                std::string id = selected_exec_;
+                post_action([this, id] { hub_->stop_executor(id); },
+                            "\u505c\u6b62");
+            }
+        } else if (gui_.button("btn-linkstart", lr, L"\U0001f517 Link Start!", 1, has_cur)) {
             std::string id = selected_exec_;
             post_action([this, id] {
                 mj::Value st = hub_->executor_status(id);
@@ -694,7 +702,7 @@ void MaaHubWindow::page_executor(RECT content) {
     gui_.text(left_col.left + 12, left_col.top + 12, L"\u4efb\u52a1\u5217\u8868",
               gui_.theme.text, gui_.font_bold);
     gui_.text(left_col.left + 12, left_col.top + 32,
-              L"\u5de6\u952e\u8bbe\u7f6e \u00b7 \u52fe\u9009\u542f\u7528",
+              L"\u5de6\u952e \u4efb\u52a1\u8bbe\u7f6e \u00b7 \u53f3\u952e \u4ece\u6b64\u5904\u8fd0\u884c",
               gui_.theme.faint, gui_.font_small);
 
     int hy = left_col.top + 52;
@@ -797,6 +805,11 @@ void MaaHubWindow::page_executor(RECT content) {
             for (auto& kv : task_ui_[id]) kv.second.selected = false;
             ui.selected = true;
         }
+        // 右键 = 从此处运行（官方 TaskQueue.RunFromHere）
+        if (hov && gui_.input().rpressed) {
+            post_action([this, id, name] { action_run_from(id, name); },
+                        "\u4ece\u6b64\u5904\u8fd0\u884c");
+        }
         y += item_h;
     }
     gui_.end_scroll();
@@ -832,18 +845,20 @@ void MaaHubWindow::page_executor(RECT content) {
     int rx = right_col.left + 16;
     int ry = right_col.top + 12;
     if (!sel_task.empty() && sel_valid) {
-        gui_.text(rx, ry, display_name(kind, sel_task), gui_.theme.text, gui_.font_title);
+        gui_.text(rx, ry, L"\u4efb\u52a1\u8bbe\u7f6e", gui_.theme.dim, gui_.font_small);
+        gui_.text(rx, ry + 18, display_name(kind, sel_task),
+                  gui_.theme.text, gui_.font_title);
         std::wstring desc;
         for (auto& t : tasks) {
             if (t.get_str("name", "") == sel_task) desc = gui::widen(t.get_str("description", ""));
         }
         if (!desc.empty()) {
             RECT save = gui_.clip();
-            gui_.text_clipped({ rx + 260, ry + 4, right_col.right - 16, ry + 24 },
+            gui_.text_clipped({ rx + 260, ry + 22, right_col.right - 16, ry + 42 },
                               desc, gui_.theme.dim, gui_.font_small);
             (void)save;
         }
-        ry += 34;
+        ry += 52;
 
         TaskUiState& ui = task_ui_[id][sel_task];
         // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
@@ -952,7 +967,11 @@ void MaaHubWindow::page_executor(RECT content) {
     }
     RECT link_btn{ bottom_bar.right - 150, bottom_bar.top + 7,
                    bottom_bar.right - 16, bottom_bar.bottom - 7 };
-    if (gui_.button("btn-linkstart-exec", link_btn, L"\U0001f517 Link Start!", 1)) {
+    if (connected && hub_->executor_status(id, 0).get_bool("busy", false)) {
+        if (gui_.button("btn-stop-exec", link_btn, L"\u23f9 \u505c\u6b62", 2)) {
+            post_action([this, id] { hub_->stop_executor(id); }, "\u505c\u6b62");
+        }
+    } else if (gui_.button("btn-linkstart-exec", link_btn, L"\U0001f517 Link Start!", 1)) {
         post_action([this, id] {
             mj::Value st = hub_->executor_status(id);
             if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
@@ -1653,6 +1672,70 @@ void MaaHubWindow::action_run(const std::string& id, const std::string& task,
     if (tid <= 0) hub_->set_task_result(id, task, "error");
     set_notice(tid > 0 ? task + " 已启动 (task " + std::to_string(tid) + ")"
                        : task + " 启动失败：" + hub_->executor_status(id).get_str("last_error", ""));
+}
+
+// 从此处运行：从指定任务开始，依次执行它及其后所有已勾选任务（官方 RunFromHere）
+void MaaHubWindow::action_run_from(const std::string& id, const std::string& from_task) {
+    ExecutorEntry e;
+    if (!hub_->get_executor(id, e)) return;
+    mj::Value cat = hub_->executor_catalog(id);
+    std::vector<mj::Value> items;
+    if (cat.is_array()) {
+        for (auto& t : cat.items()) {
+            if (e.kind == "maaend" && maaend_hidden_task(t.get_str("name", ""))) continue;
+            items.push_back(t);
+        }
+    }
+    // 应用用户拖拽后的顺序（与左列显示一致）
+    auto oit = task_order_.find(id);
+    if (oit != task_order_.end() && !oit->second.empty()) {
+        std::vector<mj::Value> sorted;
+        for (auto& nm : oit->second) {
+            for (auto& t : items) {
+                if (t.get_str("name", "") == nm) { sorted.push_back(t); break; }
+            }
+        }
+        for (auto& t : items) {
+            bool found = false;
+            for (auto& s : sorted) {
+                if (s.get_str("name", "") == t.get_str("name", "")) { found = true; break; }
+            }
+            if (!found) sorted.push_back(t);
+        }
+        items.swap(sorted);
+    }
+    size_t start = 0;
+    bool found_start = false;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].get_str("name", "") == from_task) { start = i; found_start = true; break; }
+    }
+    if (!found_start) {
+        set_notice(std::string("\u4efb\u52a1\u4e0d\u5b58\u5728\uff1a") + from_task);
+        return;
+    }
+    int started = 0;
+    for (size_t i = start; i < items.size(); ++i) {
+        std::string name = items[i].get_str("name", "");
+        auto it = task_ui_.find(id);
+        if (it == task_ui_.end()) continue;
+        auto tit = it->second.find(name);
+        if (tit == it->second.end()) continue;
+        if (!tit->second.checked && !tit->second.once) continue;
+        mj::Value params = mj::Value::object();
+        for (auto& kv : tit->second.params) params.set(kv.first, kv.second);
+        if (hub_->run_on_executor(id, name, params) > 0) {
+            ++started;
+            tit->second.once = false;   // 「仅一次」运行后复位
+        }
+    }
+    if (started > 0) {
+        std::wstring msg = L"\u5df2\u4ece\u300c" + display_name(e.kind, from_task)
+                         + L"\u300d\u5f00\u59cb\u8fd0\u884c "
+                         + std::to_wstring(started) + L" \u4e2a\u4efb\u52a1";
+        set_notice(util::wide_to_utf8(msg));
+    } else {
+        set_notice("\u6ca1\u6709\u53ef\u8fd0\u884c\u7684\u5df2\u52fe\u9009\u4efb\u52a1");
+    }
 }
 
 void MaaHubWindow::action_run_checked(const std::string& id) {

@@ -82,6 +82,7 @@ private:
     void action_stop(const std::string& id);
     void action_run(const std::string& id, const std::string& task, const mj::Value& params);
     void action_run_checked(const std::string& id);
+    void action_run_from(const std::string& id, const std::string& from_task);
     void action_propose(const std::string& goal, const std::string& planner);
     void action_execute(const std::string& plan_id);
     void action_reject(const std::string& plan_id);
