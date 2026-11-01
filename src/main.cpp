@@ -128,6 +128,7 @@ int main(int argc, char** argv) {
     bool dump_render = false;
     std::string dump_render_path;
     std::string dump_page;
+    std::string dump_task;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--check") check_only = true;
@@ -138,6 +139,7 @@ int main(int argc, char** argv) {
             dump_render = true;
             dump_render_path = argv[++i];
             if (i + 1 < argc && argv[i + 1][0] != '-') dump_page = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-') dump_task = argv[++i];
         }
         else if (a == "--config" && i + 1 < argc) config_path = argv[++i];
         else if (a == "--port" && i + 1 < argc) g_port_override = atoi(argv[++i]);
@@ -223,6 +225,7 @@ int main(int argc, char** argv) {
             if (all_ready) break;
         }
         win.debug_refresh_snapshot();   // 强制拉一次完整快照（含 catalog）
+        if (!dump_task.empty()) win.debug_select_task(dump_task);
         win.render_to_file(page, dump_render_path);
         return 0;
     }

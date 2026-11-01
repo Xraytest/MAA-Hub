@@ -42,6 +42,7 @@ public:
         return hub_->executor_catalog(id, ttl);
     }
     void debug_refresh_snapshot() { refresh_snapshot(); }
+    void debug_select_task(const std::string& task);
     int run();
 
 private:
