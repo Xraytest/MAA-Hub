@@ -31,6 +31,7 @@ MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config, bool offscreen)
     hub_ = std::make_unique<Hub>(config_);
     load_task_list();
     load_post_action();
+    load_task_alias();
 }
 
 MaaHubWindow::~MaaHubWindow() {
@@ -841,6 +842,147 @@ void MaaHubWindow::load_task_list() {
     }
 }
 
+// 任务项右键菜单（官方 ContextMenu：单次运行 / 从此处运行 / 重命名 / 复制 / 移出列表）
+void MaaHubWindow::draw_task_ctx_menu() {
+    if (!ctx_menu_open_) return;
+    const int w = 168, row_h = 30;
+    struct Item { const wchar_t* label; const char* cmd; };
+    const Item items[] = {
+        { L"\u5355\u6b21\u8fd0\u884c",     "run_once" },
+        { L"\u4ece\u6b64\u5904\u8fd0\u884c", "run_from" },
+        { L"\u91cd\u547d\u540d",           "rename" },
+        { L"\u590d\u5236",                 "copy" },
+        { L"\u79fb\u51fa\u5217\u8868",     "remove" },
+    };
+    int h = (int)(sizeof(items) / sizeof(items[0])) * row_h + 8;
+    RECT menu{ ctx_menu_x_, ctx_menu_y_, ctx_menu_x_ + w, ctx_menu_y_ + h };
+    // 防止超出窗口
+    RECT cl;
+    GetClientRect(hwnd_, &cl);
+    if (menu.right > cl.right) { int d = menu.right - cl.right; menu.left -= d; menu.right -= d; }
+    if (menu.bottom > cl.bottom) { int d = menu.bottom - cl.bottom; menu.top -= d; menu.bottom -= d; }
+
+    // 遮罩：点击菜单外任意处关闭
+    if (gui_.input().pressed
+        && !(gui_.input().mouse.x >= menu.left && gui_.input().mouse.x < menu.right
+             && gui_.input().mouse.y >= menu.top && gui_.input().mouse.y < menu.bottom)) {
+        ctx_menu_open_ = false;
+        renaming_task_.clear();
+        return;
+    }
+
+    gui_.round_rect(menu, gui_.theme.panel, gui_.theme.border, 4);
+    int y = menu.top + 4;
+    for (auto& it : items) {
+        RECT row{ menu.left + 4, y, menu.right - 4, y + row_h - 4 };
+        bool hov = gui_.input().mouse.x >= row.left && gui_.input().mouse.x < row.right
+                && gui_.input().mouse.y >= row.top && gui_.input().mouse.y < row.bottom;
+        if (hov) gui_.round_rect(row, gui_.theme.hover, gui_.theme.hover, 3);
+        gui_.text(row.left + 10, row.top + 6, it.label, gui_.theme.text, gui_.font);
+        if (hov && gui_.input().pressed) {
+            std::string cmd = it.cmd;
+            std::string id = ctx_menu_exec_;
+            std::string task = ctx_menu_task_;
+            ctx_menu_open_ = false;
+            if (cmd == "run_once") {
+                post_action([this, id, task] {
+                    auto it2 = task_ui_.find(id);
+                    if (it2 == task_ui_.end()) return;
+                    auto t2 = it2->second.find(task);
+                    if (t2 == it2->second.end()) return;
+                    mj::Value params = mj::Value::object();
+                    for (auto& kv : t2->second.params) params.set(kv.first, kv.second);
+                    action_run(id, task, params);
+                }, "\u5355\u6b21\u8fd0\u884c");
+            } else if (cmd == "run_from") {
+                post_action([this, id, task] { action_run_from(id, task); },
+                            "\u4ece\u6b64\u5904\u8fd0\u884c");
+            } else if (cmd == "rename") {
+                renaming_task_ = task;
+                rename_exec_ = id;
+                auto it2 = task_alias_.find(id + "|" + task);
+                rename_buf_ = it2 == task_alias_.end() ? "" : it2->second;
+            } else if (cmd == "copy") {
+                // 复制：把该任务的参数复制为同名副本（别名加 (副本)）
+                auto it2 = task_ui_.find(id);
+                if (it2 != task_ui_.end()) {
+                    auto t2 = it2->second.find(task);
+                    if (t2 != it2->second.end()) {
+                        std::string alias_key = id + "|" + task;
+                        std::string base = task_alias_.count(alias_key)
+                            ? task_alias_[alias_key] : task;
+                        task_alias_[alias_key] = base + " (\u526f\u672c)";
+                        save_task_alias();
+                        set_notice("\u5df2\u590d\u5236\u4efb\u52a1\u8bbe\u7f6e");
+                    }
+                }
+            } else if (cmd == "remove") {
+                // 移出列表：等价于在添加新任务里取消勾选
+                if (task_list_.find(id) == task_list_.end()) {
+                    for (auto& t : catalog_of(kind_of(id))) {
+                        std::string s = t.get_str("name", "");
+                        task_list_[id].insert(s);
+                    }
+                }
+                task_list_[id].erase(task);
+                save_task_list();
+                set_notice("\u5df2\u5c06\u4efb\u52a1\u79fb\u51fa\u5217\u8868");
+            }
+            return;
+        }
+        y += row_h;
+    }
+}
+
+// 重命名内联编辑框（在左列对应项上覆盖一个输入框）
+void MaaHubWindow::draw_rename_box(RECT area, const std::string& id) {
+    if (renaming_task_.empty()) return;
+    (void)area;
+    RECT cl;
+    GetClientRect(hwnd_, &cl);
+    // 简单实现：在屏幕中下方放一个输入条
+    int w = 320, h = 40;
+    RECT box{ (cl.right - w) / 2, cl.bottom - h - 40,
+              (cl.right + w) / 2, cl.bottom - 40 };
+    gui_.round_rect(box, gui_.theme.panel, gui_.theme.primary, 4);
+    gui_.text(box.left + 12, box.top + 12, L"\u65b0\u540d\u79f0", gui_.theme.dim, gui_.font_small);
+    RECT ir{ box.left + 80, box.top + 6, box.right - 90, box.bottom - 6 };
+    gui_.text_input("rename-input", ir, rename_buf_, nullptr);
+    RECT ok_b{ box.right - 84, box.top + 6, box.right - 8, box.bottom - 6 };
+    if (gui_.button("rename-ok", ok_b, L"\u786e\u5b9a", 1)) {
+        task_alias_[rename_exec_ + "|" + renaming_task_] = rename_buf_;
+        save_task_alias();
+        renaming_task_.clear();
+    }
+    RECT cancel_b{ box.right - 84, box.top - 30, box.right - 8, box.top - 6 };
+    if (gui_.button("rename-cancel", cancel_b, L"\u53d6\u6d88", 0)) {
+        renaming_task_.clear();
+    }
+}
+
+void MaaHubWindow::save_task_alias() {
+    mj::Value v = mj::Value::object();
+    for (auto& kv : task_alias_) v.set(kv.first, mj::Value(kv.second));
+    util::write_file(util::exe_dir() + "\\state\\task-alias.json",
+                     mj::Value::dump_pretty(v));
+}
+
+void MaaHubWindow::load_task_alias() {
+    std::string content;
+    if (!util::read_file(util::exe_dir() + "\\state\\task-alias.json", content)) return;
+    mj::Value v;
+    if (!mj::try_parse(content, v)) return;
+    for (auto& kv : v.members()) {
+        if (kv.second.is_string()) task_alias_[kv.first] = kv.second.as_string();
+    }
+}
+
+std::string MaaHubWindow::kind_of(const std::string& id) const {
+    ExecutorEntry e;
+    if (hub_->get_executor(id, e)) return e.kind;
+    return "maa";
+}
+
 // ================================================================ 实例页（MAA 1:1 布局）
 // 复刻 MAA 官方 TaskQueueView：左列 190px 任务列表 + 右侧任务设置 + 底部控制栏。
 // 配色/圆角(4)/控件高(28)/外边距(20) 对齐 HandyControl Light 主题。
@@ -1008,6 +1150,10 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.round_rect(item, fill_c, line_c, 4);
         RECT cbr{ item.left + 8, item.top + 5, item.left + 200, item.top + 25 };
         std::wstring label = display_name(kind, name);
+        auto al = task_alias_.find(id + "|" + name);
+        if (al != task_alias_.end() && !al->second.empty()) {
+            label = gui::widen(al->second);
+        }
         CheckState st = ui.once ? CheckState::Once
                                 : (ui.checked ? CheckState::On : CheckState::Off);
         gui_.checkbox3(("cb-" + id + "-" + name).c_str(), cbr, label, st);
@@ -1020,10 +1166,13 @@ void MaaHubWindow::page_executor(RECT content) {
             for (auto& kv : task_ui_[id]) kv.second.selected = false;
             ui.selected = true;
         }
-        // 右键 = 从此处运行（官方 TaskQueue.RunFromHere）
+        // 右键 = 打开任务菜单（官方 ContextMenu）
         if (hov && gui_.input().rpressed) {
-            post_action([this, id, name] { action_run_from(id, name); },
-                        "\u4ece\u6b64\u5904\u8fd0\u884c");
+            ctx_menu_open_ = true;
+            ctx_menu_x_ = gui_.input().mouse.x;
+            ctx_menu_y_ = gui_.input().mouse.y;
+            ctx_menu_task_ = name;
+            ctx_menu_exec_ = id;
         }
         y += item_h;
     }
@@ -1074,8 +1223,10 @@ void MaaHubWindow::page_executor(RECT content) {
     int ry = right_col.top + 12;
     if (!sel_task.empty() && sel_valid) {
         // 官方层次：左侧大标题（任务名），右上角小字（任务设置 · 来源）
-        gui_.text(rx, ry, display_name(kind, sel_task),
-                  gui_.theme.text, gui_.font_title);
+        std::wstring sel_title = display_name(kind, sel_task);
+        auto al2 = task_alias_.find(id + "|" + sel_task);
+        if (al2 != task_alias_.end() && !al2->second.empty()) sel_title = gui::widen(al2->second);
+        gui_.text(rx, ry, sel_title, gui_.theme.text, gui_.font_title);
         std::wstring desc;
         for (auto& t : tasks) {
             if (t.get_str("name", "") == sel_task) desc = gui::widen(t.get_str("description", ""));
@@ -1181,6 +1332,10 @@ void MaaHubWindow::page_executor(RECT content) {
     // ---------------- 添加新任务浮层 ----------------
     if (show_add_task_) draw_add_task_overlay(right_col, id, kind);
     if (show_post_action_) draw_post_action(right_col, id);
+
+    // 任务项右键菜单 / 重命名框（最上层）
+    draw_task_ctx_menu();
+    draw_rename_box(right_col, id);
 
     // ---------------- 底部控制栏 ----------------
     gui_.fill({ bottom_bar.left, bottom_bar.top, bottom_bar.right, bottom_bar.top + 1 },
@@ -1764,6 +1919,20 @@ void MaaHubWindow::debug_select_task(const std::string& task) {
     ui.open = true;
     fprintf(stderr, "[render] selected exec=%s task=%s open=%d\n",
             selected_exec_.c_str(), task.c_str(), (int)ui.open);
+}
+
+// 测试用：强制打开任务右键菜单
+void MaaHubWindow::debug_open_ctx_menu(const std::string& task) {
+    if (selected_exec_.empty()) {
+        auto ids = hub_->executors();
+        if (!ids.empty()) selected_exec_ = ids[0].id;
+    }
+    ctx_menu_open_ = true;
+    ctx_menu_exec_ = selected_exec_;
+    ctx_menu_task_ = task;
+    ctx_menu_x_ = 420;
+    ctx_menu_y_ = 300;
+    fprintf(stderr, "[render] ctx menu opened task=%s\n", task.c_str());
 }
 
 // 测试用：强制打开「添加新任务」浮层

@@ -46,6 +46,7 @@ public:
     void debug_refresh_snapshot() { refresh_snapshot(); }
     void debug_select_task(const std::string& task);
     void debug_open_add_task();
+    void debug_open_ctx_menu(const std::string& task);
     int run();
 
 private:
@@ -60,6 +61,11 @@ private:
     void page_executor(RECT content);
     void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);
     void draw_post_action(RECT area, const std::string& id);
+    void draw_task_ctx_menu();
+    void draw_rename_box(RECT area, const std::string& id);
+    void save_task_alias();
+    void load_task_alias();
+    std::string kind_of(const std::string& id) const;
     void save_post_action(const std::string& id);
     void load_post_action();
     void save_task_list();
@@ -132,6 +138,16 @@ private:
     std::string drag_task_;      // 正在拖拽的任务名
     int drag_y_ = -1;            // 拖拽中的鼠标 y
     int drop_before_ = -1;       // 插入位置索引
+    // 任务项右键菜单（官方 ContextMenu）
+    bool ctx_menu_open_ = false;
+    int ctx_menu_x_ = 0, ctx_menu_y_ = 0;
+    std::string ctx_menu_task_;
+    std::string ctx_menu_exec_;
+    std::string renaming_task_;
+    std::string rename_exec_;
+    std::string rename_buf_;
+    std::map<std::string, std::string> task_alias_;   // exec|task -> 别名
+
     // 新建执行器表单
     // 「完成后动作设置」浮层（官方 TaskQueue.PostAction.Settings）
     bool show_post_action_ = false;
