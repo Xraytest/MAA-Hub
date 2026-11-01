@@ -400,7 +400,7 @@ void MaaHubWindow::draw_sidebar(RECT r) {
         bool sel = selected_exec_ == id;
         if (sel) gui_.round_rect(ir, gui_.theme.primary_light, gui_.theme.primary, 4);
         else if (hov) gui_.round_rect(ir, gui_.theme.hover, gui_.theme.border, 4);
-        else gui_.round_rect(ir, gui_.theme.panel, gui_.theme.border, 8);
+        else gui_.round_rect(ir, gui_.theme.panel, gui_.theme.border, 4);
 
         gui_.text(ir.left + 8, ir.top + 5, kind == "maa" ? L"⚔️" : L"🛰️", gui_.theme.text, gui_.font);
         COLORREF dot = conn == "connected" ? gui_.theme.ok :
@@ -518,24 +518,28 @@ void MaaHubWindow::draw_topbar(RECT r) {
     else if (page_ == "settings") title = L"⚙️ 设置";
     gui_.text(r.left + 4, r.top + 18, title, gui_.theme.text, gui_.font_title);
 
+    // 连接 / Link Start! 只在实例页显示（与 MAA 官方一致：按钮是任务页上下文相关的）
+    bool on_instance = (page_ == "executor");
     bool connected = has_cur && cur.get_str("conn", "") == "connected";
-    RECT br{ r.right - 320, r.top + 10, r.right - 240, r.bottom - 10 };
-    if (gui_.button("btn-connect", br, connected ? L"断开" : L"连接", 0, has_cur)) {
-        if (connected) action_disconnect(selected_exec_);
-        else action_connect(selected_exec_);
-    }
-    RECT lr{ r.right - 228, r.top + 10, r.right - 20, r.bottom - 10 };
-    if (gui_.button("btn-linkstart", lr, L"🔗 链接开始！", 1, has_cur)) {
-        std::string id = selected_exec_;
-        post_action([this, id] {
-            mj::Value st = hub_->executor_status(id);
-            if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
-            action_run_checked(id);
-        }, "链接开始");
+    if (on_instance) {
+        RECT br{ r.right - 320, r.top + 10, r.right - 240, r.bottom - 10 };
+        if (gui_.button("btn-connect", br, connected ? L"断开" : L"连接", 0, has_cur)) {
+            if (connected) action_disconnect(selected_exec_);
+            else action_connect(selected_exec_);
+        }
+        RECT lr{ r.right - 228, r.top + 10, r.right - 20, r.bottom - 10 };
+        if (gui_.button("btn-linkstart", lr, L"\U0001f517 Link Start!", 1, has_cur)) {
+            std::string id = selected_exec_;
+            post_action([this, id] {
+                mj::Value st = hub_->executor_status(id);
+                if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
+                action_run_checked(id);
+            }, "\u94fe\u63a5\u5f00\u59cb");
+        }
     }
     int dl = dl_progress_.load();
     if (dl >= 0) {
-        std::wstring t = L"⏳ " + gui::widen(dl_stage_) + L" " + std::to_wstring(dl) + L"%";
+        std::wstring t = L"\u23f3 " + gui::widen(dl_stage_) + L" " + std::to_wstring(dl) + L"%";
         gui_.text(r.right - 560, r.top + 20, t, gui_.theme.warn, gui_.font_small);
     }
 }
@@ -798,16 +802,36 @@ void MaaHubWindow::page_executor(RECT content) {
     gui_.end_scroll();
 
     // ---------------- 右侧：任务设置 ----------------
+    // 右侧展示的任务：优先用户选中项；未选中时才默认第一项
     std::string sel_task;
     for (auto& t : tasks) {
         std::string nm = t.get_str("name", "");
         if (task_ui_[id][nm].selected) { sel_task = nm; break; }
     }
-    if (sel_task.empty() && !tasks.empty()) sel_task = tasks[0].get_str("name", "");
+    bool sel_valid = false;
+    for (auto& t : tasks) {
+        if (t.get_str("name", "") == sel_task) { sel_valid = true; break; }
+    }
+    if (!sel_valid) {
+        // 选中项不在当前目录中（任务下线/名称变化）：提示而不是静默显示别的任务
+        if (!sel_task.empty()) {
+            int rx0 = right_col.left + 16;
+            gui_.text(rx0, right_col.top + 16,
+                      L"\u4efb\u52a1\u300c" + gui::widen(sel_task) +
+                      L"\u300d\u4e0d\u5728\u5f53\u524d\u6838\u5fc3\u7684\u4efb\u52a1\u76ee\u5f55\u4e2d",
+                      gui_.theme.warn, gui_.font);
+            gui_.text(rx0, right_col.top + 40,
+                      L"\u8bf7\u5728\u5de6\u4fa7\u91cd\u65b0\u9009\u62e9\u4efb\u52a1\uff0c\u6216\u66f4\u65b0\u6838\u5fc3\u7248\u672c",
+                      gui_.theme.dim, gui_.font_small);
+        } else if (!tasks.empty()) {
+            sel_task = tasks[0].get_str("name", "");
+            sel_valid = true;
+        }
+    }
 
     int rx = right_col.left + 16;
     int ry = right_col.top + 12;
-    if (!sel_task.empty()) {
+    if (!sel_task.empty() && sel_valid) {
         gui_.text(rx, ry, display_name(kind, sel_task), gui_.theme.text, gui_.font_title);
         std::wstring desc;
         for (auto& t : tasks) {
