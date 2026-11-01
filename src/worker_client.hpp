@@ -102,11 +102,15 @@ public:
 
     void shutdown() {
         if (reader_.joinable()) {
-            // 尝试优雅退出
+            // 尝试优雅退出（短超时；worker 无响应也不阻塞太久）
             mj::Value dummy;
-            call("exit", mj::Value::object(), 3000, dummy);
-            proc_.close();
-            reader_.join();
+            call("exit", mj::Value::object(), 2000, dummy);
+            proc_.close();     // 关管道 → reader 线程的 ReadFile 立即返回
+            if (WaitForSingleObject(reader_.native_handle(), 2000) != WAIT_OBJECT_0) {
+                reader_.detach();   // 绝不让 shutdown 无限期挂住
+            } else {
+                reader_.join();
+            }
         } else {
             proc_.close();
         }

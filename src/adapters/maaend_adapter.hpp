@@ -304,7 +304,7 @@ public:
         }
         uint64_t sc = (uint64_t)cfg_.get_path_int("connect.screencap_method", 32);
         uint64_t mm = (uint64_t)cfg_.get_path_int("connect.mouse_method", 1);
-        uint64_t km = (uint64_t)cfg_.get_int("keyboard_method", 1);
+        uint64_t km = (uint64_t)cfg_.get_path_int("connect.keyboard_method", 1);
         void* ctrl = fn_.MaaWin32ControllerCreate((void*)wi.hwnd, sc, mm, km);
         if (!ctrl) {
             st_.conn = "failed";
@@ -373,12 +373,18 @@ public:
     bool stop() override {
         if (!tasker_) return false;
         int64_t tid = fn_.MaaTaskerPostStop(tasker_);
-        if (tid > 0) {
-            fn_.MaaTaskerWait(tasker_, tid);
-            st_.run = "idle";
-            return true;
+        if (tid <= 0) return false;
+        // 绝不用 MaaTaskerWait 无限阻塞：任务不结束会把调用线程（进而整个
+        // WorkerClient::call 与 UI 刷新）永久挂住。改为轮询 Running，
+        // 最多等 10 秒后放弃等待（任务仍由 MaaEnd 侧自行收尾）。
+        int waited = 0;
+        while (waited < 10000) {
+            if (fn_.MaaTaskerRunning(tasker_) == 0) break;
+            Sleep(100);
+            waited += 100;
         }
-        return false;
+        st_.run = fn_.MaaTaskerRunning(tasker_) != 0 ? "stopping" : "idle";
+        return true;
     }
 
     bool is_running() override {

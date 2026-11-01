@@ -128,8 +128,9 @@ public:
     }
 
     ~Hub() {
+        // 通知执行线程退出，再并行关停 worker
+        stopping_ = true;
         stop_execution();
-        // 并行关停：串行等待时 MaaEnd worker（连带 agent 子进程）退出慢，进程会挂住
         std::vector<std::thread> stops;
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -215,7 +216,9 @@ public:
         auto w = worker_of(id);
         if (!w) return false;
         mj::Value r;
-        return w->call("connect", mj::Value::object(), 180000, r);
+        // 连接超时 60s（原 180s 太长：期间 backend 线程被独占，
+        // 用户其他点击全部排队，表现为界面"死机"）
+        return w->call("connect", mj::Value::object(), 60000, r);
     }
 
     void disconnect_executor(const std::string& id) {
@@ -639,7 +642,7 @@ private:
 
     void exec_worker(Plan plan) {
         for (auto& step : plan.steps) {
-            if (stop_flag_) {
+            if (stop_flag_ || stopping_) {
                 update_plan_status(plan.id, "stopped");
                 return;
             }
@@ -664,15 +667,20 @@ private:
                 && (step.task == "Award" || step.task == "DailyRewards")) {
                 accounts_->mark_daily_done(e.account_id);
             }
-            while (!stop_flag_) {
+            // 轮询任务完成；stopping_ 时立即退出，避免 Hub 析构后仍访问成员
+            int idle_rounds = 0;
+            while (!stop_flag_ && !stopping_) {
                 mj::Value s2;
                 if (w->call("status", mj::Value::object(), 15000, s2)) {
                     if (s2.get_str("run", "idle") != "running") break;
-                } else break;
+                    idle_rounds = 0;
+                } else {
+                    if (++idle_rounds > 3) break;   // worker 无响应，放弃等待
+                }
                 Sleep(500);
             }
         }
-        update_plan_status(plan.id, stop_flag_ ? "stopped" : "done");
+        update_plan_status(plan.id, (stop_flag_ || stopping_) ? "stopped" : "done");
     }
 
     std::vector<mj::Value> accounts_json() const {
@@ -795,6 +803,7 @@ private:
     std::mutex plans_mtx_;
     std::vector<Plan> plans_;
     std::atomic<bool> stop_flag_{ false };
+    std::atomic<bool> stopping_{ false };
     std::thread exec_thread_;
     std::thread save_thread_;
     uint64_t last_save_ = 0;

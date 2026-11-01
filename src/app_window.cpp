@@ -13,8 +13,19 @@ MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config)
 }
 
 MaaHubWindow::~MaaHubWindow() {
+    // 关键：不能无限期 join backend_。backend 线程可能正卡在 connect（最长 180s）
+    // 或 pull_core（下载大文件）里，此时关窗口会整个 UI 无响应（表现为"死机"）。
+    // 先置停止标志，最多等 1.5s；超时则 detach 让进程退出时自行收尾。
     running_ = false;
-    if (backend_.joinable()) backend_.join();
+    if (backend_.joinable()) {
+        // 用条件变量/等待方式不可靠，这里用有限等待后 detach
+        HANDLE h = backend_.native_handle();
+        if (WaitForSingleObject(h, 1500) != WAIT_OBJECT_0) {
+            backend_.detach();
+        } else {
+            backend_.join();
+        }
+    }
 }
 
 bool MaaHubWindow::create() {
@@ -170,6 +181,8 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 void MaaHubWindow::on_paint(HDC dc, RECT client) {
+    // 帧耗时监控：单帧 > 500ms 记录告警（用于定位 UI 卡死）
+    double frame_t0 = util::now_sec();
     gui_.set_dc(dc, client);
     gui_.begin(input_);
     gui_.fill(client, gui_.theme.bg);
@@ -197,6 +210,11 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
     input_.wheel = 0;
     input_.char_input = 0;
     input_.vk = 0;
+
+    double frame_ms = (util::now_sec() - frame_t0) * 1000;
+    if (frame_ms > 500) {
+        fprintf(stderr, "[ui] slow frame %.0fms (page=%s)\n", frame_ms, page_.c_str());
+    }
 }
 
 // ================================================================ 侧栏
@@ -1060,6 +1078,8 @@ void MaaHubWindow::backend_loop() {
             } catch (...) {
                 set_notice("操作失败");
             }
+            // 长动作（connect/拉取）执行期间若已请求退出，立即跳出不再刷新
+            if (!running_) return;
             refresh_snapshot();
             PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
         } else {
@@ -1072,6 +1092,10 @@ void MaaHubWindow::backend_loop() {
 
 void MaaHubWindow::post_action(std::function<void()> fn, const std::string& busy_text) {
     std::lock_guard<std::mutex> lk(action_mtx_);
+    // 队列上限：连点时丢弃后续（保留最新），避免动作堆积把 backend 线程堵死
+    if (actions_.size() >= 8) {
+        actions_.pop_front();
+    }
     actions_.push_back({ std::move(fn), busy_text });
 }
 
