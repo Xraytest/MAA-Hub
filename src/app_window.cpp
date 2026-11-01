@@ -29,6 +29,7 @@ static uint32_t crc32_calc(const uint8_t* d, size_t n) {
 MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config, bool offscreen)
     : hInst_(hInst), config_(std::move(config)), offscreen_(offscreen) {
     hub_ = std::make_unique<Hub>(config_);
+    load_task_list();
 }
 
 MaaHubWindow::~MaaHubWindow() {
@@ -644,6 +645,129 @@ inline bool maaend_hidden_task(const std::string& t) {
     return t == "SellProduct" || t == "SimpleProductionBatchStart";
 }
 
+// 「添加新任务」浮层：勾选要显示在左列的任务（官方左列仅显示用户添加的任务）
+void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
+                                         const std::string& kind) {
+    // 半透明遮罩（用深色矩形模拟；立即模式 GUI 不支持真 Alpha，用暗色实底）
+    RECT mask{ area.left, area.top, area.right, area.bottom };
+    gui_.fill(mask, RGB(0x10, 0x10, 0x10));
+    RECT card{ area.left + 24, area.top + 16, area.right - 24, area.bottom - 16 };
+    gui_.round_rect(card, gui_.theme.panel, gui_.theme.border, 4);
+
+    gui_.text(card.left + 16, card.top + 14, L"\u6dfb\u52a0\u65b0\u4efb\u52a1",
+              gui_.theme.text, gui_.font_title);
+    gui_.text(card.left + 16, card.top + 40,
+              L"\u52fe\u9009\u8981\u5728\u5de6\u4fa7\u4efb\u52a1\u5217\u8868\u4e2d\u663e\u793a\u7684\u4efb\u52a1",
+              gui_.theme.dim, gui_.font_small);
+
+    RECT close_btn{ card.right - 76, card.top + 12, card.right - 16, card.top + 36 };
+    if (gui_.button("addtask-close", close_btn, L"\u5173\u95ed", 0)) {
+        show_add_task_ = false;
+        return;
+    }
+
+    // 搜索框
+    RECT search{ card.left + 16, card.top + 62, card.right - 16, card.top + 88 };
+    gui_.text_input("addtask-search", search, add_task_filter_, L"\u641c\u7d22\u4efb\u52a1\u540d\u2026");
+
+    // 任务清单（可滚动）
+    std::vector<mj::Value> all = catalog_of(kind);
+    RECT list_r{ card.left + 16, card.top + 96, card.right - 16, card.bottom - 56 };
+    int row_h = 28;
+    int total = (int)all.size();
+    gui_.begin_scroll("addtask-list", list_r, total * row_h + 8,
+                      scroll_["addtask-list"]);
+    int y = list_r.top + 4 - (int)scroll_["addtask-list"];
+    for (int i = 0; i < total; ++i) {
+        std::string nm = all[i].get_str("name", "");
+        if (kind == "maaend" && maaend_hidden_task(nm)) continue;
+        // 过滤
+        if (!add_task_filter_.empty()) {
+            std::wstring dn = display_name(kind, nm);
+            std::string dn8 = util::wide_to_utf8(dn);
+            if (dn8.find(add_task_filter_) == std::string::npos
+                && nm.find(add_task_filter_) == std::string::npos) {
+                continue;
+            }
+        }
+        if (y + row_h < list_r.top) { y += row_h; continue; }
+        if (y > list_r.bottom) break;
+        // 已显示 = 在 task_list_ 中，或未设置过滤（默认全部）
+        bool shown = task_list_.find(id) == task_list_.end()
+                     || task_list_[id].count(nm) > 0;
+        CheckState st = shown ? CheckState::On : CheckState::Off;
+        RECT row{ list_r.left, y, list_r.right, y + row_h - 4 };
+        if (gui_.checkbox3(("atc-" + id + "-" + nm).c_str(), row,
+                           display_name(kind, nm), st)) {
+            if (st == CheckState::On) {
+                // 第一次操作时，用当前可见集合作为初始值
+                if (task_list_.find(id) == task_list_.end()) {
+                    for (auto& t : all) {
+                        std::string s = t.get_str("name", "");
+                        if (kind == "maaend" && maaend_hidden_task(s)) continue;
+                        task_list_[id].insert(s);
+                    }
+                }
+                task_list_[id].insert(nm);
+            } else {
+                if (task_list_.find(id) == task_list_.end()) {
+                    for (auto& t : all) {
+                        std::string s = t.get_str("name", "");
+                        if (kind == "maaend" && maaend_hidden_task(s)) continue;
+                        task_list_[id].insert(s);
+                    }
+                }
+                task_list_[id].erase(nm);
+            }
+            save_task_list();
+        }
+        y += row_h;
+    }
+    gui_.end_scroll();
+
+    // 底部：全选 / 全不选
+    RECT sel_all{ card.left + 16, card.bottom - 44, card.left + 96, card.bottom - 16 };
+    RECT sel_none{ card.left + 104, card.bottom - 44, card.left + 184, card.bottom - 16 };
+    if (gui_.button("addtask-all", sel_all, L"\u5168\u9009", 0)) {
+        task_list_[id].clear();
+        for (auto& t : all) {
+            std::string s = t.get_str("name", "");
+            if (kind == "maaend" && maaend_hidden_task(s)) continue;
+            task_list_[id].insert(s);
+        }
+        save_task_list();
+    }
+    if (gui_.button("addtask-none", sel_none, L"\u5168\u4e0d\u9009", 0)) {
+        task_list_[id].clear();
+        save_task_list();
+    }
+}
+
+// 持久化任务列表（state/task-lists.json）
+void MaaHubWindow::save_task_list() {
+    mj::Value v = mj::Value::object();
+    for (auto& kv : task_list_) {
+        mj::Value arr = mj::Value::array();
+        for (auto& nm : kv.second) arr.push(nm);
+        v.set(kv.first, std::move(arr));
+    }
+    util::write_file(util::exe_dir() + "\\state\\task-lists.json",
+                     mj::Value::dump_pretty(v));
+}
+
+void MaaHubWindow::load_task_list() {
+    std::string content;
+    if (!util::read_file(util::exe_dir() + "\\state\\task-lists.json", content)) return;
+    mj::Value v;
+    if (!mj::try_parse(content, v)) return;
+    for (auto& kv : v.members()) {
+        if (!kv.second.is_array()) continue;
+        for (auto& nm : kv.second.items()) {
+            if (nm.is_string()) task_list_[kv.first].insert(nm.as_string());
+        }
+    }
+}
+
 // ================================================================ 实例页（MAA 1:1 布局）
 // 复刻 MAA 官方 TaskQueueView：左列 190px 任务列表 + 右侧任务设置 + 底部控制栏。
 // 配色/圆角(4)/控件高(28)/外边距(20) 对齐 HandyControl Light 主题。
@@ -660,9 +784,13 @@ void MaaHubWindow::page_executor(RECT content) {
     std::string core_version = ex.get_str("core_version", "");
 
     std::vector<mj::Value> all_tasks = catalog_of(kind);
-    std::vector<mj::Value> tasks;   // 过滤内部入口任务
+    std::vector<mj::Value> tasks;   // 过滤内部入口任务 + 用户未添加的任务
+    auto tl_it = task_list_.find(id);
+    bool filtering = (tl_it != task_list_.end() && !tl_it->second.empty());
     for (auto& t : all_tasks) {
-        if (kind == "maaend" && maaend_hidden_task(t.get_str("name", ""))) continue;
+        std::string nm = t.get_str("name", "");
+        if (kind == "maaend" && maaend_hidden_task(nm)) continue;
+        if (filtering && tl_it->second.count(nm) == 0) continue;
         tasks.push_back(t);
     }
     // 应用用户拖拽后的顺序
@@ -828,6 +956,19 @@ void MaaHubWindow::page_executor(RECT content) {
     }
     gui_.end_scroll();
 
+    // 左列底部 40px 行：「+ 添加新任务」（官方 TaskQueue.AddTask）
+    {
+        RECT add_row{ left_col.left, left_col.bottom, left_col.right, frame.bottom - BAR_H };
+        gui_.fill({ add_row.left, add_row.top, add_row.right, add_row.top + 1 },
+                  gui_.theme.border);
+        RECT add_tasks_btn{ add_row.left + 8, add_row.top + 6,
+                            add_row.right - 8, add_row.bottom - 6 };
+        if (gui_.button(("addtask-" + id).c_str(), add_tasks_btn,
+                        L"\u002b \u6dfb\u52a0\u65b0\u4efb\u52a1", 0)) {
+            show_add_task_ = !show_add_task_;
+        }
+    }
+
     // ---------------- 右侧：任务设置 ----------------
     // 右侧展示的任务：优先用户选中项；未选中时才默认第一项
     std::string sel_task;
@@ -958,6 +1099,9 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.text(rx, ry + 8, L"\u8be5\u5b9e\u4f8b\u6ca1\u6709\u53ef\u7528\u4efb\u52a1",
                   gui_.theme.dim, gui_.font);
     }
+
+    // ---------------- 添加新任务浮层 ----------------
+    if (show_add_task_) draw_add_task_overlay(right_col, id, kind);
 
     // ---------------- 底部控制栏 ----------------
     gui_.fill({ bottom_bar.left, bottom_bar.top, bottom_bar.right, bottom_bar.top + 1 },
@@ -1536,6 +1680,16 @@ void MaaHubWindow::debug_select_task(const std::string& task) {
     ui.open = true;
     fprintf(stderr, "[render] selected exec=%s task=%s open=%d\n",
             selected_exec_.c_str(), task.c_str(), (int)ui.open);
+}
+
+// 测试用：强制打开「添加新任务」浮层
+void MaaHubWindow::debug_open_add_task() {
+    show_add_task_ = true;
+    if (selected_exec_.empty()) {
+        auto ids = hub_->executors();
+        if (!ids.empty()) selected_exec_ = ids[0].id;
+    }
+    fprintf(stderr, "[render] add-task overlay opened\n");
 }
 
 void MaaHubWindow::refresh_snapshot() {
