@@ -39,6 +39,10 @@ struct Theme {
     COLORREF err_light = RGB(0xFF, 0xF6, 0xF7);     // LightDangerColor
     COLORREF accent = RGB(0xF8, 0x49, 0x1E);        // AccentColor
     COLORREF hover = RGB(0xF5, 0xF5, 0xF5);         // DarkDefaultColor（悬停底）
+    // TaskQueue.TaskItemStatus.*（官方 Light.xaml，Alpha #20 = 12.5%）
+    COLORREF status_running = RGB(0x6C, 0x9C, 0xF3);  // InProgress 蓝
+    COLORREF status_done = RGB(0x60, 0xD0, 0x60);     // Completed 绿
+    COLORREF status_error = RGB(0xFF, 0x66, 0x66);    // Error 红
     COLORREF input_bg = RGB(0xFF, 0xFF, 0xFF);      // DefaultColor
     COLORREF row_alt = RGB(0xEE, 0xEE, 0xEE);       // SecondaryRegionColor
     COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）

@@ -785,10 +785,24 @@ void MaaHubWindow::page_executor(RECT content) {
         RECT item{ left_col.left + 8, y, left_col.right - 8, y + item_h - 4 };
         bool hov = gui_.input().mouse.x >= item.left && gui_.input().mouse.x < item.right
                 && gui_.input().mouse.y >= item.top && gui_.input().mouse.y < item.bottom;
-        COLORREF fill_c = (ui.checked || ui.once) ? gui_.theme.primary_light : gui_.theme.panel;
-        COLORREF line_c = (ui.checked || ui.once) ? gui_.theme.primary : gui_.theme.border;
-        if (hov && !ui.checked && !ui.once) fill_c = gui_.theme.hover;
-        // 拖拽源半透明提示
+        // 官方：任务项背景随状态变化（InProgress 蓝 / Completed 绿 / Error 红），
+        // Alpha #20(12.5%) 叠加在白底上；勾选态用 Primary 浅底
+        std::string running = hub_->running_task_of(id);
+        std::string last_res = hub_->last_task_result(id, name);
+        COLORREF fill_c, line_c;
+        if (running == name) {
+            fill_c = gui_.theme.status_running;  line_c = gui_.theme.primary;
+        } else if (last_res == "error") {
+            fill_c = gui_.theme.status_error;    line_c = gui_.theme.err;
+        } else if (last_res == "ok") {
+            fill_c = gui_.theme.status_done;     line_c = gui_.theme.ok;
+        } else if (ui.checked || ui.once) {
+            fill_c = gui_.theme.primary_light;   line_c = gui_.theme.primary;
+        } else if (hov) {
+            fill_c = gui_.theme.hover;           line_c = gui_.theme.border;
+        } else {
+            fill_c = gui_.theme.panel;           line_c = gui_.theme.border;
+        }
         if (drag_task_ == name) fill_c = gui_.theme.primary_light;
         gui_.round_rect(item, fill_c, line_c, 4);
         RECT cbr{ item.left + 8, item.top + 5, item.left + 200, item.top + 25 };
@@ -845,20 +859,22 @@ void MaaHubWindow::page_executor(RECT content) {
     int rx = right_col.left + 16;
     int ry = right_col.top + 12;
     if (!sel_task.empty() && sel_valid) {
-        gui_.text(rx, ry, L"\u4efb\u52a1\u8bbe\u7f6e", gui_.theme.dim, gui_.font_small);
-        gui_.text(rx, ry + 18, display_name(kind, sel_task),
+        // 官方层次：左侧大标题（任务名），右上角小字（任务设置 · 来源）
+        gui_.text(rx, ry, display_name(kind, sel_task),
                   gui_.theme.text, gui_.font_title);
         std::wstring desc;
         for (auto& t : tasks) {
             if (t.get_str("name", "") == sel_task) desc = gui::widen(t.get_str("description", ""));
         }
-        if (!desc.empty()) {
+        {
+            std::wstring sub = L"\u4efb\u52a1\u8bbe\u7f6e";
+            if (!desc.empty()) sub += L" \u00b7 " + desc;
             RECT save = gui_.clip();
-            gui_.text_clipped({ rx + 260, ry + 22, right_col.right - 16, ry + 42 },
-                              desc, gui_.theme.dim, gui_.font_small);
+            gui_.text_clipped({ rx + 200, ry + 4, right_col.right - 16, ry + 24 },
+                              sub, gui_.theme.dim, gui_.font_small);
             (void)save;
         }
-        ry += 52;
+        ry += 34;
 
         TaskUiState& ui = task_ui_[id][sel_task];
         // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
