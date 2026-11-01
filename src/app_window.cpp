@@ -846,8 +846,17 @@ void MaaHubWindow::page_executor(RECT content) {
                               { rx, panel_top, right_col.right - 16, right_col.bottom - 12 },
                               2000, scroll_["panel-" + id + "-" + sel_task]);
             int saved_y = ry;
+            // 找到选中任务的 catalog 声明（供通用面板按类型渲染）
+            const mj::Value* spec = nullptr;
+            for (auto& t : tasks) {
+                if (t.get_str("name", "") == sel_task) { spec = &t; break; }
+            }
+            std::vector<mj::Value> specs;
+            if (spec) {
+                if (auto* ps = spec->find("params"); ps && ps->is_array()) specs = ps->items();
+            }
             PanelCtx pctx{ gui_, rx, ry, right_col.right - 16, ui.params, id, sel_task };
-            bool custom = draw_task_panel(pctx);
+            bool custom = draw_task_panel(pctx, &specs);
             ry = pctx.y;
             int used = ry - saved_y;
             gui_.end_scroll();
@@ -1425,15 +1434,25 @@ void MaaHubWindow::debug_select_task(const std::string& task) {
     static const char* kEndOnly[] = { "AccountSwitch", "DailyRewards", "CreditShopping",
                                       "AutoCollect", "ProtocolSpace", "GiftOperator",
                                       "VisitFriends", "BatchAddFriends", "ReadAllWiki" };
-    bool want_end = false;
+    // 先按已知 MaaEnd 任务判断；未知任务则优先 MaaEnd（其任务覆盖面更大）
+    bool want_end = true;
     for (auto* t : kEndOnly) {
         if (task == t) { want_end = true; break; }
     }
+    static const char* kMaaOnly[] = { "StartUp", "CloseDown", "Fight", "Infrast",
+                                      "Recruit", "Mall", "Award", "Roguelike",
+                                      "Copilot", "Depot", "OperBox", "Reclamation",
+                                      "Custom" };
+    for (auto* t : kMaaOnly) {
+        if (task == t) { want_end = false; break; }
+    }
     auto ids = hub_->executors();
-    std::string pick;
+    std::string pick, fallback;
     for (auto& e : ids) {
         if ((e.kind == "maaend") == want_end) { pick = e.id; break; }
+        if (fallback.empty()) fallback = e.id;
     }
+    if (pick.empty()) pick = fallback;
     if (pick.empty() && !ids.empty()) pick = ids[0].id;
     if (pick.empty()) return;
     selected_exec_ = pick;
