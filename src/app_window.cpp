@@ -7,6 +7,7 @@
 namespace hub {
 
 using gui::Input;
+using gui::CheckState;
 
 // 最小 CRC32（PNG 用）
 static uint32_t crc32_calc(const uint8_t* d, size_t n) {
@@ -216,6 +217,20 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         ReleaseCapture();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    case WM_RBUTTONDOWN:
+        input_.mouse.x = GET_X_LPARAM(lp);
+        input_.mouse.y = GET_Y_LPARAM(lp);
+        input_.rdown = true;
+        input_.rpressed = true;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_RBUTTONUP:
+        input_.mouse.x = GET_X_LPARAM(lp);
+        input_.mouse.y = GET_Y_LPARAM(lp);
+        input_.rdown = false;
+        input_.rreleased = true;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
     case WM_MOUSEWHEEL:
         input_.wheel = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -333,6 +348,8 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
     gui_.end();
     input_.pressed = false;
     input_.released = false;
+    input_.rpressed = false;
+    input_.rreleased = false;
     input_.wheel = 0;
     input_.char_input = 0;
     input_.vk = 0;
@@ -636,6 +653,25 @@ void MaaHubWindow::page_executor(RECT content) {
         if (kind == "maaend" && maaend_hidden_task(t.get_str("name", ""))) continue;
         tasks.push_back(t);
     }
+    // 应用用户拖拽后的顺序
+    auto oit = task_order_.find(id);
+    if (oit != task_order_.end() && !oit->second.empty()) {
+        std::vector<mj::Value> sorted;
+        sorted.reserve(tasks.size());
+        for (auto& nm : oit->second) {
+            for (auto& t : tasks) {
+                if (t.get_str("name", "") == nm) { sorted.push_back(t); break; }
+            }
+        }
+        for (auto& t : tasks) {
+            bool found = false;
+            for (auto& s : sorted) {
+                if (s.get_str("name", "") == t.get_str("name", "")) { found = true; break; }
+            }
+            if (!found) sorted.push_back(t);
+        }
+        tasks.swap(sorted);
+    }
 
     // 外框：Margin 20 + 白色 Region 卡片 + 圆角 4
     RECT frame{ content.left, content.top, content.right, content.bottom };
@@ -670,6 +706,60 @@ void MaaHubWindow::page_executor(RECT content) {
     int list_top = hy + 30;
     int item_h = 32;
     int n = (int)tasks.size();
+
+    // ---- 拖拽排序状态机（官方左列可拖动调整顺序）----
+    // 记录本帧每项的 y 供放置判定
+    std::vector<int> item_ys;
+    item_ys.reserve(n);
+    {
+        int yy = list_top + 4 - (int)scroll_["tasks-" + id];
+        for (int k = 0; k < n; ++k) { item_ys.push_back(yy); yy += item_h; }
+    }
+    // 按下左键且在执行器列内 -> 开始拖拽
+    if (gui_.input().pressed
+        && gui_.input().mouse.x >= left_col.left && gui_.input().mouse.x < left_col.right
+        && gui_.input().mouse.y >= list_top) {
+        int idx = (gui_.input().mouse.y - (list_top + 4 - (int)scroll_["tasks-" + id])) / item_h;
+        if (idx >= 0 && idx < n) {
+            drag_task_ = tasks[idx].get_str("name", "");
+            drag_y_ = gui_.input().mouse.y;
+        }
+    }
+    if (!drag_task_.empty()) {
+        drag_y_ = gui_.input().mouse.y;
+        // 计算插入位置
+        int base = list_top + 4 - (int)scroll_["tasks-" + id];
+        int idx = (drag_y_ - base) / item_h;
+        if (idx < 0) idx = 0;
+        if (idx > n) idx = n;
+        drop_before_ = idx;
+        // 松手 -> 提交排序
+        if (!gui_.input().down) {
+            int from = -1;
+            for (int k = 0; k < n; ++k) {
+                if (tasks[k].get_str("name", "") == drag_task_) { from = k; break; }
+            }
+            if (from >= 0 && drop_before_ >= 0 && drop_before_ != from
+                && drop_before_ != from + 1) {
+                int to = drop_before_;
+                if (to > from) --to;
+                std::string nm = drag_task_;
+                task_order_[id].clear();
+                for (auto& t : tasks) {
+                    std::string s = t.get_str("name", "");
+                    if (s != nm) task_order_[id].push_back(s);
+                }
+                if (to < 0) to = 0;
+                if (to > (int)task_order_[id].size()) to = (int)task_order_[id].size();
+                task_order_[id].insert(task_order_[id].begin() + to, nm);
+            }
+            drag_task_.clear();
+            drop_before_ = -1;
+        }
+    } else {
+        drop_before_ = -1;
+    }
+
     gui_.begin_scroll(("tasks-" + id).c_str(),
                       { left_col.left, list_top, left_col.right, left_col.bottom - 6 },
                       n * item_h + 8, scroll_["tasks-" + id]);
@@ -683,13 +773,20 @@ void MaaHubWindow::page_executor(RECT content) {
         RECT item{ left_col.left + 8, y, left_col.right - 8, y + item_h - 4 };
         bool hov = gui_.input().mouse.x >= item.left && gui_.input().mouse.x < item.right
                 && gui_.input().mouse.y >= item.top && gui_.input().mouse.y < item.bottom;
-        COLORREF fill_c = ui.checked ? gui_.theme.primary_light : gui_.theme.panel;
-        COLORREF line_c = ui.checked ? gui_.theme.primary : gui_.theme.border;
-        if (hov && !ui.checked) fill_c = gui_.theme.hover;
+        COLORREF fill_c = (ui.checked || ui.once) ? gui_.theme.primary_light : gui_.theme.panel;
+        COLORREF line_c = (ui.checked || ui.once) ? gui_.theme.primary : gui_.theme.border;
+        if (hov && !ui.checked && !ui.once) fill_c = gui_.theme.hover;
+        // 拖拽源半透明提示
+        if (drag_task_ == name) fill_c = gui_.theme.primary_light;
         gui_.round_rect(item, fill_c, line_c, 4);
         RECT cbr{ item.left + 8, item.top + 5, item.left + 200, item.top + 25 };
         std::wstring label = display_name(kind, name);
-        gui_.checkbox(("cb-" + id + "-" + name).c_str(), cbr, label, ui.checked);
+        CheckState st = ui.once ? CheckState::Once
+                                : (ui.checked ? CheckState::On : CheckState::Off);
+        gui_.checkbox3(("cb-" + id + "-" + name).c_str(), cbr, label, st);
+        ui.checked = (st == CheckState::On);
+        ui.once = (st == CheckState::Once);
+        // 序号（拖拽时显示目标插入线）
         gui_.text(item.right - 24, item.top + 7, std::to_wstring(ti + 1),
                   gui_.theme.faint, gui_.font_small);
         if (hov && gui_.input().pressed) {
@@ -1486,17 +1583,47 @@ void MaaHubWindow::action_run_checked(const std::string& id) {
     ExecutorEntry e;
     if (!hub_->get_executor(id, e)) return;
     mj::Value cat = hub_->executor_catalog(id);
-    int started = 0;
+    // 按用户拖拽后的顺序执行（与左列显示一致）
+    std::vector<mj::Value> items;
     if (cat.is_array()) {
         for (auto& t : cat.items()) {
+            if (e.kind == "maaend" && maaend_hidden_task(t.get_str("name", ""))) continue;
+            items.push_back(t);
+        }
+    }
+    auto oit = task_order_.find(id);
+    if (oit != task_order_.end() && !oit->second.empty()) {
+        std::vector<mj::Value> sorted;
+        for (auto& nm : oit->second) {
+            for (auto& t : items) {
+                if (t.get_str("name", "") == nm) { sorted.push_back(t); break; }
+            }
+        }
+        for (auto& t : items) {
+            bool found = false;
+            for (auto& s : sorted) {
+                if (s.get_str("name", "") == t.get_str("name", "")) { found = true; break; }
+            }
+            if (!found) sorted.push_back(t);
+        }
+        items.swap(sorted);
+    }
+    int started = 0;
+    {
+        for (auto& t : items) {
             std::string name = t.get_str("name", "");
             auto it = task_ui_.find(id);
             if (it == task_ui_.end()) continue;
             auto tit = it->second.find(name);
-            if (tit == it->second.end() || !tit->second.checked) continue;
+            if (tit == it->second.end()) continue;
+            if (!tit->second.checked && !tit->second.once) continue;
             mj::Value params = mj::Value::object();
             for (auto& kv : tit->second.params) params.set(kv.first, kv.second);
-            if (hub_->run_on_executor(id, name, params) > 0) ++started;
+            if (hub_->run_on_executor(id, name, params) > 0) {
+                ++started;
+                // 「仅一次」运行后复位，且不写入配置
+                tit->second.once = false;
+            }
         }
     }
     set_notice(started > 0 ? "已启动 " + std::to_string(started) + " 个任务"

@@ -10,6 +10,8 @@
 
 namespace hub {
 
+using gui::CheckState;
+
 // 面板绘制上下文：把 Gui + 布局矩形 + 参数读写传进去
 using ParamMap = std::map<std::string, mj::Value>;
 
@@ -28,6 +30,14 @@ struct PanelCtx {
         return (v.is_bool() || v.is_number()) ? v.as_bool() : def;
     }
     void set_bool(const std::string& k, bool v) { params[k] = mj::Value(v); }
+    bool get_once(const std::string& k) const {
+        auto it = params.find(std::string("__once_") + k);
+        return it != params.end() && it->second.as_bool();
+    }
+    void set_once(const std::string& k, bool v) {
+        if (v) params[std::string("__once_") + k] = mj::Value(true);
+        else params.erase(std::string("__once_") + k);
+    }
     int get_int(const std::string& k, int def = 0) const {
         auto it = params.find(k);
         if (it == params.end()) return def;
@@ -45,12 +55,15 @@ struct PanelCtx {
 };
 
 // ---- 通用小部件 ----
+// 三态勾选：左键开/关，右键「仅生效一次」（官方语义，运行后复位、不写配置）
 inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& label,
                      const std::wstring& tip = L"") {
-    bool v = c.get_bool(key);
+    CheckState st = c.get_once(key) ? CheckState::Once
+                                    : (c.get_bool(key) ? CheckState::On : CheckState::Off);
     RECT r{ c.x, c.y, c.x + 460, c.y + 22 };
-    c.g.checkbox((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, v);
-    c.set_bool(key, v);
+    c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st);
+    c.set_bool(key, st == CheckState::On);
+    c.set_once(key, st == CheckState::Once);
     c.y += 24;
     if (!tip.empty()) {
         c.g.tip_line(c.x + 24, c.y, c.right, tip);
@@ -221,7 +234,52 @@ inline bool panel_award(PanelCtx& c) {
     return true;
 }
 
-// ---- MaaEnd AccountSwitch：账号切换 ----
+// ---- Roguelike：自动肉鸽 ----
+inline bool panel_roguelike(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u57fa\u7840");
+    c.y += 20;
+    pc_radio(c, "theme", { L"\u5c0f\u9e7f", L"\u673a\u94f6", L"\u6c34\u6708",
+                           L"\u6b65\u6ed1\u94c1\u5239" }, 0);
+    pc_radio(c, "difficulty", { L"\u7b80\u5355", L"\u666e\u901a", L"\u56f0\u96be" }, 0);
+    pc_radio(c, "mode", { L"\u7ecf\u5178", L"\u6295\u8d44", L"\u5237\u5f00\u5c40",
+                          L"\u9ed1\u5e95\u6cb3" }, 0);
+    pc_radio(c, "squad", { L"\u6307\u5c04\u7814\u7a76\u5458", L"\u8f93\u5fc5\u62a2\u536b\u8f66",
+                           L"\u4eea\u5f0f\u7814\u7a76\u5458", L"\u9ad8\u7ea7\u7269\u8d44\u56e2" }, 0);
+    c.y += 6;
+    c.g.group_title(c.x, c.y, L"\u5f00\u5c40");
+    c.y += 20;
+    pc_text(c, "core_char", L"\u5f00\u5c40\u5e72\u5458", L"\u5e72\u5458\u540d\u79f0");
+    pc_check(c, "start_with_elite_two",
+             L"\u51f9 \u300c\u5f00\u5c40\u5e72\u5458\u300d\u76f4\u5347\u7cbe\u4e8c");
+    pc_check(c, "only_start_with_elite_two",
+             L"\u53ea\u51f9 \u300c\u5f00\u5c40\u5e72\u5458\u300d\u76f4\u5347\u7cbe\u4e8c\uff0c\u4e0d\u8fdb\u884c\u4f5c\u6218");
+    pc_text(c, "start_with_select_list", L"\u5237\u5f00\u5c40\u671f\u671b\u5956\u52b1",
+            L"\u591a\u4e2a\u7528\u5206\u53f7\u5206\u9694");
+    c.y += 6;
+    c.g.group_title(c.x, c.y, L"\u6295\u8d44\u4e0e\u7ed3\u675f");
+    c.y += 20;
+    pc_check(c, "investment_enabled", L"\u6295\u8d44\u6e90\u77f3\u9408");
+    pc_check(c, "investment_with_more_score",
+             L"\u6295\u8d44\u6a21\u5f0f\u542f\u7528\u8d2d\u7269\u3001\u62db\u52df\u3001\u8fdb 2 \u5c42");
+    pc_number(c, "start_times_limit",
+              L"\u5f00\u59cb\u63a2\u7d22 N \u6b21\u540e\u505c\u6b62\u4efb\u52a1", 0, 1, 0, 999);
+    pc_number(c, "gold_times_limit",
+              L"\u6295\u8d44 N \u4e2a\u6e90\u77f3\u9408\u540e\u505c\u6b62\u4efb\u52a1", 0, 1, 0, 9999);
+    pc_number(c, "stop_on_gold_limit",
+              L"\u5907\u7528\u6e90\u77f3\u9408\u4e0a\u9650\u65f6\u505c\u6b62", 0, 100, 0, 99999);
+    c.y += 6;
+    c.g.group_title(c.x, c.y, L"\u884c\u4e3a");
+    c.y += 20;
+    pc_check(c, "refresh_trader_with_dice", L"\u5237\u65b0\u5546\u5e97\uff08\u6307\u8def\u9cde\uff09");
+    pc_check(c, "use_non_friend_support", L"\u53ef\u4ee5\u4f7f\u7528\u975e\u597d\u53cb\u52a9\u6218");
+    pc_check(c, "stop_at_final_boss", L"\u5728\u7b2c\u4e94\u5c42 BOSS \u524d\u6682\u505c");
+    pc_check(c, "stop_at_max_level", L"\u6ee1\u7ea7\u540e\u81ea\u52a8\u505c\u6b62");
+    pc_check(c, "monthly_squad_auto_iterate", L"\u6708\u5ea6\u5c0f\u961f\u81ea\u52a8\u5207\u6362");
+    pc_check(c, "deep_exploration_auto_iterate", L"\u6df1\u5165\u8c03\u67e5\u81ea\u52a8\u5207\u6362");
+    return true;
+}
+
+// ---- MaaEnd AccountSwitch ----
 inline bool panel_account_switch(PanelCtx& c) {
     c.g.group_title(c.x, c.y, L"账号切换");
     c.y += 20;
@@ -230,6 +288,93 @@ inline bool panel_account_switch(PanelCtx& c) {
 }
 
 // 分派：返回 true 表示已用专属面板绘制
+// ================================================================ MaaEnd 任务面板
+// 选项名与标签取自本机 MaaEnd cores 的 tasks/*.json + locales/*/zh_cn.json
+
+// ---- 日常奖励领取 ----
+inline bool panel_end_daily(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u9886\u53d6\u9879");
+    c.y += 20;
+    pc_check(c, "DailyTaskRewards", L"\u6bcf\u65e5\u4efb\u52a1\u5956\u52b1");
+    pc_check(c, "DailyEmailRewards", L"\u90ae\u4ef6/\u6682\u5b58\u533a\u5956\u52b1");
+    pc_check(c, "DailyClaimDeliveryJobsRewards", L"\u8f6c\u4ea4\u59d4\u6258\u5956\u52b1");
+    pc_check(c, "DailyEventRewards", L"\u6d3b\u52a8\u5956\u52b1");
+    pc_check(c, "DailyProtocolPassRewards", L"\u901a\u884c\u8bc1\u5956\u52b1");
+    pc_check(c, "DailyActivityFullWarning", L"\u6d3b\u8dc3\u5ea6\u672a\u6ee1\u65f6\u544a\u8b66");
+    c.y += 6;
+    c.g.group_title(c.x, c.y, L"\u6bcf\u65e5\u4efb\u52a1");
+    c.y += 20;
+    pc_check(c, "DailyTaskUpgradeWeapon", L"\u5347\u7ea7\u6b66\u5668");
+    pc_check(c, "DailyTaskAssemble", L"\u5236\u9020\u88c5\u5907");
+    pc_check(c, "DailyTaskLevelUpOperator", L"\u5e72\u5458\u5347\u7ea7");
+    pc_number(c, "LevelUpOperatorMaxLevelThreshold", L"\u7b49\u7ea7\u8bbe\u7f6e", 0, 1, 0, 90);
+    pc_check(c, "DailyTaskCreation", L"\u7b80\u6613\u5236\u4f5c");
+    return true;
+}
+
+// ---- 自动采集 ----
+inline bool panel_end_collect(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u91c7\u96c6\u533a\u57df");
+    c.y += 20;
+    pc_check(c, "AutoCollectValleyIV", L"\u56db\u53f7\u8c37\u5730");
+    pc_check(c, "AutoCollectValleyIVRareRoutes", L"\u7a00\u6709\u91c7\u96c6\u7269");
+    pc_check(c, "AutoCollectValleyIVCommonRoutes", L"\u4e00\u822c\u91c7\u96c6\u7269");
+    pc_check(c, "AutoCollectWuling", L"\u6b66\u9675");
+    pc_check(c, "AutoCollectWulingRareRoutes", L"\u7a00\u6709\u91c7\u96c6\u7269");
+    pc_check(c, "AutoCollectWulingCommonRoutes", L"\u4e00\u822c\u91c7\u96c6\u7269");
+    c.y += 6;
+    c.g.group_title(c.x, c.y, L"\u6a21\u5f0f");
+    c.y += 20;
+    pc_radio(c, "AutoCollectMode", { L"\u59cb\u7ec8", L"\u76ee\u6807\u5e93\u5b58" }, 0);
+    pc_number(c, "AutoCollectTargetInventory", L"\u76ee\u6807\u5e93\u5b58", 0, 1, 0, 99999);
+    pc_check(c, "AutoCollectStashBackpackSubTask", L"\u4efb\u52a1\u524d\u540e\u5b58\u653e\u80cc\u5305");
+    return true;
+}
+
+// ---- 协议空间 ----
+inline bool panel_end_protocol(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u6218\u6597");
+    c.y += 20;
+    pc_check(c, "AutoFightSetting", L"\u81ea\u52a8\u6218\u6597\u8bbe\u7f6e");
+    pc_radio(c, "ProtocolSpaceTeamChoose",
+             { L"\u9ed8\u8ba4", L"\u961f\u4f0d 1", L"\u961f\u4f0d 2", L"\u961f\u4f0d 3" }, 0);
+    pc_radio(c, "ProtocolSpaceMode", { L"\u6309\u6b21\u6570", L"\u76ee\u6807\u5e93\u5b58" }, 0);
+    pc_number(c, "ProtocolSpaceSuccessCount",
+              L"\u884c\u52a8\u6210\u529f\u6b21\u6570\u4e0a\u9650", 0, 1, 0, 999);
+    pc_number(c, "ProtocolSpaceFailedCount",
+              L"\u884c\u52a8\u5931\u8d25\u6b21\u6570\u4e0a\u9650", 0, 1, 0, 999);
+    c.y += 6;
+    c.g.group_title(c.x, c.y, L"\u5176\u4ed6");
+    c.y += 20;
+    pc_number(c, "SupplyPlanLimits", L"\u57f9\u517b\u9053\u5177\u76ee\u6807", 0, 1, 0, 99999);
+    return true;
+}
+
+// ---- 赠送干员礼物 ----
+inline bool panel_end_gift(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u8d60\u9001");
+    c.y += 20;
+    pc_text(c, "SelectOperator", L"\u8d60\u9001\u5e72\u5458", L"\u5e72\u5458\u540d\u79f0");
+    pc_number(c, "GiftCount", L"\u8d60\u9001\u6570\u91cf", 1, 1, 1, 999);
+    pc_check(c, "OnlyReceiveGift", L"\u53ea\u6536\u793c\u7269");
+    pc_check(c, "AcceptAllGifts", L"\u63a5\u53d7\u5168\u90e8\u793c\u7269");
+    return true;
+}
+
+// ---- 拜访好友 ----
+inline bool panel_end_friends(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u62dc\u8bbf\u89c4\u5219");
+    c.y += 20;
+    pc_check(c, "VisitFriendsRemark", L"\u4f18\u5148\u62dc\u8bbf\u5e26\u5907\u6ce8\u7684\u597d\u53cb");
+    pc_check(c, "VisitFriendsPriorityRemarkEnable",
+             L"\u4f18\u5148\u62dc\u8bbf\u6307\u5b9a\u597d\u53cb\uff08\u4f18\u5148\u7ea7\u66f4\u9ad8\uff09");
+    pc_text(c, "VisitFriendsPriorityRemark", L"\u4f18\u5148\u62dc\u8bbf\u7684\u597d\u53cb",
+            L"\u591a\u4e2a\u7528\u5206\u53f7\u5206\u9694");
+    pc_check(c, "VisitFriendsPrioritySearchEnable",
+             L"\u901a\u8fc7\u641c\u7d22\u6846\u5b9a\u4f4d\u4f18\u5148\u597d\u53cb");
+    return true;
+}
+
 inline bool draw_task_panel(PanelCtx& c) {
     if (c.task == "StartUp") return panel_startup(c);
     if (c.task == "Fight") return panel_fight(c);
@@ -237,7 +382,13 @@ inline bool draw_task_panel(PanelCtx& c) {
     if (c.task == "Recruit") return panel_recruit(c);
     if (c.task == "Mall") return panel_mall(c);
     if (c.task == "Award") return panel_award(c);
+    if (c.task == "Roguelike") return panel_roguelike(c);
     if (c.task == "AccountSwitch") return panel_account_switch(c);
+    if (c.task == "DailyRewards") return panel_end_daily(c);
+    if (c.task == "AutoCollect") return panel_end_collect(c);
+    if (c.task == "ProtocolSpace") return panel_end_protocol(c);
+    if (c.task == "GiftOperator") return panel_end_gift(c);
+    if (c.task == "VisitFriends") return panel_end_friends(c);
     return false;
 }
 
