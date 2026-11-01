@@ -28,3 +28,6 @@ maahub-crash.log
 # 沙盒探针（本地临时，勿提交）
 _sandbox/
 _download/
+
+# 面板验收截图（本地产物，勿提交）
+docs/audit-*.png
