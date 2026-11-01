@@ -210,7 +210,9 @@ void MaaHubWindow::draw_sidebar(RECT r) {
     // ---- 执行器列表 ----
     int y = r.top + 68;
     gui_.text(r.left + 14, y, L"执行器（实例）", gui_.theme.dim, gui_.font_small);
-    RECT add_btn{ r.right - 44, y - 4, r.right - 12, y + 18 };
+    // 原来只有 32px 宽，"＋ 新建" 需要 46px，文本会溢出按钮；
+    // 放宽到 58px（左边界 180，仍远在标题文字右侧，不会重叠）
+    RECT add_btn{ r.right - 70, y - 4, r.right - 12, y + 18 };
     if (gui_.button("new-exec", add_btn, L"＋ 新建", 1)) show_new_exec_ = !show_new_exec_;
     y += 24;
 
@@ -255,7 +257,8 @@ void MaaHubWindow::draw_sidebar(RECT r) {
             selected_exec_ = id;
             page_ = "executor";
         }
-        RECT dr{ ir.right - 40, ir.top + 10, ir.right - 26, ir.top + 30 };
+        // 14px 宽的按钮只有 11px 的 ✕，太挤；放宽到 18px（不与右侧状态点重叠）
+        RECT dr{ ir.right - 42, ir.top + 10, ir.right - 24, ir.top + 30 };
         if (gui_.button(("del-" + id).c_str(), dr, L"✕", 2)) {
             action_delete_executor(id);
         }
@@ -448,7 +451,16 @@ void MaaHubWindow::page_executor(RECT content) {
         TaskUiState& ui = task_ui_[id][name];
         std::wstring desc = gui::widen(t.get_str("description", ""));
         if (y + item_h < list_top) { y += item_h; continue; }
-        if (y > content.bottom) break;
+        // 本行实际绘制内容的底边（item 卡片 + 展开时的参数面板），
+        // 用滚动裁剪区判断，避免末行被裁一半（原来是拿 content.bottom 比较）
+        int row_content_h = item_h - 6;
+        if (ui.open) {
+            int ph = 28;
+            if (auto* ps0 = t.find("params"); ps0 && ps0->is_array() && !ps0->items().empty())
+                ph = (int)ps0->items().size() * 32 + 10;
+            row_content_h += 6 + ph;
+        }
+        if (!gui_.row_fully_visible(y, row_content_h)) break;
 
         RECT item{ content.left, y, content.right, y + item_h - 6 };
         gui_.round_rect(item, ui.checked ? gui_.theme.panel : RGB(250, 251, 253),
@@ -593,7 +605,7 @@ void MaaHubWindow::page_accounts(RECT content) {
     if (accs.empty()) gui_.text(panel.left + 16, ry + 6, L"尚未添加账号", gui_.theme.dim, gui_.font_small);
     for (auto& a : accs) {
         if (ry + row_h < ty) { ry += row_h; continue; }
-        if (ry > panel.bottom) break;
+        if (!gui_.row_fully_visible(ry, row_h)) break;   // 按裁剪区底剔除，别裁半行
         std::string id = a.get_str("id", "");
         std::string game = a.get_str("game", "");
         bool enabled = a.get_bool("enabled", true);
@@ -752,7 +764,7 @@ void MaaHubWindow::page_cores(RECT content) {
     }
     for (auto& c : cores) {
         if (ry + row_h < ty) { ry += row_h; continue; }
-        if (ry > panel.bottom) break;
+        if (!gui_.row_fully_visible(ry, row_h)) break;   // 按裁剪区底剔除，别裁半行
         std::string id = c.get_str("id", "");
         std::string kind = c.get_str("kind", "");
         bool is_def = c.get_bool("is_default", false);
@@ -905,7 +917,7 @@ void MaaHubWindow::page_planner(RECT content) {
     int ry = ty + 4 - (int)scroll_["plans"];
     for (auto& p : plans) {
         if (ry + row_h < ty) { ry += row_h; continue; }
-        if (ry > hpanel.bottom) break;
+        if (!gui_.row_fully_visible(ry, row_h)) break;   // 按裁剪区底剔除，别裁半行
         gui_.text(cols[0], ry + 4, gui::widen(util::now_str()), gui_.theme.dim, gui_.font_small);
         gui_.text(cols[1], ry + 4, gui::widen(p.get_str("planner", "")), gui_.theme.text, gui_.font_small);
         {
@@ -941,7 +953,7 @@ void MaaHubWindow::page_events(RECT content) {
     if (evs.empty()) gui_.text(panel.left + 16, ry + 8, L"暂无事件", gui_.theme.dim, gui_.font_small);
     for (auto& e : evs) {
         if (ry + row_h < panel.top + 40) { ry += row_h; continue; }
-        if (ry > panel.bottom) break;
+        if (!gui_.row_fully_visible(ry, row_h)) break;   // 按裁剪区底剔除，别裁半行
         std::string cat = e.get_str("category", "");
         COLORREF c = cat == "error" ? gui_.theme.err :
                      cat == "connection" ? gui_.theme.warn : gui_.theme.dim;
@@ -998,6 +1010,14 @@ std::vector<mj::Value> MaaHubWindow::catalog_of(const std::string& kind) const {
 }
 
 // ================================================================ 后台线程
+// 即时快照：只读持久化文件，不碰 worker 管道（毫秒级），用于启动首帧
+void MaaHubWindow::refresh_snapshot_fast() {
+    mj::Value v = hub_->snapshot_fast();
+    std::lock_guard<std::mutex> lk(snap_mtx_);
+    snap_ = std::move(v);
+    ++snap_version_;
+}
+
 void MaaHubWindow::refresh_snapshot() {
     mj::Value s = hub_->snapshot();
     std::lock_guard<std::mutex> lk(snap_mtx_);
@@ -1006,10 +1026,21 @@ void MaaHubWindow::refresh_snapshot() {
 }
 
 void MaaHubWindow::backend_loop() {
+    // 渐进式启动：先立刻产出「即时快照」（只读持久化，毫秒级），
+    // 让左侧执行器立即可见；worker 启动/核心加载在后台并行进行，就绪后增量刷新。
+    double t0 = util::now_sec();
     hub_->ensure_default_executors();
-    hub_->start_all();
+    refresh_snapshot_fast();                       // ← 即时帧（不等 worker）
+    double t1 = util::now_sec();
+    PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);        // 立刻让 UI 画出来
+    hub_->start_all();                             // 并行拉起 worker + 加载核心
+    double t2 = util::now_sec();
     hub_->refresh_catalogs();
     refresh_snapshot();
+    double t3 = util::now_sec();
+    PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
+    fprintf(stderr, "[startup] first_paint=%.0fms start_all=%.0fms full_ready=%.0fms\n",
+            (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t0) * 1000);
     while (running_) {
         std::pair<std::function<void()>, std::string> job;
         bool have_job = false;

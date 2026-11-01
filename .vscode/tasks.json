@@ -29,13 +29,22 @@
             "detail": "干跑自检：加载核心、拉起全部执行器 worker、读取任务目录"
         },
         {
-            "label": "MaaHub: Test (executors)",
+            "label": "MaaHub: Test (headless)",
             "type": "shell",
             "command": "python",
-            "args": ["${workspaceFolder}\\tests\\executor_state_test.py"],
+            "args": ["${workspaceFolder}\\tests\\headless_tests.py"],
             "group": "test",
             "problemMatcher": [],
-            "detail": "执行器持久化 / 核心回退 / 多实例并发加载测试"
+            "detail": "无头测试：启动性能/执行器/核心内部管理/多执行器共享核心（不创建窗口）"
+        },
+        {
+            "label": "MaaHub: Bench (startup)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\build\\MaaHub.exe",
+            "args": ["--startup-bench"],
+            "group": "test",
+            "problemMatcher": [],
+            "detail": "启动性能基准：first_paint 应 < 200ms（无窗口）"
         }
     ]
 }

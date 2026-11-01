@@ -133,18 +133,39 @@ public:
         SelectObject(dc_, old);
     }
     void text_clipped(RECT r, const std::wstring& s, COLORREF c, HFONT f, bool ellipsis = true) {
-        SIZE sz = text_size(s, f);
-        if (ellipsis && sz.cx > r.right - r.left) {
-            std::wstring t = s;
-            while (t.size() > 1) {
-                t.pop_back();
-                SIZE s2 = text_size(t + L"…", f);
-                if (s2.cx <= r.right - r.left) { t += L"…"; break; }
-            }
-            text(r.left, r.top + (r.bottom - r.top - sz.cy) / 2, t, c, f);
-        } else {
-            text(r.left, r.top + (r.bottom - r.top - sz.cy) / 2, s, c, f);
+        int avail = r.right - r.left;
+        std::wstring t = ellipsis ? this->ellipsize(s, avail, f) : s;
+        SIZE sz = text_size(t, f);
+        text(r.left, r.top + (r.bottom - r.top - sz.cy) / 2, t, c, f);
+    }
+
+    // ------------------------------------------------------------ 文本自适应
+    // 按像素宽度截断并补省略号。UTF-16 代理对安全：不会把 emoji 劈成半个。
+    std::wstring ellipsize(const std::wstring& s, int avail, HFONT f) {
+        if (avail <= 0) return L"";
+        if (text_size(s, f).cx <= avail) return s;
+        const std::wstring mark = L"\u2026";
+        std::wstring t = s;
+        while (t.size() > 1) {
+            t.pop_back();
+            // 不要把代理对劈开（丢掉尾部的高位代理）
+            while (!t.empty() && (t.back() & 0xFC00) == 0xD800) t.pop_back();
+            if (t.empty()) break;
+            if (text_size(t + mark, f).cx <= avail) return t + mark;
         }
+        return mark;
+    }
+
+    // 把标签塞进 avail 像素：先试 14px，再退 12px，最后 12px + 省略号。
+    // 保证返回的 (字体, 文本) 组合一定放得下，调用方无需再判断。
+    void fit_label(const std::wstring& s, int avail, HFONT& out_font, std::wstring& out_text) {
+        out_font = font;
+        out_text = s;
+        if (avail <= 0) { out_text = L""; return; }
+        if (text_size(s, font).cx <= avail) return;
+        out_font = font_small;
+        if (text_size(s, font_small).cx <= avail) return;
+        out_text = ellipsize(s, avail, font_small);
     }
 
     // ------------------------------------------------------------ 命中测试
@@ -174,6 +195,14 @@ public:
     // 当前滚动偏移（绘制 item 时从 y 中减去）
     int scroll_offset() const { return scroll_y_ ? (int)*scroll_y_ : 0; }
 
+    // 行是否完整落在当前滚动裁剪区内。
+    // 列表页原来用「面板底」做 break 阈值，而裁剪区底比面板底高 10px，
+    // 导致最后一个可见行（含按钮与文字）被裁掉一半。这里统一按裁剪区判断。
+    bool row_fully_visible(int y, int row_h) const {
+        if (clip_.bottom <= clip_.top) return false;
+        return y >= clip_.top && (y + row_h) <= clip_.bottom;
+    }
+
     // ------------------------------------------------------------ 控件
     // style: 0 normal, 1 primary, 2 danger, 3 warn
     bool button(const char* id, RECT r, const std::wstring& label_text, int style = 0,
@@ -192,12 +221,22 @@ public:
         else if (hov) { fill = (style == 1) ? theme.primary_dark : theme.hover; }
 
         round_rect(r, fill, active_ == id && hov ? theme.primary : border, 6);
-        SIZE sz = text_size(label_text, font);
-        int tx = r.left + ((r.right - r.left) - sz.cx) / 2;
-        int ty = r.top + ((r.bottom - r.top) - sz.cy) / 2;
-        RECT save = clip_;
-        text(tx, ty, label_text, txt, font);
-        clip_ = save;
+        // 标签自适应 + 裁进按钮自身矩形：
+        // 原来直接按按钮宽度居中绘制，标签比按钮宽时既会溢出到相邻控件上，
+        // 又会被外层裁剪区（滚动区/面板）拦腰截断 —— 即"按钮文本被剪裁"。
+        int bw = r.right - r.left;
+        int bh = r.bottom - r.top;
+        int pad = bw >= 48 ? 6 : (bw >= 24 ? 3 : 1);
+        int avail = bw - pad * 2;
+        HFONT f = font;
+        std::wstring lbl = label_text;
+        fit_label(label_text, avail, f, lbl);
+        SIZE sz = text_size(lbl, f);
+        int tx = r.left + (bw - sz.cx) / 2;
+        int ty = r.top + (bh - sz.cy) / 2;
+        push_clip(r);                      // 标签绝不允许画出按钮边界
+        text(tx, ty, lbl, txt, f);
+        pop_clip();
         return click;
     }
 
@@ -225,9 +264,17 @@ public:
             SelectObject(dc_, old);
             DeleteObject(p);
         }
-        RECT save = clip_;
-        text(r.left + box + 8, r.top, label, theme.text, font);
-        clip_ = save;
+        // 标签同样要裁进复选框区域：任务名 + 描述可能很长，
+        // 不裁的话会一直画到右侧「▶ 立即运行 / ⚙」按钮底下，看起来就是被截断。
+        RECT lr{ r.left + box + 8, r.top, r.right, r.bottom };
+        int avail = lr.right - lr.left;
+        HFONT f = font;
+        std::wstring lbl = label;
+        fit_label(label, avail, f, lbl);
+        SIZE sz = text_size(lbl, f);
+        push_clip(lr);
+        text(lr.left, r.top + ((r.bottom - r.top) - sz.cy) / 2, lbl, theme.text, f);
+        pop_clip();
         return click;
     }
 

@@ -129,12 +129,17 @@ public:
 
     ~Hub() {
         stop_execution();
+        // 并行关停：串行等待时 MaaEnd worker（连带 agent 子进程）退出慢，进程会挂住
+        std::vector<std::thread> stops;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (auto& kv : executors_) {
-                if (kv.second.worker) kv.second.worker->shutdown();
+                auto w = kv.second.worker;
+                if (!w) continue;
+                stops.emplace_back([w] { w->shutdown(); });
             }
         }
+        for (auto& t : stops) t.join();
         if (save_thread_.joinable()) save_thread_.join();
     }
 
@@ -179,7 +184,7 @@ public:
             std::lock_guard<std::mutex> lk(mtx_);
             executors_[e.id] = e;
         }
-        spawn_worker(e.id);
+        // 不在这里 spawn：由 start_all() 统一并行启动，避免串行等待拖慢启动
         save_executors();
         return e.id;
     }
@@ -302,6 +307,57 @@ public:
     }
 
     // ================================================================ 快照
+    // 即时快照：只读内存/持久化文件，不做任何 worker 管道往返（毫秒级）。
+    // 用于启动首帧——让左侧执行器立刻可见，运行时状态稍后由完整快照补齐。
+    mj::Value snapshot_fast() {
+        mj::Value v = mj::Value::object();
+        std::string today = util::today_str();
+        mj::Value execs = mj::Value::array();
+        for (auto& e : executors()) {
+            mj::Value j = e.to_json();
+            j.set("conn", "unknown");
+            j.set("run", "idle");
+            j.set("version", "");
+            j.set("last_error", "");
+            j.set("task_count", 0);
+            CoreInfo core;
+            if (!cores_->get(e.core_id, core) || core.path.empty()) {
+                core = cores_->default_core(e.kind);
+            }
+            if (!core.id.empty()) {
+                j.set("core_name", core.name);
+                j.set("core_version", core.version);
+            }
+            Account acc;
+            if (!e.account_id.empty() && accounts_->get(e.account_id, acc)) {
+                j.set("account_label", acc.label);
+                j.set("daily_done_today", acc.daily_done_date == today);
+            } else {
+                j.set("account_label", "");
+                j.set("daily_done_today", false);
+            }
+            execs.push(std::move(j));
+        }
+        v.set("executors", std::move(execs));
+        mj::Value accs = mj::Value::array();
+        for (auto& a : accounts_->list()) {
+            mj::Value j = a.to_json();
+            Account act;
+            j.set("is_active", accounts_->active(a.game, act) && act.id == a.id);
+            j.set("daily_done_today", a.daily_done_date == today);
+            accs.push(std::move(j));
+        }
+        v.set("accounts", std::move(accs));
+        mj::Value cores = mj::Value::array();
+        for (auto& c : cores_->list()) cores.push(c.to_json());
+        v.set("cores", std::move(cores));
+        v.set("plans", mj::Value::array());
+        v.set("events", mj::Value::array());
+        v.set("data", mj::Value::object());
+        v.set("settings", settings_->get().to_json());
+        return v;
+    }
+
     mj::Value snapshot() {
         mj::Value v = mj::Value::object();
         mj::Value execs = mj::Value::array();
@@ -504,14 +560,21 @@ public:
     AppSettings app_settings() const { return settings_->get(); }
     mj::Value& config() { return config_; }
 
-    // 后台线程：启动时拉起所有执行器 worker
+    // 后台线程：并行拉起所有执行器 worker
+    // 串行时总耗时 = Σ(每个执行器 spawn+discover+load)，MaaEnd 的 load 要 ~6s，
+    // 多执行器时启动被拖到 7s+。各执行器彼此独立，改为并发后总耗时 ≈ max(单个)。
     void start_all() {
         std::vector<std::string> ids;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (auto& kv : executors_) ids.push_back(kv.first);
         }
-        for (auto& id : ids) spawn_worker(id);
+        if (ids.empty()) return;
+        std::vector<std::thread> threads;
+        for (auto& id : ids) {
+            threads.emplace_back([this, id] { spawn_worker(id); });
+        }
+        for (auto& t : threads) t.join();
     }
 
     // 为每个已安装核心类型创建默认执行器（无核心时不创建，由 UI 引导拉取）
