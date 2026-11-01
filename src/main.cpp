@@ -125,6 +125,7 @@ int main(int argc, char** argv) {
     bool self_test = false;
     bool startup_bench = false;
     bool offscreen = false;
+    bool show_add_task = false;
     bool dump_render = false;
     std::string dump_render_path;
     std::string dump_page;
@@ -135,6 +136,7 @@ int main(int argc, char** argv) {
         else if (a == "--self-test") self_test = true;
         else if (a == "--startup-bench") startup_bench = true;
         else if (a == "--offscreen") offscreen = true;
+        else if (a == "--show-add-task") show_add_task = true;
         else if (a == "--dump-render" && i + 1 < argc) {
             dump_render = true;
             dump_render_path = argv[++i];
@@ -226,6 +228,7 @@ int main(int argc, char** argv) {
         }
         win.debug_refresh_snapshot();   // 强制拉一次完整快照（含 catalog）
         if (!dump_task.empty()) win.debug_select_task(dump_task);
+        if (show_add_task) win.debug_open_add_task();
         win.render_to_file(page, dump_render_path);
         return 0;
     }

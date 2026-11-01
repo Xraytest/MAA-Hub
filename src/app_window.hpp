@@ -5,6 +5,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -44,6 +45,7 @@ public:
     }
     void debug_refresh_snapshot() { refresh_snapshot(); }
     void debug_select_task(const std::string& task);
+    void debug_open_add_task();
     int run();
 
 private:
@@ -55,7 +57,10 @@ private:
     // 页面
     void draw_sidebar(RECT r);
     void draw_topbar(RECT r);
-    void page_executor(RECT content);       // MAA 1:1 实例页
+    void page_executor(RECT content);
+    void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);
+    void save_task_list();
+    void load_task_list();       // MAA 1:1 实例页
     void page_welcome(RECT content);
     void page_accounts(RECT content);
     void page_cores(RECT content);
@@ -125,6 +130,11 @@ private:
     int drag_y_ = -1;            // 拖拽中的鼠标 y
     int drop_before_ = -1;       // 插入位置索引
     // 新建执行器表单
+    // 「添加新任务」浮层（官方左列底部 TaskQueue.AddTask）
+    bool show_add_task_ = false;
+    std::string add_task_filter_;
+    // exec_id -> 左列显示的任务集（空 = 显示全部）
+    std::map<std::string, std::set<std::string>> task_list_;
     bool show_new_exec_ = false;
     int new_kind_ = 0;
     int new_acc_idx_ = 0;                 // 0 = 不绑定
