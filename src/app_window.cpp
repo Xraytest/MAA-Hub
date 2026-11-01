@@ -846,6 +846,15 @@ void MaaHubWindow::page_executor(RECT content) {
         ry += 34;
 
         TaskUiState& ui = task_ui_[id][sel_task];
+        // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
+        {
+            mj::Value saved = hub_->task_params(id, sel_task);
+            for (auto& kv : saved.members()) {
+                // "__once_" 前缀为一次性标记，不持久化
+                if (kv.first.rfind("__once_", 0) == 0) continue;
+                ui.params[kv.first] = kv.second;
+            }
+        }
         RECT run_btn{ rx, ry, rx + 120, ry + 28 };
         if (gui_.button(("run-" + id + "-" + sel_task).c_str(), run_btn,
                         L"\u25b6 \u5355\u6b21\u8fd0\u884c", 1)) {
@@ -882,6 +891,11 @@ void MaaHubWindow::page_executor(RECT content) {
             PanelCtx pctx{ gui_, rx, ry, right_col.right - 16, ui.params, id, sel_task };
             bool custom = draw_task_panel(pctx, &specs);
             ry = pctx.y;
+            // 面板修改写回持久层（一次性标记除外）
+            for (auto& kv : ui.params) {
+                if (kv.first.rfind("__once_", 0) == 0) continue;
+                hub_->set_task_param(id, sel_task, kv.first, kv.second);
+            }
             int used = ry - saved_y;
             gui_.end_scroll();
             // 面板边框（按实际内容高度）

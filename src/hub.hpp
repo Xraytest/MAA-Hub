@@ -124,6 +124,7 @@ public:
                                                CoreManager::default_cores_root());
         settings_ = std::make_unique<SettingsStore>(state_dir);
         load_executors();
+        load_task_params();
         load_llm_config();
     }
 
@@ -629,6 +630,49 @@ public:
         return true;
     }
 
+    // ---------------------------------------------------------------- 任务参数持久化
+    // 每个执行器每个任务的面板设置，持久化在 state\task-params.json
+    mj::Value task_params(const std::string& exec_id, const std::string& task) const {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        auto e = task_params_.find(exec_id);
+        if (e == task_params_.end()) return mj::Value::object();
+        auto t = e->second.find(task);
+        if (t == e->second.end()) return mj::Value::object();
+        mj::Value out = mj::Value::object();
+        for (auto& kv : t->second) out.set(kv.first, kv.second);
+        return out;
+    }
+
+    void set_task_param(const std::string& exec_id, const std::string& task,
+                        const std::string& key, const mj::Value& value) {
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            task_params_[exec_id][task][key] = value;
+        }
+        schedule_save_task_params();
+    }
+
+    void erase_task_param(const std::string& exec_id, const std::string& task,
+                          const std::string& key) {
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            auto e = task_params_.find(exec_id);
+            if (e == task_params_.end()) return;
+            auto t = e->second.find(task);
+            if (t == e->second.end()) return;
+            t->second.erase(key);
+        }
+        schedule_save_task_params();
+    }
+
+    void remove_task_params(const std::string& exec_id) {
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            task_params_.erase(exec_id);
+        }
+        schedule_save_task_params();
+    }
+
     AccountStore& accounts() { return *accounts_; }
     CoreManager& cores() { return *cores_; }
     SettingsStore& settings() { return *settings_; }
@@ -786,6 +830,48 @@ private:
         return wcfg;
     }
 
+    void load_task_params() {
+        std::string content;
+        if (!util::read_file(util::exe_dir() + "\\state\\task-params.json", content)) return;
+        mj::Value v;
+        if (!mj::try_parse(content, v)) return;
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        for (auto& e : v.members()) {
+            if (!e.second.is_object()) continue;
+            for (auto& t : e.second.members()) {
+                if (!t.second.is_object()) continue;
+                for (auto& kv : t.second.members()) {
+                    task_params_[e.first][t.first][kv.first] = kv.second;
+                }
+            }
+        }
+    }
+
+    void schedule_save_task_params() {
+        uint64_t now = GetTickCount64();
+        if (now - last_tp_save_ < 800) return;
+        last_tp_save_ = now;
+        save_task_params();
+    }
+
+    void save_task_params() {
+        mj::Value v = mj::Value::object();
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            for (auto& e : task_params_) {
+                mj::Value tasks = mj::Value::object();
+                for (auto& t : e.second) {
+                    mj::Value kv_obj = mj::Value::object();
+                    for (auto& kv : t.second) kv_obj.set(kv.first, kv.second);
+                    tasks.set(t.first, std::move(kv_obj));
+                }
+                v.set(e.first, std::move(tasks));
+            }
+        }
+        util::write_file(util::exe_dir() + "\\state\\task-params.json",
+                         mj::Value::dump_pretty(v));
+    }
+
     void load_executors() {
         std::string content;
         if (!util::read_file(util::exe_dir() + "\\state\\executors.json", content)) return;
@@ -871,6 +957,11 @@ private:
     std::vector<std::function<void(const HubEvent&)>> subscribers_;
     std::mutex data_mtx_;
     std::map<std::string, mj::Value> data_;
+
+    mutable std::mutex tp_mtx_;
+    std::map<std::string, std::map<std::string, std::map<std::string, mj::Value>>>
+        task_params_;   // exec_id -> task -> key -> value
+    uint64_t last_tp_save_ = 0;
 
     std::mutex plans_mtx_;
     std::vector<Plan> plans_;
