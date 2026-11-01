@@ -31,3 +31,7 @@ _download/
 
 # 面板验收截图（本地产物，勿提交）
 docs/audit-*.png
+
+# Python 缓存
+__pycache__/
+*.pyc
