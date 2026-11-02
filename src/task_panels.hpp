@@ -178,26 +178,58 @@ inline bool panel_startup(PanelCtx& c) {
 
 // ---- Fight：理智作战 ----
 inline bool panel_fight(PanelCtx& c) {
-    c.g.group_title(c.x, c.y, L"理智与材料");
+    // 官方 FightTaskUserControl：19 个控件，按官方顺序与分组复刻
+    c.g.group_title(c.x, c.y, L"\u7406\u667a\u4e0e\u7269\u6599");
     c.y += 20;
-    pc_number(c, "medicine", L"最大理智药数量", 0, 1, 0, 999);
-    pc_number(c, "stone", L"最大吃石头数量", 0, 1, 0, 999);
-    pc_check(c, "report_to_penguin", L"上报掉落统计到企鹅物流");
+    pc_check(c, "use_medicine", L"\u4f7f\u7528\u836f\u5242",
+             L"\u8be5\u9009\u9879\u53f3\u952e\u9009\u4e2d\u65f6\u4ec5\u751f\u6548\u4e00\u6b21");
+    pc_check(c, "use_stone", L"\u4f7f\u7528\u6e90\u77f3",
+             L"\u8be5\u9009\u9879\u4ec5\u751f\u6548\u4e00\u6b21");
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"关卡与次数");
+
+    c.g.group_title(c.x, c.y, L"\u5173\u5361\u4e0e\u6b21\u6570");
     c.y += 20;
-    pc_text(c, "stage", L"关卡", L"如 1-7；留空为 当前/上次");
-    pc_times(c, "times", L"作战次数");
-    pc_radio(c, "series", { L"×1", L"×2", L"×3", L"×4", L"×5", L"×6" }, 3);
+    pc_text(c, "stage", L"\u5173\u5361", L"\u5982 1-7\uff1b\u7559\u7a7a\u4e3a \u5f53\u524d/\u4e0a\u6b21");
+    pc_check(c, "use_custom_stage", L"\u624b\u52a8\u8f93\u5165\u5173\u5361\u540d");
+    c.y += 4;
+
+    // 指定次数 / 指定材料 二选一（官方 RadioButton 组）
+    pc_radio(c, "fight_mode", { L"\u6307\u5b9a\u6b21\u6570", L"\u6307\u5b9a\u6750\u6599" }, 0);
+    if (c.get_int("fight_mode", 0) == 0) {
+        pc_times(c, "times", L"\u4f5c\u6218\u6b21\u6570");
+    } else {
+        // 指定材料：刷取数量 / 目标库存
+        pc_radio(c, "drop_mode", { L"\u5237\u53d6\u6570\u91cf", L"\u76ee\u6807\u5e93\u5b58" }, 0);
+        pc_text(c, "drop_item", L"\u6750\u6599\u540d\u79f0", L"\u5982 \u\u8d28\u6599");
+        pc_number(c, "drop_quantity", L"\u6570\u91cf", 0, 1, 0, 999999);
+    }
+    pc_radio(c, "series", { L"\u00d71", L"\u00d72", L"\u00d73", L"\u00d74", L"\u00d75", L"\u00d76" }, 3);
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"行为");
+
+    c.g.group_title(c.x, c.y, L"\u884c\u4e3a");
     c.y += 20;
-    pc_check(c, "dr_grandet", L"博朗台模式", L"理智为 0 时仍尝试进入关卡，利用宿舍恢复");
-    pc_check(c, "hide_series", L"隐藏代理倍率");
-    pc_check(c, "allow_stone_save", L"允许使用源石保存状态");
-    pc_check(c, "hide_unavailable_stage", L"下拉框中隐藏当日不开放关卡");
-        return true;
+    pc_check(c, "dr_grandet", L"\u535a\u90ce\u53f0\u6a21\u5f0f",
+             L"\u7406\u667a\u4e3a 0 \u65f6\u4ecd\u8bd5\u8fdb\u5165\u5173\u5361\uff0c\u5229\u7528\u5bbf\u820d\u6062\u590d");
+    pc_check(c, "use_expire_medicine", L"\u65e0\u9650\u5403 N \u5929\u5185\u8fc7\u671f\u7684\u7406\u667a\u836f");
+    pc_number(c, "medicine_expire_days", L"\u8fc7\u671f\u5929\u6570\u9608\u503c", 7, 1, 1, 30);
+    pc_check(c, "use_weekly_expire_medicine",
+             L"\u6d3b\u52a8\u7ed3\u675f\u524d 48H \u5403\u5f53\u5468\u8fc7\u671f\u7406\u667a\u836f");
+    pc_check(c, "hide_series", L"\u9690\u85cf\u4ee3\u7406\u500d\u7387");
+    pc_check(c, "allow_stone_save", L"\u5141\u8bb8\u4f7f\u7528\u6e90\u77f3\u4fdd\u5b58\u72b6\u6001");
+    pc_check(c, "hide_unavailable_stage", L"\u4e0b\u62c9\u6846\u4e2d\u9690\u85cf\u5f53\u65e5\u4e0d\u5f00\u653e\u5173\u5361");
+    c.y += 4;
+    // 过期活动关卡重置为（官方 ComboBox）
+    c.g.text(c.x, c.y + 4, L"\u8fc7\u671f\u6d3b\u52a8\u5173\u5361\u91cd\u7f6e\u4e3a",
+             c.g.theme.dim, c.g.font_small);
+    c.y += 22;
+    pc_radio(c, "stage_reset_mode", { L"\u4e0d\u91cd\u7f6e", L"\u5f53\u524d/\u4e0a\u6b21", L"\u6307\u5b9a\u5173\u5361" }, 0);
+    c.y += 4;
+    pc_check(c, "use_alternate_stage", L"\u4f7f\u7528\u5907\u9009\u5173\u5361");
+    pc_check(c, "report_to_penguin", L"\u4e0a\u62a5\u6389\u843d\u7edf\u8ba1\u5230\u4f01\u9e45\u7269\u6d41");
+    pc_check(c, "use_weekly_plan", L"\u542f\u7528\u5468\u8ba1\u5212");
+    return true;
 }
+
 
 // ---- Infrast：基建换班 ----
 inline bool panel_infrast(PanelCtx& c) {
