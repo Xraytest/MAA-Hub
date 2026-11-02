@@ -445,11 +445,33 @@ public:
                 DeleteObject(d);
             }
         }
+        // 官方 CheckBox 文字 TextWrapping=Wrap：窄列下长标签换行显示，不被裁切
         RECT save = clip_;
-        text(r.left + box + 8, r.top, label, theme.text, font);
-        if (st == CheckState::Once) {
-            text(r.left + box + 8 + text_size(label, font).cx + 6, r.top,
-                 L"（仅一次）", theme.primary, font_small);
+        int tx = r.left + box + 8;
+        int avail = r.right - tx;
+        SIZE full = text_size(label, font);
+        if (full.cx <= avail) {
+            text(tx, r.top, label, theme.text, font);
+            if (st == CheckState::Once) {
+                text(tx + full.cx + 6, r.top,
+                     L"（仅一次）", theme.primary, font_small);
+            }
+        } else {
+            // 按可用宽度逐字换行（最多两行）
+            std::wstring line1, line2;
+            int used = 0;
+            for (wchar_t ch : label) {
+                int cw = text_size(std::wstring(1, ch), font).cx;
+                if (used + cw > avail) { line2 += ch; }
+                else { line1 += ch; used += cw; }
+                if (line2.size() > 26) { line2.resize(26); line2 += L"…"; break; }
+            }
+            text(tx, r.top - 2, line1, theme.text, font);
+            if (!line2.empty()) text(tx, r.top + 16, line2, theme.text, font);
+            if (st == CheckState::Once) {
+                text(tx + text_size(line1, font).cx + 6, r.top,
+                     L"（仅一次）", theme.primary, font_small);
+            }
         }
         (void)save;
         return changed;

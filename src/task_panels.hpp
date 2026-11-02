@@ -83,7 +83,8 @@ inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& la
     c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st);
     c.set_bool(key, st == CheckState::On);
     c.set_once(key, st == CheckState::Once);
-    c.y += 30;
+    // 官方 CheckBox Margin="0,10"：上下各 10px
+    c.y += 34;
     if (!tip.empty()) {
         c.g.tip_line(c.x + 24, c.y, c.right, tip);
         c.y += 16;
