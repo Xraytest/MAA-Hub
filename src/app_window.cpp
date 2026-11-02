@@ -1457,7 +1457,8 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.round_rect(item, fill_c, line_c, 4);
         // 官方 CheckBox MaxWidth=140
         // 官方 ItemContainer Padding=10,0,0,0
-        RECT cbr{ item.left + 10, item.top + 5, item.left + 10 + 140, item.top + 25 };
+        // 复选框矩形 = 整个任务项（内部自行垂直居中）
+        RECT cbr{ item.left + 10, item.top, item.left + 10 + 140, item.bottom };
         std::wstring label = display_name(kind, name);
         auto al = task_alias_.find(id + "|" + name);
         if (al != task_alias_.end() && !al->second.empty()) {

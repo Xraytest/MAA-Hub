@@ -420,8 +420,11 @@ public:
             st = (st == CheckState::Once) ? CheckState::Off : CheckState::Once;
             changed = true;
         }
+        // 方框与文字在传入矩形内垂直居中（官方 VerticalContentAlignment=Center）
         int box = 16;
-        RECT br{ r.left, r.top + 1, r.left + box, r.top + 1 + box };
+        int vpad = ((r.bottom - r.top) - box) / 2;
+        if (vpad < 0) vpad = 0;
+        RECT br{ r.left, r.top + vpad, r.left + box, r.top + vpad + box };
         // 官方复选框底色 RegionBrushOpacity50（浅灰，与按钮形成层次）
         COLORREF fill_c = theme.checkbox_bg, line_c = RGB(180, 188, 200);
         if (st == CheckState::On) { fill_c = theme.primary; line_c = theme.primary; }
@@ -450,10 +453,12 @@ public:
         int tx = r.left + box + 8;
         int avail = r.right - tx;
         SIZE full = text_size(label, font);
+        int tpad = ((r.bottom - r.top) - 18) / 2;
+        if (tpad < 0) tpad = 0;
         if (full.cx <= avail) {
-            text(tx, r.top, label, theme.text, font);
+            text(tx, r.top + tpad, label, theme.text, font);
             if (st == CheckState::Once) {
-                text(tx + full.cx + 6, r.top,
+                text(tx + full.cx + 6, r.top + tpad,
                      L"（仅一次）", theme.primary, font_small);
             }
         } else {
@@ -466,10 +471,10 @@ public:
                 else { line1 += ch; used += cw; }
                 if (line2.size() > 26) { line2.resize(26); line2 += L"…"; break; }
             }
-            text(tx, r.top - 2, line1, theme.text, font);
-            if (!line2.empty()) text(tx, r.top + 16, line2, theme.text, font);
+            text(tx, r.top + tpad - 2, line1, theme.text, font);
+            if (!line2.empty()) text(tx, r.top + tpad + 16, line2, theme.text, font);
             if (st == CheckState::Once) {
-                text(tx + text_size(line1, font).cx + 6, r.top,
+                text(tx + text_size(line1, font).cx + 6, r.top + tpad,
                      L"（仅一次）", theme.primary, font_small);
             }
         }
@@ -487,8 +492,11 @@ public:
             v = !v;
             click = true;
         }
+        // 方框与文字在传入矩形内垂直居中（官方 VerticalContentAlignment=Center）
         int box = 16;
-        RECT br{ r.left, r.top + 1, r.left + box, r.top + 1 + box };
+        int vpad = ((r.bottom - r.top) - box) / 2;
+        if (vpad < 0) vpad = 0;
+        RECT br{ r.left, r.top + vpad, r.left + box, r.top + vpad + box };
         round_rect(br, v ? theme.primary : RGB(255, 255, 255),
                    v ? theme.primary : RGB(180, 188, 200), 3);
         if (v) {
