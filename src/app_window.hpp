@@ -56,7 +56,8 @@ private:
     void render(RECT client);
 
     // 页面
-    void draw_sidebar(RECT r);
+    void draw_top_tabs(RECT r);
+    void draw_executor_strip(RECT r);
     void draw_topbar(RECT r);
     void page_executor(RECT content);
     void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);
@@ -120,7 +121,7 @@ private:
     bool offscreen_ = false;   // 离屏模式：窗口永不显示（仅测试/渲染用）
 
     int sidebar_w_ = 250;
-    int topbar_h_ = 56;
+    int topbar_h_ = 36;   // 官方 TabItem 高度约 30，加内边距
 
     gui::Gui gui_;
     gui::Input input_;
