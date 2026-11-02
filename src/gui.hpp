@@ -55,6 +55,8 @@ struct Theme {
     // 叠加在系统白底上约等于 #FBFBFB；内容区沿用该色而非纯白
     COLORREF card_bg = RGB(0xFB, 0xFB, 0xFB);      // RegionBrushOpacity25 混合结果
     COLORREF card_bg_soft = RGB(0xF6, 0xF6, 0xF6); // 次级卡片（略深一档）
+    // 官方 MaaCheckBoxDefaultStyle：RegionBrushOpacity50（比按钮深一档）
+    COLORREF checkbox_bg = RGB(0xF6, 0xF6, 0xF6);
     COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）
 };
 
@@ -379,7 +381,8 @@ public:
         }
         int box = 16;
         RECT br{ r.left, r.top + 1, r.left + box, r.top + 1 + box };
-        COLORREF fill_c = theme.panel, line_c = RGB(180, 188, 200);
+        // 官方复选框底色 RegionBrushOpacity50（浅灰，与按钮形成层次）
+        COLORREF fill_c = theme.checkbox_bg, line_c = RGB(180, 188, 200);
         if (st == CheckState::On) { fill_c = theme.primary; line_c = theme.primary; }
         else if (st == CheckState::Once) { fill_c = theme.primary_light; line_c = theme.primary; }
         round_rect(br, fill_c, line_c, 3);
