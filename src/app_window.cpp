@@ -430,11 +430,13 @@ void MaaHubWindow::draw_top_tabs(RECT r) {
 
     struct Tab { const char* page; const wchar_t* label; };
     const Tab tabs[] = {
-        { "executor",  L"\u4efb\u52a1\u961f\u5217" },
-        { "accounts",  L"\u8d26\u53f7\u7ba1\u7406" },
-        { "cores",     L"\u6838\u5fc3\u7ba1\u7406" },
-        { "planner",   L"\u667a\u80fd\u89c4\u5212" },
-        { "events",    L"\u4e8b\u4ef6\u65e5\u5fd7" },
+        // 官方 4 个 Tab（RootViewModel.InitViewModels）：
+        //   TaskQueueViewModel=一键长草 / CopilotViewModel=自动战斗 /
+        //   ToolboxViewModel=小工具 / SettingsViewModel=设置
+        // MaaHub 的账号/核心/智能规划/事件日志是全局管理页，不占实例页 Tab
+        { "executor",  L"\u4e00\u952e\u957f\u8349" },
+        { "copilot",   L"\u81ea\u52a8\u6218\u6597" },
+        { "toolbox",   L"\u5c0f\u5de5\u5177" },
         { "settings",  L"\u8bbe\u7f6e" },
     };
     int x = r.left + 8;
@@ -465,6 +467,32 @@ void MaaHubWindow::draw_top_tabs(RECT r) {
             if (t.page == "executor" && selected_exec_.empty()) page_ = "welcome";
         }
         x += w + 4;
+
+        // MaaHub 全局管理入口（官方 Tab 仅 4 个功能页，这些是 MaaHub 扩展能力，
+        // 放在 Tab 栏右侧以小号文字按钮呈现，不干扰官方 Tab 视觉）
+        {
+            struct G { const char* page; const wchar_t* label; };
+            const G gs[] = {
+                { "accounts", L"\u8d26\u53f7" },
+                { "cores",    L"\u6838\u5fc3" },
+                { "planner",  L"\u89c4\u5212" },
+                { "events",   L"\u65e5\u5fd7" },
+            };
+            int gx = r.right - 8;
+            for (int gi = 3; gi >= 0; --gi) {
+                int gw = gui_.text_size(gs[gi].label, gui_.font_small).cx + 16;
+                gx -= gw;
+                RECT gr{ gx, y, gx + gw, y + h };
+                bool gh = gui_.input().mouse.x >= gr.left && gui_.input().mouse.x < gr.right
+                        && gui_.input().mouse.y >= gr.top && gui_.input().mouse.y < gr.bottom;
+                if (gh) gui_.round_rect(gr, gui_.theme.hover, gui_.theme.hover, 3);
+                gui_.text(gr.left + 8, gr.top + (h - 15) / 2, gs[gi].label,
+                          page_ == gs[gi].page ? gui_.theme.primary : gui_.theme.dim,
+                          gui_.font_small);
+                if (gh && gui_.input().pressed) page_ = gs[gi].page;
+                gx -= 6;
+            }
+        }
     }
 
     // 右侧：连接状态 + Link Start!/停止（官方底栏按钮组上移到顶栏右侧太挤，
