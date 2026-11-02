@@ -1407,31 +1407,6 @@ void MaaHubWindow::page_executor(RECT content) {
         }
         ry += 34;
 
-        // 官方：任务设置区顶部有「常规设置 | 高级设置」切换标签
-        // （ButtonGroup Width=220 右对齐；高级设置仅在任务有参数时可用）
-        bool has_params = false;
-        for (auto& t : tasks) {
-            if (t.get_str("name", "") != sel_task) continue;
-            if (auto* ps = t.find("params"); ps && ps->is_array() && !ps->items().empty()) {
-                has_params = true;
-            }
-            break;
-        }
-        if (has_params) {
-            const int TG_W = 220;
-            int tg_x = right_col.right - 16 - TG_W;
-            RECT tg_general{ tg_x, ry, tg_x + TG_W / 2, ry + 26 };
-            RECT tg_adv{ tg_x + TG_W / 2, ry, tg_x + TG_W, ry + 26 };
-            int gh = gui_.option_strip(("tg-" + id + "-" + sel_task).c_str(),
-                                       { tg_x, ry, tg_x + TG_W, ry + 26 },
-                                       { L"\u5e38\u89c4\u8bbe\u7f6e", L"\u9ad8\u7ea7\u8bbe\u7f6e" },
-                                       advanced_view_ ? 1 : 0);
-            if (gh == 0) advanced_view_ = false;
-            if (gh == 1) advanced_view_ = true;
-            (void)tg_general; (void)tg_adv;
-            ry += 32;
-        }
-
         TaskUiState& ui = task_ui_[id][sel_task];
         // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
         {
@@ -1479,7 +1454,7 @@ void MaaHubWindow::page_executor(RECT content) {
             int content_h = est_rows * 40 + 80;
             if (content_h < panel_h) content_h = panel_h;
             // 滚动区底部止于信息条上方，保证信息条始终可见
-            int scroll_bottom = right_col.bottom - 40;
+            int scroll_bottom = right_col.bottom - 82;   // 避开信息条 + 底部常规/高级切换标签
             if (scroll_bottom < panel_top + 80) scroll_bottom = panel_top + 80;
             gui_.begin_scroll(("panel-" + id + "-" + sel_task).c_str(),
                               { rx, panel_top, right_col.right - 16, scroll_bottom },
@@ -1504,22 +1479,25 @@ void MaaHubWindow::page_executor(RECT content) {
             (void)custom;
         }
 
-        // 实例信息条：固定在右列底部（800x600 下必须固定，否则被面板内容推出窗口）
-        RECT info{ rx, right_col.bottom - 32, right_col.right - 16, right_col.bottom - 2 };
+        // 实例信息条：窄列分两行（中列仅 300px，一行放不下 5 个字段）
+        RECT info{ rx, right_col.bottom - 74, right_col.right - 16, right_col.bottom - 40 };
         gui_.round_rect(info, gui_.theme.row_alt, gui_.theme.border, 4);
-        int ix = info.left + 12;
+        int mid_w = (info.right - info.left) / 3;
         COLORREF def_col = gui_.theme.text;
-        auto field = [&](const std::wstring& k, const std::wstring& v, COLORREF col) {
-            gui_.text(ix, info.top + 8, k, gui_.theme.dim, gui_.font_small);
-            gui_.text(ix, info.top + 18, v, col, gui_.font);
-            ix += 130;
+        auto field = [&](int col, int row, const std::wstring& k,
+                         const std::wstring& v, COLORREF col2) {
+            int fx = info.left + 8 + col * mid_w;
+            int fy = info.top + 3 + row * 16;
+            gui_.text(fx, fy, k, gui_.theme.dim, gui_.font_small);
+            gui_.text(fx, fy + 11, v, col2, gui_.font_small);
         };
-        field(L"\u7248\u672c", gui::widen(version.empty() ? "-" : version), def_col);
-        field(L"\u6838\u5fc3", gui::widen(core_version.empty() ? "-" : core_version), def_col);
-        field(L"\u8d26\u53f7", acc_label.empty() ? L"\u672a\u7ed1\u5b9a" : gui::widen(acc_label), def_col);
-        field(L"\u4eca\u65e5\u65e5\u5e38", daily_done ? L"\u5df2\u5b8c\u6210" : L"\u672a\u5b8c\u6210",
+        field(0, 0, L"\u7248\u672c", gui::widen(version.empty() ? "-" : version), def_col);
+        field(1, 0, L"\u6838\u5fc3", gui::widen(core_version.empty() ? "-" : core_version), def_col);
+        field(2, 0, L"\u4efb\u52a1", std::to_wstring(task_count), def_col);
+        field(0, 1, L"\u8d26\u53f7",
+              acc_label.empty() ? L"\u672a\u7ed1" : gui::widen(acc_label), def_col);
+        field(1, 1, L"\u65e5\u5e38", daily_done ? L"\u5df2\u5b8c\u6210" : L"\u672a\u5b8c\u6210",
               daily_done ? gui_.theme.ok : gui_.theme.warn);
-        field(L"\u4efb\u52a1\u6570", std::to_wstring(task_count), def_col);
     } else {
         gui_.text(rx, ry + 8, L"\u8be5\u5b9e\u4f8b\u6ca1\u6709\u53ef\u7528\u4efb\u52a1",
                   gui_.theme.dim, gui_.font);
@@ -1533,7 +1511,30 @@ void MaaHubWindow::page_executor(RECT content) {
     draw_task_ctx_menu();
     draw_rename_box(right_col, id);
 
-        // ---------------- 右列：日志区（官方 Column=2）----------------
+        // 中列底部：常规设置 / 高级设置 切换标签（官方 Grid.Row=1 ButtonGroup Width=220）
+    {
+        bool has_params = false;
+        for (auto& t : tasks) {
+            if (t.get_str("name", "") != sel_task) continue;
+            if (auto* ps = t.find("params"); ps && ps->is_array() && !ps->items().empty()) {
+                has_params = true;
+            }
+            break;
+        }
+        if (has_params && !sel_task.empty()) {
+            const int TG_W = 200;
+            int tg_x = right_col.left + 4;
+            int tg_y = right_col.bottom - 36;
+            int gh = gui_.option_strip(("tg-" + id + "-" + sel_task).c_str(),
+                                       { tg_x, tg_y, tg_x + TG_W, tg_y + 26 },
+                                       { L"\u5e38\u89c4\u8bbe\u7f6e", L"\u9ad8\u7ea7\u8bbe\u7f6e" },
+                                       advanced_view_ ? 1 : 0);
+            if (gh == 0) advanced_view_ = false;
+            if (gh == 1) advanced_view_ = true;
+        }
+    }
+
+    // ---------------- 右列：日志区（官方 Column=2）----------------
     draw_log_column(log_col, id);
 
     // ---------------- 底部控制栏（官方结构）----------------
