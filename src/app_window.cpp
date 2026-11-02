@@ -1203,28 +1203,8 @@ void MaaHubWindow::page_executor(RECT content) {
     RECT log_col{ right_col.right + 6, frame.top, frame.right, frame.bottom - BAR_H };
 
     // ---------------- 左列：任务列表 ----------------
-    gui_.text(left_col.left + 12, left_col.top + 12, L"\u4efb\u52a1\u5217\u8868",
-              gui_.theme.text, gui_.font_bold);
-    gui_.text(left_col.left + 12, left_col.top + 32,
-              L"\u5de6\u952e \u4efb\u52a1\u8bbe\u7f6e \u00b7 \u53f3\u952e \u4ece\u6b64\u5904\u8fd0\u884c",
-              gui_.theme.faint, gui_.font_small);
-
-    // 官方底部按钮组：全选 | 反选（并排各半宽、外圆角、高 30）
-    int hy = left_col.top + 52;
-    int half = (left_col.right - left_col.left - 24) / 2;
-    RECT sel_all{ left_col.left + 12, hy, left_col.left + 12 + half, hy + 30 };
-    RECT sel_inv{ left_col.left + 12 + half + 4, hy, left_col.right - 12, hy + 30 };
-    if (gui_.button("tb-all", sel_all, L"\u5168\u9009", 0)) {
-        for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = true;
-    }
-    if (gui_.button("tb-inverse", sel_inv, L"\u53cd\u9009", 0)) {
-        for (auto& t : tasks) {
-            TaskUiState& s = task_ui_[id][t.get_str("name", "")];
-            s.checked = !s.checked;
-        }
-    }
-
-    int list_top = hy + 30;
+    // 官方左列无「任务列表」标题文字，直接是 ListBox（MinHeight=220）
+    int list_top = left_col.top + 4;
     int item_h = 32;
     int n = (int)tasks.size();
 
@@ -1282,7 +1262,7 @@ void MaaHubWindow::page_executor(RECT content) {
     }
 
     gui_.begin_scroll(("tasks-" + id).c_str(),
-                      { left_col.left, list_top, left_col.right, left_card.bottom - 44 },
+                      { left_col.left, list_top, left_col.right, left_card.bottom - 76 },
                       n * item_h + 8, scroll_["tasks-" + id]);
     int y = list_top + 4 - (int)scroll_["tasks-" + id];
     for (int ti = 0; ti < n; ++ti) {
@@ -1290,7 +1270,7 @@ void MaaHubWindow::page_executor(RECT content) {
         std::string name = t.get_str("name", "");
         TaskUiState& ui = task_ui_[id][name];
         if (y + item_h < list_top) { y += item_h; continue; }
-        if (y > left_card.bottom - 44) break;
+        if (y > left_card.bottom - 76) break;
         RECT item{ left_col.left + 8, y, left_col.right - 8, y + item_h - 4 };
         bool hov = gui_.input().mouse.x >= item.left && gui_.input().mouse.x < item.right
                 && gui_.input().mouse.y >= item.top && gui_.input().mouse.y < item.bottom;
@@ -1342,6 +1322,23 @@ void MaaHubWindow::page_executor(RECT content) {
         y += item_h;
     }
     gui_.end_scroll();
+
+    // 官方 Grid.Row=1：「全选 | 反选」按钮组（并排各半宽、高 30），位于列表下方
+    {
+        int hy = left_card.bottom - 40 - 32;
+        int half = (left_col.right - left_col.left) / 2;
+        RECT sel_all{ left_col.left, hy, left_col.left + half, hy + 30 };
+        RECT sel_inv{ left_col.left + half, hy, left_col.right, hy + 30 };
+        if (gui_.button("tb-all", sel_all, L"\u5168\u9009", 0)) {
+            for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = true;
+        }
+        if (gui_.button("tb-inverse", sel_inv, L"\u53cd\u9009", 0)) {
+            for (auto& t : tasks) {
+                TaskUiState& s = task_ui_[id][t.get_str("name", "")];
+                s.checked = !s.checked;
+            }
+        }
+    }
 
     // 左列底部 40px 行：「+ 添加新任务」（官方 RowDefinition Height="40"）
     // 贴左列卡片底部（left_card.bottom），与任务列表滚动区不重叠
