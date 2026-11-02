@@ -65,6 +65,8 @@ private:
     size_t gif_index_ = 0;
     bool gif_hidden_ = true;   // 默认隐藏（无内置 GIF 资源，避免遮挡内容）
     void draw_executor_strip(RECT r);
+    // 右列日志区（官方 TaskQueueView Column=2）
+    void draw_log_column(RECT area, const std::string& id);
     void draw_topbar(RECT r);
     void page_executor(RECT content);
     void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);

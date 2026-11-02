@@ -338,13 +338,17 @@ public:
         if (nv < min_v) nv = min_v;
         if (nv > max_v) nv = max_v;
         value = nv;
-        RECT minus_b{ r.right - 72, r.top, r.right - 40, r.bottom };
-        RECT plus_b{ r.right - 36, r.top, r.right - 4, r.bottom };
-        if (button((std::string(id) + "-m").c_str(), minus_b, L"-", 0)) {
-            value = (value - step < min_v) ? min_v : value - step;
-        }
-        if (button((std::string(id) + "-p").c_str(), plus_b, L"+", 0)) {
-            value = (value + step > max_v) ? max_v : value + step;
+        // 窄列时 ± 按钮会挤压输入框，宽度不足则省略
+        int w = r.right - r.left;
+        if (w >= 150) {
+            RECT minus_b{ r.right - 72, r.top, r.right - 40, r.bottom };
+            RECT plus_b{ r.right - 36, r.top, r.right - 4, r.bottom };
+            if (button((std::string(id) + "-m").c_str(), minus_b, L"-", 0)) {
+                value = (value - step < min_v) ? min_v : value - step;
+            }
+            if (button((std::string(id) + "-p").c_str(), plus_b, L"+", 0)) {
+                value = (value + step > max_v) ? max_v : value + step;
+            }
         }
     }
 

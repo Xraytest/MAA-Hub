@@ -1028,6 +1028,66 @@ std::string MaaHubWindow::kind_of(const std::string& id) const {
     return "maa";
 }
 
+// 右列日志区（官方 TaskQueueView Column=2）
+// 官方结构：顶部下载卡片（有下载任务时显示）+ 信息流日志列表。
+// MaaHub 用 Hub 的事件日志作为数据源，按时间倒序展示。
+void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
+    // 列背景：官方无独立卡片，直接放页面背景上；加一条左边框与中列分隔
+    gui_.fill({ area.left, area.top, area.left + 1, area.bottom }, gui_.theme.border);
+
+    int x = area.left + 12;
+    int y = area.top + 4;
+    gui_.text(x, y, L"\u65e5\u5fd7", gui_.theme.dim, gui_.font_small);
+    y += 22;
+
+    // 当前执行器的运行状态摘要（官方此处是下载卡片）
+    mj::Value st = hub_->executor_status(id, 0.4);
+    std::string conn = st.get_str("conn", "unknown");
+    std::string run = st.get_str("run", "");
+    bool busy = st.get_bool("busy", false);
+    if (busy || run == "running" || conn == "connecting") {
+        RECT card{ x, y, area.right - 8, y + 54 };
+        gui_.round_rect(card, gui_.theme.primary_light, gui_.theme.primary, 4);
+        std::wstring t1 = busy ? L"\u8fd0\u884c\u4e2d" : L"\u8fde\u63a5\u4e2d";
+        gui_.text(card.left + 10, card.top + 8, t1, gui_.theme.primary_dark, gui_.font_bold);
+        std::string last = st.get_str("last_error", "");
+        std::wstring t2 = last.empty() ? L"\u6b63\u5728\u6267\u884c\u4efb\u52a1\u2026"
+                                       : gui::widen(last);
+        RECT save = gui_.clip();
+        gui_.text_clipped({ card.left + 10, card.top + 28, card.right - 10, card.bottom - 4 },
+                          t2, gui_.theme.dim, gui_.font_small);
+        (void)save;
+        y = card.bottom + 12;
+    }
+
+    // 信息流日志（官方 Growl 列表）
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lk(snap_mtx_);
+        if (auto* ev = snap_.find("events"); ev && ev->is_array()) {
+            for (auto& e : ev->items()) lines.push_back(e.as_string());
+        }
+    }
+    if (lines.empty()) {
+        gui_.text(x, y, L"\u6682\u65e0\u65e5\u5fd7", gui_.theme.faint, gui_.font_small);
+        return;
+    }
+    int row_h = 20;
+    int avail = area.bottom - y - 4;
+    int visible = avail / row_h;
+    if (visible < 1) visible = 1;
+    // 倒序（最新在上）
+    int start = (int)lines.size() > visible ? (int)lines.size() - visible : 0;
+    for (int i = (int)lines.size() - 1; i >= start; --i) {
+        std::wstring w = gui::widen(lines[i]);
+        RECT save = gui_.clip();
+        gui_.text_clipped({ x, y, area.right - 8, y + row_h },
+                          w, gui_.theme.dim, gui_.font_small);
+        (void)save;
+        y += row_h;
+    }
+}
+
 // ================================================================ 实例页（MAA 1:1 布局）
 // 复刻 MAA 官方 TaskQueueView：左列 190px 任务列表 + 右侧任务设置 + 底部控制栏。
 // 配色/圆角(4)/控件高(28)/外边距(20) 对齐 HandyControl Light 主题。
@@ -1081,6 +1141,7 @@ void MaaHubWindow::page_executor(RECT content) {
     RECT frame{ content.left, content.top, content.right, content.bottom };
     const int LEFT_CARD_W = 210;            // 官方 Border Width=210
     const int LEFT_W = 190;                 // 官方 Grid Width=190
+    const int MID_W = 300;                  // 官方 220 + MaaHub 额外留白（窄列竖排需要）
     const int BAR_H = 56;                    // 容纳官方 50px 高按钮组
     // 左列独立卡片（含圆角与 1px 边框）
     RECT left_card{ frame.left, frame.top, frame.left + LEFT_CARD_W, frame.bottom - BAR_H };
@@ -1135,7 +1196,11 @@ void MaaHubWindow::page_executor(RECT content) {
     // 左列内容区（卡片内 190px，左右各留 10px；顶部为执行器切换条让位 27px）
     RECT left_col{ left_card.left + 10, left_card.top + 27, left_card.left + 10 + LEFT_W,
                    left_card.bottom };
-    RECT right_col{ left_card.right, frame.top, frame.right, frame.bottom - BAR_H };
+    // 中列：任务设置（官方 220px 窄列，标签在上控件在下竖排）
+    RECT right_col{ left_card.right + 6, frame.top,
+                    left_card.right + 6 + MID_W, frame.bottom - BAR_H };
+    // 右列：日志区（官方 Column=2，占剩余宽度）
+    RECT log_col{ right_col.right + 6, frame.top, frame.right, frame.bottom - BAR_H };
 
     // ---------------- 左列：任务列表 ----------------
     gui_.text(left_col.left + 12, left_col.top + 12, L"\u4efb\u52a1\u5217\u8868",
@@ -1333,12 +1398,11 @@ void MaaHubWindow::page_executor(RECT content) {
         for (auto& t : tasks) {
             if (t.get_str("name", "") == sel_task) desc = gui::widen(t.get_str("description", ""));
         }
-        {
-            std::wstring sub = L"\u4efb\u52a1\u8bbe\u7f6e";
-            if (!desc.empty()) sub += L" \u00b7 " + desc;
+        // 窄列（300px）：右上角只放来源描述，避免与标题抢空间
+        if (!desc.empty()) {
             RECT save = gui_.clip();
-            gui_.text_clipped({ rx + 200, ry + 4, right_col.right - 16, ry + 24 },
-                              sub, gui_.theme.dim, gui_.font_small);
+            gui_.text_clipped({ rx + 130, ry + 22, right_col.right - 16, ry + 42 },
+                              desc, gui_.theme.dim, gui_.font_small);
             (void)save;
         }
         ry += 34;
@@ -1469,7 +1533,10 @@ void MaaHubWindow::page_executor(RECT content) {
     draw_task_ctx_menu();
     draw_rename_box(right_col, id);
 
-        // ---------------- 底部控制栏（官方结构）----------------
+        // ---------------- 右列：日志区（官方 Column=2）----------------
+    draw_log_column(log_col, id);
+
+    // ---------------- 底部控制栏（官方结构）----------------
     // 官方：Link Start!/停止/等待&停止 是居中的 100x50 大按钮组；
     // 左下角是完成后动作描述文本 + 齿轮图标按钮（PostActionSetting.ActionDescription）。
     RECT bottom_bar{ frame.left, frame.bottom - BAR_H, frame.right, frame.bottom };

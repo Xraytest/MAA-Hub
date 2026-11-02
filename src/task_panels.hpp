@@ -78,7 +78,7 @@ inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& la
                      const std::wstring& tip = L"") {
     CheckState st = c.get_once(key) ? CheckState::Once
                                     : (c.get_bool(key) ? CheckState::On : CheckState::Off);
-    RECT r{ c.x, c.y, c.x + 460, c.y + 22 };
+    RECT r{ c.x, c.y, c.right, c.y + 22 };
     c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st);
     c.set_bool(key, st == CheckState::On);
     c.set_once(key, st == CheckState::Once);
@@ -92,8 +92,11 @@ inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& la
 inline void pc_number(PanelCtx& c, const std::string& key, const std::wstring& label,
                       int def = 0, int step = 1, int lo = 0, int hi = 9999) {
     int v = c.get_int(key, def);
-    RECT r{ c.x, c.y, c.x + 460, c.y + 26 };
-    c.g.number_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, v, step, lo, hi);
+    // 窄列：标签单独一行，控件下一行（官方 220px 列宽就是这样竖排）
+    c.g.text(c.x, c.y, label, c.g.theme.dim, c.g.font_small);
+    c.y += 20;
+    RECT r{ c.x, c.y, c.right, c.y + 26 };
+    c.g.number_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, L"", v, step, lo, hi);
     c.set_int(key, v);
     c.y += 32;
 }
@@ -101,7 +104,9 @@ inline void pc_number(PanelCtx& c, const std::string& key, const std::wstring& l
 inline void pc_text(PanelCtx& c, const std::string& key, const std::wstring& label,
                     const std::wstring& hint = L"") {
     std::string v = c.get_str(key);
-    RECT r{ c.x, c.y, c.x + 460, c.y + 26 };
+    c.g.text(c.x, c.y, label, c.g.theme.dim, c.g.font_small);
+    c.y += 20;
+    RECT r{ c.x, c.y, c.right, c.y + 26 };
     c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, v,
                    hint.empty() ? nullptr : hint.c_str());
     c.set_str(key, v);
@@ -137,18 +142,20 @@ inline void pc_times(PanelCtx& c, const std::string& key, const std::wstring& la
         if (!inf) v += 1;
     }
     CheckState inf_st = inf ? CheckState::On : CheckState::Off;
-    RECT inf_r{ r.right - 70, r.top, r.right, r.bottom };
+    // 窄列：「无限」勾选独立一行，避免与输入框/步进按钮互相挤压
+    c.y += 30;
+    RECT inf_r{ c.x, c.y, c.x + 90, c.y + 22 };
     c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key + "-inf").c_str(),
                   inf_r, L"\u65e0\u9650", inf_st);
     c.set_int(key, inf_st == CheckState::On ? -1 : v);
-    c.y += 32;
+    c.y += 30;
 }
 
 // 横向单选（选项条）
 inline void pc_radio(PanelCtx& c, const std::string& key,
                      const std::vector<std::wstring>& opts, int def = 0) {
     int cur = c.get_int(key, def);
-    RECT r{ c.x, c.y, c.x + 460, c.y + 24 };
+    RECT r{ c.x, c.y, c.right, c.y + 24 };
     int hit = c.g.option_strip((c.exec_id + ":" + c.task + ":" + key).c_str(), r, opts, cur);
     if (hit >= 0) cur = hit;
     c.set_int(key, cur);
