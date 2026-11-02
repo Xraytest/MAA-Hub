@@ -274,6 +274,134 @@ public:
         pop_clip();
     }
 
+    // 官方 SVG 图标绘制（Carbon Icons / HandyControl Geometries）
+    // 支持 M/L/A/a/h/v/z 子集（官方图标实际用到的指令）
+    void draw_icon_path(const std::wstring& path, RECT r, COLORREF color,
+                        double viewbox = 32.0) {
+        if (path.empty() || r.right <= r.left || r.bottom <= r.top) return;
+        using namespace Gdiplus;
+        Graphics g(dc_);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        GraphicsPath gp;
+        double sx = (r.right - r.left) / viewbox;
+        double sy = (r.bottom - r.top) / viewbox;
+        double cx = 0, cy = 0;          // current point
+        double sx0 = 0, sy0 = 0;        // subpath start
+        size_t i = 0;
+        auto num = [&](size_t& p) -> double {
+            while (p < path.size() && (path[p] == L' ' || path[p] == L',')) ++p;
+            size_t st = p;
+            while (p < path.size() && (iswdigit(path[p]) || path[p] == L'.' ||
+                   path[p] == L'-' || path[p] == L'+' || path[p] == L'e')) ++p;
+            if (st == p) return 0;
+            return _wtof(path.substr(st, p - st).c_str());
+        };
+        auto skip = [&](size_t& p) { while (p < path.size() && (path[p] == L' ' || path[p] == L',')) ++p; };
+        while (i < path.size()) {
+            skip(i);
+            if (i >= path.size()) break;
+            wchar_t cmd = path[i++];
+            bool rel = iswlower(cmd);
+            wchar_t C = towupper(cmd);
+            if (C == L'M') {
+                double x = num(i) * sx, y = num(i) * sy;
+                if (rel) { x += cx; y += cy; }
+                cx = x; cy = y; sx0 = x; sy0 = y;
+                gp.StartFigure();
+            } else if (C == L'L') {
+                double x = num(i) * sx, y = num(i) * sy;
+                if (rel) { x += cx; y += cy; }
+                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
+                           (REAL)(r.left + x), (REAL)(r.top + y));
+                cx = x; cy = y;
+            } else if (C == L'H') {
+                double x = num(i) * sx;
+                if (rel) x += cx;
+                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
+                           (REAL)(r.left + x), (REAL)(r.top + cy));
+                cx = x;
+            } else if (C == L'V') {
+                double y = num(i) * sy;
+                if (rel) y += cy;
+                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
+                           (REAL)(r.left + cx), (REAL)(r.top + y));
+                cy = y;
+            } else if (C == L'Z') {
+                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
+                           (REAL)(r.left + sx0), (REAL)(r.top + sy0));
+                cx = sx0; cy = sy0;
+                gp.CloseFigure();
+            } else if (C == L'A') {
+                double rx = num(i) * sx, ry = num(i) * sy;
+                num(i);                                    // x-axis-rotation
+                double laf = num(i), swf = num(i);
+                double x = num(i) * sx, y = num(i) * sy;
+                if (rel) { x += cx; y += cy; }
+                // 椭圆弧 -> 用 Bezier 近似（4 段）
+                double mx = (cx + x) / 2, my = (cy + y) / 2;
+                double dx = (x - cx) / 2, dy = (y - cy) / 2;
+                gp.AddBezier((REAL)(r.left + cx), (REAL)(r.top + cy),
+                             (REAL)(r.left + mx - dy * 0.5523), (REAL)(r.top + my + dx * 0.5523),
+                             (REAL)(r.left + mx + dy * 0.5523), (REAL)(r.top + my - dx * 0.5523),
+                             (REAL)(r.left + x), (REAL)(r.top + y));
+                cx = x; cy = y;
+                (void)rx; (void)ry; (void)laf; (void)swf;
+            } else {
+                break;   // 不支持的指令，停止
+            }
+        }
+        SolidBrush br(Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
+        g.FillPath(&br, &gp);
+    }
+
+    // 官方图标集（path 取自 MaaWpfGui/Res/Styles/Basic/Geometries.xaml）
+    void icon_add_task(RECT r, COLORREF c) {
+        draw_icon_path(L"M14.613,10c0,0.23-0.188,0.419-0.419,0.419H10.42v3.774c0,0.23-0.189,0.42-0.42,0.42"
+                       L"s-0.419-0.189-0.419-0.42v-3.774H5.806c-0.23,0-0.419-0.189-0.419-0.419"
+                       L"s0.189-0.419,0.419-0.419h3.775V5.806c0-0.23,0.189-0.419,0.419-0.419"
+                       L"s0.42,0.189,0.42,0.419v3.775h3.774C14.425,9.581,14.613,9.77,14.613,10 "
+                       L"M17.969,10c0,4.401-3.567,7.969-7.969,7.969c-4.402,0-7.969-3.567-7.969-7.969"
+                       L"c0-4.402,3.567-7.969,7.969-7.969C14.401,2.031,17.969,5.598,17.969,10 "
+                       L"M17.13,10c0-3.932-3.198-7.13-7.13-7.13S2.87,6.068,2.87,10c0,3.933,3.198,7.13,7.13,7.13"
+                       L"S17.13,13.933,17.13,10", r, c);
+    }
+    void icon_link(RECT r, COLORREF c) {
+        draw_icon_path(L"M29.25 6.76a6 6 0 0 0-8.5 0l1.42 1.42a4 4 0 1 1 5.67 5.67l-8 8a4 4 0 1 1-5.67-5.66"
+                       L"l1.41-1.42l-1.41-1.42l-1.42 1.42a6 6 0 0 0 0 8.5A6 6 0 0 0 17 25a6 6 0 0 0 4.27-1.76"
+                       L"l8-8a6 6 0 0 0-.02-8.48z M4.19 24.82a4 4 0 0 1 0-5.67l8-8a4 4 0 0 1 5.67 0A3.94 3.94 0 0 1 19 14"
+                       L"a4 4 0 0 1-1.17 2.85L15.71 19l1.42 1.42l2.12-2.12a6 6 0 0 0-8.51-8.51l-8 8a6 6 0 0 0 0 8.51"
+                       L"A6 6 0 0 0 7 28a6.07 6.07 0 0 0 4.28-1.76l-1.42-1.42a4 4 0 0 1-5.67 0z", r, c);
+    }
+    void icon_unlink(RECT r, COLORREF c) {
+        draw_icon_path(L"M3.584 5.002l1.414-1.415l3.416 3.415L7 8.417z M23.581 24.992l1.415-1.414l3.415 3.416"
+                       L"l-1.415 1.414z M11 2h2v4h-2z M2 11h4v2H2z M26 19h4v2h-4z M19 26h2v4h-2z "
+                       L"M16.58 21.07l-3.71 3.72a4 4 0 1 1-5.66-5.66l3.72-3.72L9.51 14L5.8 17.72a6 6 0 0 0-.06 8.54"
+                       L"A6 6 0 0 0 10 28a6.07 6.07 0 0 0 4.32-1.8L18 22.49z M15.41 10.93l3.72-3.72a4 4 0 1 1 5.66 5.66"
+                       L"l-3.72 3.72L22.49 18l3.71-3.72a6 6 0 0 0 .06-8.54A6 6 0 0 0 22 4a6.07 6.07 0 0 0-4.32 1.8L14 9.51z",
+                       r, c);
+    }
+    // 齿轮（ConfigGeometry 的简化等效：外圈 + 中心，官方为 32x32 Carbon 齿轮）
+    void icon_gear(RECT r, COLORREF c) {
+        using namespace Gdiplus;
+        Graphics g(dc_);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        int rad = (r.right - r.left) / 2 - 2;
+        SolidBrush br(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
+        // 齿（8 个方向的小矩形）
+        for (int k = 0; k < 8; ++k) {
+            double a = k * 3.14159265 / 4.0;
+            int tx = cx + (int)(cos(a) * (rad - 1));
+            int ty = cy + (int)(sin(a) * (rad - 1));
+            g.FillEllipse(&br, tx - 2, ty - 2, 5, 5);
+        }
+        g.FillEllipse(&br, cx - rad, cy - rad, rad * 2, rad * 2);
+        // 中心挖孔（用背景色）
+        SolidBrush hole(Color(255, GetRValue(theme.card_bg), GetGValue(theme.card_bg),
+                              GetBValue(theme.card_bg)));
+        g.FillEllipse(&hole, cx - rad / 3, cy - rad / 3, rad * 2 / 3, rad * 2 / 3);
+    }
+
     // 官方样式滚动条（HandyControl ScrollBarBaseStyle）：
     //   Width=8、Thumb 背景=PrimaryTextBrush(#212121)、圆角、仅 hover 时显示
     // 在 end_scroll 之后调用，绘制在滚动区右缘（纵向）。

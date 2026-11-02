@@ -1511,8 +1511,15 @@ void MaaHubWindow::page_executor(RECT content) {
                   gui_.theme.border);
         RECT add_tasks_btn{ add_row.left + 8, add_row.top + 6,
                             add_row.right - 8, add_row.bottom - 6 };
-        if (gui_.button(("addtask-" + id).c_str(), add_tasks_btn,
-                        L"\u002b \u6dfb\u52a0\u65b0\u4efb\u52a1", 0)) {
+        // 官方 TaskQueueAddTaskIcon（Carbon 加号圆圈）替代纯文字"+"
+        int icon_sz = add_row.bottom - add_row.top - 12;
+        RECT icon_r{ add_tasks_btn.left + 8, add_row.top + 6,
+                     add_tasks_btn.left + 8 + icon_sz, add_row.bottom - 6 };
+        gui_.icon_add_task(icon_r, gui_.theme.primary);
+        if (gui_.button(("addtask-" + id).c_str(),
+                        { add_tasks_btn.left + icon_sz + 12, add_tasks_btn.top,
+                          add_tasks_btn.right, add_tasks_btn.bottom },
+                        L"\u6dfb\u52a0\u65b0\u4efb\u52a1", 0)) {
             show_add_task_ = !show_add_task_;
         }
     }
@@ -1757,14 +1764,21 @@ void MaaHubWindow::page_executor(RECT content) {
             }
         }
     } else {
+        // 官方 Link Start 按钮：CarbonLink 图标 + 文字（替代 emoji 🔗）
         RECT link_btn{ gx, gy, gx + bw_link, gy + BH };
-        if (gui_.button("btn-linkstart-exec", link_btn, kLink, 1)) {
+        int lsz = BH - 22;
+        RECT link_icon{ link_btn.left + 12, gy + 11, link_btn.left + 12 + lsz, gy + 11 + lsz };
+        // 先画按钮底与文字（文字左移给图标让位）
+        if (gui_.button("btn-linkstart-exec",
+                        { link_btn.left, link_btn.top, link_btn.right, link_btn.bottom },
+                        L"   Link Start!", 1)) {
             post_action([this, id] {
                 mj::Value st = hub_->executor_status(id);
                 if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
                 action_run_checked(id);
             }, "\u94fe\u63a5\u5f00\u59cb");
         }
+        gui_.icon_link(link_icon, RGB(255, 255, 255));
     }
 
     // 右下角：连接状态 + 连接/断开（MaaHub 扩展能力）
