@@ -1281,6 +1281,9 @@ void MaaHubWindow::page_executor(RECT content) {
         // Alpha #20(12.5%) 叠加在白底上；勾选态用 Primary 浅底
         std::string running = hub_->running_task_of(id);
         std::string last_res = hub_->last_task_result(id, name);
+        // 官方 NoSelectedHighlightListBoxItemStyle：
+        //   默认/选中背景都是 RegionBrushOpacity25（选中不高亮，只文字变深）；
+        //   hover = MouseOverRegionBrushOpacity75；状态色仅在有运行结果时叠加
         COLORREF fill_c, line_c;
         if (running == name) {
             fill_c = gui_.theme.status_running;  line_c = gui_.theme.primary;
@@ -1288,17 +1291,16 @@ void MaaHubWindow::page_executor(RECT content) {
             fill_c = gui_.theme.status_error;    line_c = gui_.theme.err;
         } else if (last_res == "ok") {
             fill_c = gui_.theme.status_done;     line_c = gui_.theme.ok;
-        } else if (ui.checked || ui.once) {
-            fill_c = gui_.theme.primary_light;   line_c = gui_.theme.primary;
         } else if (hov) {
-            fill_c = gui_.theme.hover;           line_c = gui_.theme.border;
+            fill_c = gui_.theme.item_hover;      line_c = gui_.theme.border;
         } else {
-            fill_c = gui_.theme.card_bg_soft;    line_c = gui_.theme.border;
+            fill_c = gui_.theme.item_bg;         line_c = gui_.theme.border;
         }
         if (drag_task_ == name) fill_c = gui_.theme.primary_light;
         gui_.round_rect(item, fill_c, line_c, 4);
         // 官方 CheckBox MaxWidth=140
-        RECT cbr{ item.left + 8, item.top + 5, item.left + 8 + 140, item.top + 25 };
+        // 官方 ItemContainer Padding=10,0,0,0
+        RECT cbr{ item.left + 10, item.top + 5, item.left + 10 + 140, item.top + 25 };
         std::wstring label = display_name(kind, name);
         auto al = task_alias_.find(id + "|" + name);
         if (al != task_alias_.end() && !al->second.empty()) {
