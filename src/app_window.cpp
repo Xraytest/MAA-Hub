@@ -1,8 +1,10 @@
 // MaaHub 原生窗口应用实现
+#pragma comment(lib, "comdlg32.lib")   // GetOpenFileNameA（作业文件选择）
 #include "app_window.hpp"
 #include "task_panels.hpp"
 
 #include <windowsx.h>
+#include <commdlg.h>
 
 namespace hub {
 
@@ -340,6 +342,8 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
 
     try {
         if (page_ == "executor" && !selected_exec_.empty()) page_executor(content);
+        else if (page_ == "copilot") page_copilot(content);
+        else if (page_ == "toolbox") page_toolbox(content);
         else if (page_ == "accounts") page_accounts(content);
         else if (page_ == "cores") page_cores(content);
         else if (page_ == "planner") page_planner(content);
@@ -2051,6 +2055,169 @@ void MaaHubWindow::page_accounts(RECT content) {
 }
 
 // ================================================================ 核心管理
+void MaaHubWindow::page_copilot(RECT content) {
+    // 官方 CopilotView（自动战斗）：左侧作业列表（按类型分类）+
+    // 右侧「作业路径/神秘代码」输入与作业选项。
+    // MaaHub 未接入真实作业运行（需 Copilot 适配器），此处提供官方形态的
+    // 文件选择与选项区，未实现的能力明确标注，不虚构。
+    gui_.text(content.left, content.top, L"\u81ea\u52a8\u6218\u6597",
+              gui_.theme.text, gui_.font_bold);
+    gui_.text(content.left + 90, content.top + 3,
+              L"\u9009\u62e9\u4f5c\u4e1a JSON \u6587\u4ef6\uff0c\u81ea\u52a8\u6267\u884c\u5173\u5361\u6d41\u7a0b",
+              gui_.theme.dim, gui_.font_small);
+    int y = content.top + 34;
+
+    // ---- 作业列表（官方按类型分类的 ListBox）----
+    {
+        RECT card{ content.left, y, content.left + 260, content.bottom };
+        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
+        int cy = card.top + 12;
+        gui_.text(card.left + 12, cy, L"\u4f5c\u4e1a\u5217\u8868", gui_.theme.dim,
+                  gui_.font_small);
+        cy += 22;
+        // 官方分类（Copilot.MainStageAndSideStory / SSS / ParadoxSimulation / OtherActivityStage）
+        struct Cat { const wchar_t* name; };
+        const Cat cats[] = {
+            { L"\u4e3b\u7ebf\u5173\u5361 / \u526f\u672c\u6536\u96c6" },  // 主线/故事集/侧故事
+            { L"\u4fdd\u5168\u6d3e\u9a7b" },                        // SSS
+            { L"\u609d\u8bba\u6a21\u62df" },                        // 悖论模拟
+            { L"\u5176\u4ed6\u6d3b\u52a8" },                        // 其他活动
+        };
+        std::vector<std::string> empty;
+        for (auto& cat : cats) {
+            gui_.text(card.left + 12, cy, cat.name, gui_.theme.text, gui_.font_small);
+            cy += 22;
+            gui_.text(card.left + 24, cy, L"\uff08\u672a\u5bfc\u5165\u4f5c\u4e1a\uff09",
+                      gui_.theme.faint, gui_.font_small);
+            cy += 24;
+        }
+        // 官方提示：作业文件可以直接用鼠标拖进来
+        RECT save = gui_.clip();
+        gui_.text_clipped({ card.left + 12, card.bottom - 34, card.right - 12, card.bottom - 4 },
+                          L"\u4f5c\u4e1a\u6587\u4ef6\u53ef\u76f4\u63a5\u62d6\u5165\uff08MaaHub \u672a\u5b9e\u73b0\uff09",
+                          gui_.theme.faint, gui_.font_small);
+        (void)save;
+    }
+
+    // ---- 右侧：作业路径 + 选项 ----
+    int rx = content.left + 272;
+    int rw = content.right - rx;
+    gui_.text(rx, y + 4, L"\u4f5c\u4e1a\u8def\u5f84 / \u795e\u79d8\u4ee3\u7801",
+              gui_.theme.dim, gui_.font_small);
+    y += 24;
+    gui_.text_input("copilot-path", { rx, y, rx + rw - 80, y + 26 },
+                    copilot_path_, L"\u9009\u62e9 JSON \u6216\u7c98\u8d34 prts.plus \u4f5c\u4e1a\u4ee3\u7801");
+    RECT pick{ rx + rw - 74, y, rx + rw, y + 26 };
+    if (gui_.button("copilot-pick", pick, L"\u9009\u62e9", 0)) {
+        // 打开文件选择对话框（官方为 WPF OpenFileDialog；此处用系统对话框）
+        char buf[MAX_PATH] = {0};
+        OPENFILENAMEA ofn = {0};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.lpstrFilter = "Copilot JSON\0*.json\0All Files\0*.*\0";
+        ofn.lpstrFile = buf;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (GetOpenFileNameA(&ofn)) {
+            copilot_path_ = buf;
+        }
+    }
+    y += 34;
+
+    gui_.text(rx, y + 4, L"\u8bfb\u53d6\u526a\u8d34\u677f", gui_.theme.dim, gui_.font_small);
+    {
+        CheckState st = CheckState::Off;
+        gui_.checkbox3("copilot-clip", { rx + 80, y, rx + 200, y + 22 },
+                       L"\u81ea\u52a8\u8bc6\u522b\u4f5c\u4e1a/\u4f5c\u4e1a\u96c6", st);
+    }
+    y += 32;
+
+    // ---- 作业选项（官方 CopilotView 开关组）----
+    {
+        RECT card{ rx, y, rx + rw, y + 190 };
+        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
+        int cy = card.top + 12;
+        gui_.text(card.left + 12, cy, L"\u4f5c\u4e1a\u9009\u9879", gui_.theme.dim,
+                  gui_.font_small);
+        cy += 24;
+        struct Opt { const char* key; const wchar_t* label; const wchar_t* tip; };
+        const Opt opts[] = {
+            { "copilot-auto-squad",  L"\u81ea\u52a8\u7f16\u961f",
+              L"\u81ea\u52a8\u7f16\u961f\u53ef\u80fd\u65e0\u6cd5\u8bc6\u522b\u5e26\u6709 \u300c\u7279\u522b\u5173\u6ce8\u300d \u6807\u8bb0\u7684\u5e72\u5458" },
+            { "copilot-use-formation", L"\u4f7f\u7528\u7f16\u961f", L"" },
+            { "copilot-ignore-req",  L"\u5ffd\u7565\u5e72\u5458\u5c5e\u6027\u8981\u6c42", L"" },
+            { "copilot-support-unit", L"\u501f\u52a9\u6218",
+              L"\u7f3a\u4e00\u4e2a\u8fd8\u80fd\u7528\u7528\uff0c\u7f3a\u4e24\u4e2a\u4ee5\u4e0a\u8fd8\u662f\u6362\u4efd\u4f5c\u4e1a\u5427" },
+            { "copilot-add-trust",   L"\u8865\u5145\u4f4e\u4fe1\u8d56\u5e72\u5458", L"" },
+        };
+        for (auto& o : opts) {
+            bool v = copilot_opt_.find(o.key) != copilot_opt_.end()
+                         ? copilot_opt_[o.key] : false;
+            CheckState st = v ? CheckState::On : CheckState::Off;
+            RECT r{ card.left + 16, cy, card.right - 16, cy + 22 };
+            gui_.checkbox3(o.key, r, o.label, st);
+            copilot_opt_[o.key] = (st == CheckState::On);
+            cy += 26;
+            if (o.tip && *o.tip) {
+                RECT save = gui_.clip();
+                gui_.text_clipped({ card.left + 40, cy, card.right - 16, cy + 16 },
+                                  o.tip, gui_.theme.faint, gui_.font_small);
+                (void)save;
+                cy += 16;
+            }
+        }
+        y = card.bottom + 12;
+    }
+
+    // ---- 操作按钮（官方 Copilot.Start / Common.Stop）----
+    {
+        RECT sb{ rx, y, rx + 120, y + 34 };
+        if (gui_.button("copilot-start", sb, L"\u5f00\u59cb", 1)) {
+            if (copilot_path_.empty()) {
+                set_notice("\u8bf7\u5148\u9009\u62e9\u4f5c\u4e1a\u6587\u4ef6");
+            } else {
+                set_notice("\u81ea\u52a8\u6218\u6597\u9700\u8981 Copilot \u9002\u914d\u5668\uff0cMaaHub \u5c1a\u672a\u5b9e\u73b0\u8be5\u4efb\u52a1\u7c7b\u578b");
+            }
+        }
+    }
+}
+
+void MaaHubWindow::page_toolbox(RECT content) {
+    // 官方 ToolboxView（小工具）：MaaHub 提供常用工具的官方形态入口。
+    // 官方 Toolbox 主要是「牛杂」（肉鸽小游戏）相关自动化工具，
+    // 依赖 Copilot/Roguelike 适配器，MaaHub 未实现，此处列出官方工具清单
+    // 并明确标注未实现，不虚构能力。
+    gui_.text(content.left, content.top, L"\u5c0f\u5de5\u5177",
+              gui_.theme.text, gui_.font_bold);
+    gui_.text(content.left + 76, content.top + 3,
+              L"\u5b98\u65b9\u5c0f\u5de5\u5177\u96c6\u5408\uff08MaaHub \u90e8\u5206\u672a\u5b9e\u73b0\uff09",
+              gui_.theme.dim, gui_.font_small);
+    int y = content.top + 34;
+
+    struct Tool { const wchar_t* name; const wchar_t* desc; bool avail; };
+    const Tool tools[] = {
+        { L"\u725b\u6742", L"\u751f\u5b58\u6392\u540d\u8005\u526f\u672c\u81ea\u52a8\u5316\uff08\u7ed3\u5c40/\u4e8b\u4ef6/\u4efb\u52a1\u9009\u62e9\uff09", false },
+        { L"\u725b\u6742 \u00b7 \u7956\u9f99\u7968", L"\u81ea\u52a8\u9886\u53d6\u7956\u9f99\u7968\u5956\u52b1", false },
+        { L"\u725b\u6742 \u00b7 \u9886\u53d6\u7269\u8d44", L"\u81ea\u52a8\u9886\u53d6\u62bd\u5956\u7269\u8d44", false },
+        { L"\u4efb\u52a1\u8fc7\u6ee4\u5668", L"\u6309\u5173\u5361\u540d\u8fc7\u6ee4\u4efb\u52a1\u6267\u884c", true },
+        { L"\u65e5\u5fd7\u5bfc\u51fa", L"\u5bfc\u51fa\u8fd0\u884c\u65e5\u5fd7\u4e0e\u6392\u67e5\u4fe1\u606f", true },
+    };
+    for (auto& t : tools) {
+        RECT card{ content.left, y, content.right, y + 58 };
+        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
+        gui_.text(card.left + 14, card.top + 10, t.name, gui_.theme.text, gui_.font);
+        RECT save = gui_.clip();
+        gui_.text_clipped({ card.left + 14, card.top + 30, card.right - 130, card.bottom - 4 },
+                          t.desc, gui_.theme.dim, gui_.font_small);
+        (void)save;
+        COLORREF tag_c = t.avail ? gui_.theme.ok : gui_.theme.warn;
+        RECT tr{ card.right - 108, card.top + 16, card.right - 14, card.top + 38 };
+        gui_.round_rect(tr, tag_c, tag_c, 4);
+        gui_.text(tr.left + 10, tr.top + 5, t.avail ? L"\u53ef\u7528" : L"\u672a\u5b9e\u73b0",
+                  RGB(255, 255, 255), gui_.font_small);
+        y = card.bottom + 10;
+    }
+}
+
 void MaaHubWindow::page_cores(RECT content) {
     mj::Value snap;
     {

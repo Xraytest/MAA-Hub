@@ -82,6 +82,12 @@ private:
     void save_task_list();
     void load_task_list();       // MAA 1:1 实例页
     void page_welcome(RECT content);
+    // 官方 CopilotView（自动战斗）
+    void page_copilot(RECT content);
+    // 官方 ToolboxView（小工具）
+    void page_toolbox(RECT content);
+    std::string copilot_path_;
+    std::map<std::string, bool> copilot_opt_;
     void page_accounts(RECT content);
     void page_cores(RECT content);
     void page_planner(RECT content);
