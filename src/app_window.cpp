@@ -1031,39 +1031,81 @@ std::string MaaHubWindow::kind_of(const std::string& id) const {
     return "maa";
 }
 
+// 连接状态中文文案
+static std::wstring connected_text(const std::string& conn) {
+    if (conn == "connected") return L"\u5df2\u8fde\u63a5";
+    if (conn == "failed") return L"\u8fde\u63a5\u5931\u8d25";
+    if (conn == "connecting") return L"\u8fde\u63a5\u4e2d";
+    return L"\u672a\u8fde\u63a5";
+}
+
 // 右列日志区（官方 TaskQueueView Column=2）
 // 官方结构：顶部下载卡片（有下载任务时显示）+ 信息流日志列表。
 // MaaHub 用 Hub 的事件日志作为数据源，按时间倒序展示。
 void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
-    // 列背景：官方无独立卡片，直接放页面背景上；加一条左边框与中列分隔
+    // 右列（官方 Column=2）：日志区。
+    // 官方此处是下载卡片 + 信息流日志；MaaHub 改为常驻展示
+    // 「实例状态 / 任务进度 / 最近事件」，避免右列大片空白。
     gui_.fill({ area.left, area.top, area.left + 1, area.bottom }, gui_.theme.border);
 
     int x = area.left + 12;
     int y = area.top + 4;
-    gui_.text(x, y, L"\u65e5\u5fd7", gui_.theme.dim, gui_.font_small);
+    int right = area.right - 8;
+
+    gui_.text(x, y, L"\u72b6\u6001\u4e0e\u65e5\u5fd7", gui_.theme.dim, gui_.font_small);
     y += 22;
 
-    // 当前执行器的运行状态摘要（官方此处是下载卡片）
     mj::Value st = hub_->executor_status(id, 0.4);
     std::string conn = st.get_str("conn", "unknown");
     std::string run = st.get_str("run", "");
     bool busy = st.get_bool("busy", false);
-    if (busy || run == "running" || conn == "connecting") {
-        RECT card{ x, y, area.right - 8, y + 54 };
-        gui_.round_rect(card, gui_.theme.primary_light, gui_.theme.primary, 4);
-        std::wstring t1 = busy ? L"\u8fd0\u884c\u4e2d" : L"\u8fde\u63a5\u4e2d";
-        gui_.text(card.left + 10, card.top + 8, t1, gui_.theme.primary_dark, gui_.font_bold);
-        std::string last = st.get_str("last_error", "");
-        std::wstring t2 = last.empty() ? L"\u6b63\u5728\u6267\u884c\u4efb\u52a1\u2026"
-                                       : gui::widen(last);
+    std::string last = st.get_str("last_error", "");
+    int task_count = (int)st.get_int("task_count", 0);
+
+    // ---- 状态卡 ----
+    {
+        RECT card{ x, y, right, y + 58 };
+        COLORREF fill = busy ? gui_.theme.primary_light : gui_.theme.card_bg;
+        COLORREF line = busy ? gui_.theme.primary : gui_.theme.border;
+        gui_.round_rect(card, fill, line, 4);
+        COLORREF dot = conn == "connected" ? gui_.theme.ok :
+                       conn == "failed" ? gui_.theme.err :
+                       conn == "connecting" ? gui_.theme.warn : gui_.theme.faint;
+        gui_.round_rect({ card.left + 10, card.top + 12, card.left + 20, card.top + 22 },
+                        dot, dot, 5);
+        std::wstring st_txt = connected_text(conn);
+        gui_.text(card.left + 26, card.top + 10, st_txt, gui_.theme.text, gui_.font_bold);
+        std::wstring sub = busy ? L"\u4efb\u52a1\u8fd0\u884c\u4e2d" :
+                          (run == "running" ? L"\u5df2\u8fde\u63a5\uff0c\u7a7a\u95f2" : L"\u7b49\u5f85\u64cd\u4f5c");
         RECT save = gui_.clip();
-        gui_.text_clipped({ card.left + 10, card.top + 28, card.right - 10, card.bottom - 4 },
-                          t2, gui_.theme.dim, gui_.font_small);
+        gui_.text_clipped({ card.left + 26, card.top + 30, card.right - 10, card.bottom - 4 },
+                          sub, gui_.theme.dim, gui_.font_small);
         (void)save;
-        y = card.bottom + 12;
+        y = card.bottom + 10;
     }
 
-    // 信息流日志（官方 Growl 列表）
+    // ---- 任务统计卡 ----
+    {
+        RECT card{ x, y, right, y + 40 };
+        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
+        int enabled = 0;
+        auto it = task_ui_.find(id);
+        if (it != task_ui_.end()) {
+            for (auto& kv : it->second) {
+                if (kv.second.checked || kv.second.once) ++enabled;
+            }
+        }
+        gui_.text(card.left + 10, card.top + 6, L"\u5df2\u542f\u7528\u4efb\u52a1",
+                  gui_.theme.dim, gui_.font_small);
+        gui_.text(card.left + 10, card.top + 18,
+                  std::to_wstring(enabled) + L" / " + std::to_wstring(task_count),
+                  gui_.theme.primary, gui_.font_bold);
+        y = card.bottom + 10;
+    }
+
+    // ---- 最近事件 ----
+    gui_.text(x, y, L"\u6700\u8fd1\u4e8b\u4ef6", gui_.theme.dim, gui_.font_small);
+    y += 20;
     std::vector<std::string> lines;
     {
         std::lock_guard<std::mutex> lk(snap_mtx_);
@@ -1072,24 +1114,144 @@ void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
         }
     }
     if (lines.empty()) {
-        gui_.text(x, y, L"\u6682\u65e0\u65e5\u5fd7", gui_.theme.faint, gui_.font_small);
-        return;
+        gui_.text(x, y, L"\u6682\u65e0\u4e8b\u4ef6\u8bb0\u5f55", gui_.theme.faint,
+                  gui_.font_small);
+        y += 20;
+    } else {
+        int row_h = 20;
+        int avail = area.bottom - y - 4;
+        int visible = avail / row_h;
+        if (visible < 1) visible = 1;
+        int start = (int)lines.size() > visible ? (int)lines.size() - visible : 0;
+        for (int i2 = (int)lines.size() - 1; i2 >= start; --i2) {
+            RECT save = gui_.clip();
+            gui_.text_clipped({ x, y, right, y + row_h },
+                              gui::widen(lines[i2]), gui_.theme.dim, gui_.font_small);
+            (void)save;
+            y += row_h;
+        }
     }
-    int row_h = 20;
-    int avail = area.bottom - y - 4;
-    int visible = avail / row_h;
-    if (visible < 1) visible = 1;
-    // 倒序（最新在上）
-    int start = (int)lines.size() > visible ? (int)lines.size() - visible : 0;
-    for (int i = (int)lines.size() - 1; i >= start; --i) {
-        std::wstring w = gui::widen(lines[i]);
+
+    // ---- 最近错误（有则高亮）----
+    if (!last.empty()) {
+        y += 8;
+        RECT card{ x, y, right, y + 44 };
+        gui_.round_rect(card, gui_.theme.err_light, gui_.theme.err, 4);
+        gui_.text(card.left + 10, card.top + 6, L"\u6700\u8fd1\u9519\u8bef",
+                  gui_.theme.err, gui_.font_small);
         RECT save = gui_.clip();
-        gui_.text_clipped({ x, y, area.right - 8, y + row_h },
-                          w, gui_.theme.dim, gui_.font_small);
+        gui_.text_clipped({ card.left + 10, card.top + 20, card.right - 10, card.bottom - 4 },
+                          gui::widen(last), gui_.theme.err, gui_.font_small);
         (void)save;
-        y += row_h;
+        y = card.bottom + 10;
+    }
+
+    // ---- 已启用任务列表（官方信息流的常驻替代，让右列有实质内容）----
+    {
+        std::string kind;
+        for (auto& e : hub_->executors()) {
+            if (e.id == id) { kind = e.kind; break; }
+        }
+        std::vector<std::string> enabled_names;
+        auto it = task_ui_.find(id);
+        if (it != task_ui_.end()) {
+            for (auto& kv : it->second) {
+                if (kv.second.checked || kv.second.once) enabled_names.push_back(kv.first);
+            }
+        }
+        // 按左列显示顺序排序
+        std::vector<mj::Value> all = catalog_of(kind);
+        auto oit = task_order_.find(id);
+        if (oit != task_order_.end() && !oit->second.empty()) {
+            std::vector<std::string> ordered;
+            for (auto& nm : oit->second) {
+                for (auto& e : enabled_names) if (e == nm) { ordered.push_back(nm); break; }
+            }
+            for (auto& e : enabled_names) {
+                bool f = false;
+                for (auto& s : ordered) if (s == e) { f = true; break; }
+                if (!f) ordered.push_back(e);
+            }
+            enabled_names.swap(ordered);
+        }
+
+        gui_.text(x, y, L"\u5df2\u542f\u7528\u4efb\u52a1", gui_.theme.dim, gui_.font_small);
+        y += 20;
+        if (enabled_names.empty()) {
+            gui_.text(x, y, L"\u8fd8\u6ca1\u6709\u542f\u7528\u4efb\u52a1",
+                      gui_.theme.faint, gui_.font_small);
+            y += 22;
+        } else {
+            int row_h = 22;
+            int avail = area.bottom - y - 4;
+            int visible = avail / row_h;
+            if (visible < 1) visible = 1;
+            int start = (int)enabled_names.size() > visible
+                        ? (int)enabled_names.size() - visible : 0;
+            for (int i2 = (int)enabled_names.size() - 1; i2 >= start; --i2) {
+                std::wstring nm = display_name(kind, enabled_names[i2]);
+                auto al = task_alias_.find(id + "|" + enabled_names[i2]);
+                if (al != task_alias_.end() && !al->second.empty()) {
+                    nm = gui::widen(al->second);
+                }
+                bool is_running = hub_->running_task_of(id) == enabled_names[i2];
+                RECT row{ x, y, right, y + row_h - 2 };
+                if (is_running) {
+                    gui_.round_rect(row, gui_.theme.primary_light,
+                                    gui_.theme.primary, 3);
+                }
+                gui_.round_rect({ x + 2, y + 6, x + 8, y + 12 },
+                                is_running ? gui_.theme.primary : gui_.theme.ok,
+                                is_running ? gui_.theme.primary : gui_.theme.ok, 3);
+                RECT save = gui_.clip();
+                gui_.text_clipped({ x + 14, y + 2, right, y + row_h },
+                                  nm, gui_.theme.text, gui_.font_small);
+                (void)save;
+                y += row_h;
+            }
+        }
+    }
+
+    // ---- 实例档案（核心/路径/创建时间/账号）：右列常驻信息，避免大片空白 ----
+    {
+        y += 10;
+        ExecutorEntry ex;
+        if (hub_->get_executor(id, ex)) {
+            RECT card{ x, y, right, y + 96 };
+            gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
+            int cy = card.top + 8;
+            auto row = [&](const std::wstring& k, const std::wstring& v) {
+                gui_.text(card.left + 10, cy, k, gui_.theme.dim, gui_.font_small);
+                RECT save = gui_.clip();
+                gui_.text_clipped({ card.left + 76, cy, card.right - 10, cy + 16 },
+                                  v, gui_.theme.text, gui_.font_small);
+                (void)save;
+                cy += 18;
+            };
+            row(L"\u7c7b\u578b", ex.kind == "maa" ? L"MAA\uff08\u660e\u65e5\u65b9\u821e\uff09"
+                                                    : L"MaaEnd\uff08\u7ec8\u672b\u5730\uff09");
+            row(L"\u6838\u5fc3", gui::widen(ex.core_id));
+            std::wstring ct = L"-";
+            if (ex.created_at > 0) {
+                time_t tt = (time_t)ex.created_at;
+                struct tm tmv;
+                if (localtime_s(&tmv, &tt) == 0) {
+                    wchar_t buf[32];
+                    swprintf(buf, 32, L"%04d-%02d-%02d %02d:%02d",
+                             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                             tmv.tm_hour, tmv.tm_min);
+                    ct = buf;
+                }
+            }
+            row(L"\u521b\u5efa", ct);
+            row(L"\u8d26\u53f7", ex.account_id.empty() ? L"\u672a\u7ed1\u5b9a"
+                                                        : gui::widen(ex.account_id));
+            row(L"\u72b6\u6001", ex.enabled ? L"\u5df2\u542f\u7528" : L"\u5df2\u7981\u7528");
+        }
     }
 }
+
+
 
 // ================================================================ 实例页（MAA 1:1 布局）
 // 复刻 MAA 官方 TaskQueueView：左列 190px 任务列表 + 右侧任务设置 + 底部控制栏。
