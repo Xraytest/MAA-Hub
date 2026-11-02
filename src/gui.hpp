@@ -256,6 +256,7 @@ public:
     // 不使用 SetViewportOrigin，保证鼠标命中测试与视觉位置一致。
     void begin_scroll(const char* id, RECT r, int content_h, float& scroll_y) {
         scroll_rect_ = r;
+        scroll_content_h_ = content_h;
         scroll_id_ = id;
         scroll_y_ = &scroll_y;
         if (hovered(r) && in_.wheel && !wheel_used_) {
@@ -268,7 +269,42 @@ public:
         if (*scroll_y_ > max_scroll) *scroll_y_ = (float)max_scroll;
         push_clip(r);
     }
-    void end_scroll() { pop_clip(); }
+    void end_scroll() {
+        draw_scrollbar();   // 先画滚动条（仍在裁剪区内，位置正确）
+        pop_clip();
+    }
+
+    // 官方样式滚动条（HandyControl ScrollBarBaseStyle）：
+    //   Width=8、Thumb 背景=PrimaryTextBrush(#212121)、圆角、仅 hover 时显示
+    // 在 end_scroll 之后调用，绘制在滚动区右缘（纵向）。
+    void draw_scrollbar() {
+        if (!scroll_y_) return;
+        if (scroll_rect_.right <= scroll_rect_.left) return;
+        int content_h = scroll_content_h_;
+        int view_h = scroll_rect_.bottom - scroll_rect_.top;
+        int max_scroll = content_h - view_h;
+        if (max_scroll <= 0) return;
+        float frac = *scroll_y_ / (float)max_scroll;
+        int thumb_h = view_h * view_h / content_h;
+        if (thumb_h < 24) thumb_h = 24;
+        if (thumb_h > view_h) thumb_h = view_h;
+        int track_h = view_h - thumb_h;
+        int ty = scroll_rect_.top + (int)(track_h * frac);
+        int tx = scroll_rect_.right - 8;
+        // 轨道（透明底，仅 hover 时微显）
+        bool hov = in_.mouse.x >= scroll_rect_.right - 12
+                && in_.mouse.x <= scroll_rect_.right
+                && in_.mouse.y >= scroll_rect_.top
+                && in_.mouse.y <= scroll_rect_.bottom;
+        if (hov) {
+            fill({ tx, scroll_rect_.top, tx + 4, scroll_rect_.bottom },
+                 RGB(0xF0, 0xF0, 0xF0));
+        }
+        // Thumb：官方 PrimaryTextBrush，圆角 2
+        round_rect({ tx, ty, tx + 4, ty + thumb_h },
+                   hov ? RGB(0x42, 0x42, 0x42) : RGB(0x9E, 0x9E, 0x9E),
+                   CLR_INVALID, 2);
+    }
 
     // 当前滚动偏移（绘制 item 时从 y 中减去）
     int scroll_offset() const { return scroll_y_ ? (int)*scroll_y_ : 0; }
@@ -591,6 +627,7 @@ private:
     bool wheel_used_ = false;
     // 滚动
     RECT scroll_rect_{};
+    int scroll_content_h_ = 0;
     const char* scroll_id_ = nullptr;
     float* scroll_y_ = nullptr;
 };
