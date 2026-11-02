@@ -34,6 +34,13 @@ MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config, bool offscreen)
     load_task_list();
     load_post_action();
     load_task_alias();
+    // MAA 启动直接进入任务队列页（无欢迎页）。MaaHub 有执行器时同样
+    // 自动选中第一个，让首屏即呈现与 MAA 一致的实例界面；
+    // 完全没有执行器时才落到欢迎页引导创建。
+    {
+        auto ids = hub_->executors();
+        if (!ids.empty()) selected_exec_ = ids[0].id;
+    }
 }
 
 MaaHubWindow::~MaaHubWindow() {
@@ -1624,11 +1631,18 @@ void MaaHubWindow::page_executor(RECT content) {
     }
 
     // ---------------- 右侧：任务设置 ----------------
-    // 右侧展示的任务：优先用户选中项；未选中时才默认第一项
+    // 右侧展示的任务：优先用户选中项；未选中时按官方默认（理智作战 Fight）
     std::string sel_task;
     for (auto& t : tasks) {
         std::string nm = t.get_str("name", "");
         if (task_ui_[id][nm].selected) { sel_task = nm; break; }
+    }
+    if (sel_task.empty() && !tasks.empty()) {
+        // 官方 TaskQueueViewModel 默认选中理智作战（TaskSettingVisibilities.Fight）
+        for (auto& t : tasks) {
+            if (t.get_str("name", "") == "Fight") { sel_task = "Fight"; break; }
+        }
+        if (sel_task.empty()) sel_task = tasks[0].get_str("name", "");
     }
     bool sel_valid = false;
     for (auto& t : tasks) {
