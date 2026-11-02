@@ -1314,7 +1314,8 @@ void MaaHubWindow::page_executor(RECT content) {
         }
         if (drag_task_ == name) fill_c = gui_.theme.primary_light;
         gui_.round_rect(item, fill_c, line_c, 4);
-        RECT cbr{ item.left + 8, item.top + 5, item.left + 200, item.top + 25 };
+        // 官方 CheckBox MaxWidth=140
+        RECT cbr{ item.left + 8, item.top + 5, item.left + 8 + 140, item.top + 25 };
         std::wstring label = display_name(kind, name);
         auto al = task_alias_.find(id + "|" + name);
         if (al != task_alias_.end() && !al->second.empty()) {
@@ -1325,9 +1326,7 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.checkbox3(("cb-" + id + "-" + name).c_str(), cbr, label, st);
         ui.checked = (st == CheckState::On);
         ui.once = (st == CheckState::Once);
-        // 序号（拖拽时显示目标插入线）
-        gui_.text(item.right - 24, item.top + 7, std::to_wstring(ti + 1),
-                  gui_.theme.faint, gui_.font_small);
+        // 官方任务项不显示序号（Index 仅用于配置索引，不渲染）
         if (hov && gui_.input().pressed) {
             for (auto& kv : task_ui_[id]) kv.second.selected = false;
             ui.selected = true;
