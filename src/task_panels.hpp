@@ -255,31 +255,80 @@ inline bool panel_fight(PanelCtx& c) {
 
 // ---- Infrast：基建换班 ----
 inline bool panel_infrast(PanelCtx& c) {
-    c.g.group_title(c.x, c.y, L"基建模式");
+    // 官方 InfrastTaskUserControl：8 个控件
+    c.g.group_title(c.x, c.y, L"\u57fa\u5efa\u6a21\u5f0f");
     c.y += 20;
-    pc_radio(c, "mode", { L"默认基建", L"自定义基建", L"轮换基建" }, 0);   // 0/1/2 -> 0/10000/20000
+    pc_radio(c, "mode", { L"\u9ed8\u8ba4\u57fa\u5efa", L"\u81ea\u5b9a\u4e49\u57fa\u5efa",
+                          L"\u8f6e\u6362\u57fa\u5efa" }, 0);
+    // 官方 ComboBox「内置配置」：自定义基建时选择的排班方案
+    pc_radio(c, "builtin_plan", { L"\u9ed8\u8ba4\u65b9\u6848",
+                                  L"\u4e09\u7279\u59d3\u5168\u9760\u5e73\u53f0",
+                                  L"\u4e09\u5de5\u4f5c\u5ba4\u65b9\u6848",
+                                  L"\u4f20\u68af\u54e5\u65b9\u6848" }, 0);
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"无人机");
+
+    c.g.group_title(c.x, c.y, L"\u65e0\u4eba\u673a");
     c.y += 20;
-    pc_radio(c, "drones_idx", { L"不使用", L"贸易站", L"制造站", L"发电站", L"办公室" }, 0);
-    pc_number(c, "dorm_threshold", L"宿舍心情阈值", 30, 5, 0, 100);
+    pc_radio(c, "drones_idx", { L"\u4e0d\u4f7f\u7528", L"\u8d38\u6613\u7ad9",
+                                L"\u5236\u9020\u7ad9", L"\u53d1\u7535\u7ad9",
+                                L"\u529e\u516c\u5ba4" }, 0);
+    pc_number(c, "dorm_threshold", L"\u5bbf\u820d\u5fc3\u60c5\u9608\u503c", 30, 5, 0, 100);
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"会客室与宿舍");
+
+    // 官方 ListBox「标签顺序可拖动」：换班设施多选 + 可拖拽排序
+    c.g.group_title(c.x, c.y, L"\u6362\u73ed\u8bbe\u65bd");
     c.y += 20;
-    pc_check(c, "reception_message_board", L"会客室信息板收取信用");
-    pc_check(c, "reception_clue_exchange", L"进行线索交流");
-    pc_check(c, "reception_send_clue", L"赠送线索");
-    pc_check(c, "dorm_trust", L"宿舍空余位置蹭信赖");
-    pc_check(c, "dorm_filter_not_stationed", L"不将已进驻的干员放入宿舍");
+    c.g.tip_line(c.x, c.y, c.right, L"\u6807\u7b7e\u987a\u5e8f\u53ef\u62d6\u52a8");
+    c.y += 18;
+    const wchar_t* facs[] = { L"\u63a7\u5236\u4e2d\u67bc", L"\u5236\u9020\u7ad9",
+                              L"\u8d38\u6613\u7ad9", L"\u53d1\u7535\u7ad9",
+                              L"\u4f1a\u5ba2\u5ba4", L"\u529e\u516c\u5ba4",
+                              L"\u8bad\u7ec3\u5ba4", L"\u5de5\u538b\u5e73\u53f0" };
+    // 单列排布（右栏宽度有限，两列会溢出到信息条外）
+    int half = (c.right - c.x) - 8;
+    for (int k = 0; k < 8; ++k) {
+        int col = 0;
+        int row = k;
+        int fx = c.x + col * (half + 12);
+        int fy = c.y + row * 24;
+        std::string key = std::string("facility_") + std::to_string(k);
+        bool v = c.get_bool(key);
+        CheckState st = v ? CheckState::On : CheckState::Off;
+        RECT fr{ fx, fy, fx + half, fy + 22 };
+        c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), fr, facs[k], st);
+        c.set_bool(key, st == CheckState::On);
+    }
+    c.y += 8 * 24 + 6;
+    // 官方 全选 / 清空
+    RECT all_b{ c.x, c.y, c.x + 100, c.y + 26 };
+    RECT clr_b{ c.x + 108, c.y, c.x + 208, c.y + 26 };
+    if (c.g.button((c.exec_id + ":infrast-all").c_str(), all_b, L"\u5168\u9009", 0)) {
+        for (int k = 0; k < 8; ++k) c.set_bool(std::string("facility_") + std::to_string(k), true);
+    }
+    if (c.g.button((c.exec_id + ":infrast-clear").c_str(), clr_b, L"\u6e05\u7a7a", 0)) {
+        for (int k = 0; k < 8; ++k) c.set_bool(std::string("facility_") + std::to_string(k), false);
+    }
+    c.y += 34;
+
+    c.g.group_title(c.x, c.y, L"\u4f1a\u5ba2\u5ba4\u4e0e\u5bbf\u820d");
+    c.y += 20;
+    pc_check(c, "reception_message_board", L"\u4f1a\u5ba2\u5ba4\u4fe1\u606f\u677f\u6536\u53d6\u4fe1\u7528");
+    pc_check(c, "reception_clue_exchange", L"\u8fdb\u884c\u7ebf\u7d22\u4ea4\u6d41");
+    pc_check(c, "reception_send_clue", L"\u8d60\u9001\u7ebf\u7d22");
+    pc_check(c, "dorm_trust", L"\u5bbf\u820d\u7a7a\u4f59\u4f4d\u7f6e\u8e8f\u4fe1\u8d56");
+    pc_check(c, "dorm_filter_not_stationed", L"\u4e0d\u5c06\u5df2\u8fdb\u9a7b\u7684\u5e72\u5458\u653e\u5165\u5bbf\u820d");
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"跨设施组合");
+
+    c.g.group_title(c.x, c.y, L"\u8de8\u8bbe\u65bd\u7ec4\u5408");
     c.y += 20;
-    pc_check(c, "use_pinus_sylvestris", L"使用红松骑士团跨设施组合");
-    pc_check(c, "use_perception_information", L"使用感知信息跨设施组合");
-    pc_check(c, "use_worldly_plight", L"使用人间烟火跨设施组合");
-    pc_check(c, "use_abyssal_hunter", L"使用深海猎人跨设施组合");
+    pc_check(c, "use_pinus_sylvestris", L"\u4f7f\u7528\u7ea2\u677e\u9a91\u58eb\u56e2\u8de8\u8bbe\u65bd\u7ec4\u5408");
+    pc_check(c, "use_perception_information", L"\u4f7f\u7528\u611f\u77e5\u4fe1\u606f\u8de8\u8bbe\u65bd\u7ec4\u5408");
+    pc_check(c, "use_worldly_plight", L"\u4f7f\u7528\u4eba\u95f4\u70df\u706b\u8de8\u8bbe\u65bd\u7ec4\u5408");
+    pc_check(c, "use_abyssal_hunter", L"\u4f7f\u7528\u6df1\u6d77\u730e\u4eba\u8de8\u8bbe\u65bd\u7ec4\u5408");
+    pc_check(c, "use_weekly_plan", L"\u542f\u7528\u5468\u8ba1\u5212");
     return true;
 }
+
 
 // ---- Recruit：自动公招 ----
 inline bool panel_recruit(PanelCtx& c) {
@@ -300,6 +349,12 @@ inline bool panel_recruit(PanelCtx& c) {
     c.y += 6;
     c.g.group_title(c.x, c.y, L"Tag 策略");
     c.y += 20;
+    // 官方 hc:ComboBox「公招多选 Tag 的策略」
+    c.g.text(c.x, c.y + 4, L"公招多选 Tag 的策略", c.g.theme.dim, c.g.font_small);
+    c.y += 22;
+    pc_radio(c, "select_strategy", { L"策略 1", L"策略 2", L"策略 3" }, 0);
+    // 官方 CheckBox「3 星 Tag 时的 Tag 倾向」
+    pc_check(c, "tag_preference_3star", L"3 星 Tag 时的 Tag 倾向");
     pc_text(c, "select_tags", L"点击的 Tag 等级", L"如 5;4;3");
     pc_radio(c, "high_priority", { L"稀有度优先", L"组合优先" }, 0);
     pc_text(c, "preserve_tags", L"保留指定词条", L"多个用分号分隔");
@@ -323,6 +378,7 @@ inline bool panel_mall(PanelCtx& c) {
     c.y += 6;
     c.g.group_title(c.x, c.y, L"过滤");
     c.y += 20;
+    pc_text(c, "buy_first_str", L"优先购买", L"子串即可，分号分隔");
     pc_text(c, "blacklist_str", L"黑名单", L"子串即可，分号分隔");
     return true;
 }
