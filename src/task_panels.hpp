@@ -379,12 +379,37 @@ inline bool panel_recruit(PanelCtx& c) {
     c.y += 6;
     c.g.group_title(c.x, c.y, L"自动确认星级");
     c.y += 16;
-    pc_check(c, "confirm_3", L"自动确认 3 星");
-    pc_check(c, "confirm_4", L"自动确认 4 星");
-    pc_check(c, "confirm_5", L"自动确认 5 星");
-    pc_check(c, "confirm_6", L"自动确认 6 星");
+    // 官方：CheckBox + 两个 NumericUpDown(Width=55) 同行
+    {
+        const int NB = 62;
+        int split = c.right - NB * 2 - 10;
+        auto row_star = [&](const std::string& key, const std::wstring& label,
+                            const std::string& k1, const std::string& k2) {
+            bool v = c.get_bool(key);
+            CheckState st = c.get_once(key) ? CheckState::Once
+                                            : (v ? CheckState::On : CheckState::Off);
+            c.g.checkbox3((c.exec_id + ":Recruit:" + key).c_str(),
+                          { c.x, c.y, split - 8, c.y + 22 }, label, st);
+            c.set_bool(key, st == CheckState::On);
+            c.set_once(key, st == CheckState::Once);
+            int a = c.get_int(k1, 0), b = c.get_int(k2, 0);
+            c.g.number_input((c.exec_id + ":Recruit:" + k1).c_str(),
+                             { split, c.y - 2, split + NB, c.y + 24 }, L"", a, 1, 0, 999);
+            c.g.number_input((c.exec_id + ":Recruit:" + k2).c_str(),
+                             { split + NB + 8, c.y - 2, c.right, c.y + 24 }, L"", b, 1, 0, 999);
+            c.set_int(k1, a);
+            c.set_int(k2, b);
+            c.y += 28;
+        };
+        row_star("confirm_3", L"自动确认 3 星", "star3_a", "star3_b");
+        row_star("confirm_4", L"自动确认 4 星", "star4_a", "star4_b");
+        row_star("confirm_5", L"自动确认 5 星", "star5_a", "star5_b");
+        row_star("confirm_6", L"自动确认 6 星", "star6_a", "star6_b");
+    }
     pc_check(c, "auto_expedite", L"自动使用加急许可");
-    c.y += 6;
+    c.y += 4;
+
+    c.g.group_title(c.x, c.y, L"Tag 策略");
     c.g.group_title(c.x, c.y, L"Tag 策略");
     c.y += 20;
     // 官方 hc:ComboBox「公招多选 Tag 的策略」
