@@ -1084,9 +1084,9 @@ void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
         y = card.bottom + 10;
     }
 
-    // ---- 任务统计卡 ----
+    // ---- 任务进度卡（一个数字概览，避免与下方列表标题重复）----
     {
-        RECT card{ x, y, right, y + 40 };
+        RECT card{ x, y, right, y + 38 };
         gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
         int enabled = 0;
         auto it = task_ui_.find(id);
@@ -1095,17 +1095,18 @@ void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
                 if (kv.second.checked || kv.second.once) ++enabled;
             }
         }
-        gui_.text(card.left + 10, card.top + 6, L"\u5df2\u542f\u7528\u4efb\u52a1",
+        gui_.text(card.left + 10, card.top + 5, L"\u4efb\u52a1\u8fdb\u5ea6",
                   gui_.theme.dim, gui_.font_small);
         gui_.text(card.left + 10, card.top + 18,
-                  std::to_wstring(enabled) + L" / " + std::to_wstring(task_count),
+                  std::to_wstring(enabled) + L" / " + std::to_wstring(task_count)
+                      + L" \u5df2\u542f\u7528",
                   gui_.theme.primary, gui_.font_bold);
-        y = card.bottom + 10;
+        y = card.bottom + 8;
     }
 
-    // ---- 最近事件 ----
+    // ---- 最近事件（最多 3 条，避免挤压下方区块）----
     gui_.text(x, y, L"\u6700\u8fd1\u4e8b\u4ef6", gui_.theme.dim, gui_.font_small);
-    y += 20;
+    y += 18;
     std::vector<std::string> lines;
     {
         std::lock_guard<std::mutex> lk(snap_mtx_);
@@ -1116,14 +1117,11 @@ void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
     if (lines.empty()) {
         gui_.text(x, y, L"\u6682\u65e0\u4e8b\u4ef6\u8bb0\u5f55", gui_.theme.faint,
                   gui_.font_small);
-        y += 20;
+        y += 18;
     } else {
-        int row_h = 20;
-        int avail = area.bottom - y - 4;
-        int visible = avail / row_h;
-        if (visible < 1) visible = 1;
-        int start = (int)lines.size() > visible ? (int)lines.size() - visible : 0;
-        for (int i2 = (int)lines.size() - 1; i2 >= start; --i2) {
+        int row_h = 18;
+        int shown = (int)lines.size() > 3 ? 3 : (int)lines.size();
+        for (int i2 = (int)lines.size() - shown; i2 < (int)lines.size(); ++i2) {
             RECT save = gui_.clip();
             gui_.text_clipped({ x, y, right, y + row_h },
                               gui::widen(lines[i2]), gui_.theme.dim, gui_.font_small);
@@ -1131,6 +1129,7 @@ void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
             y += row_h;
         }
     }
+    y += 6;
 
     // ---- 最近错误（有则高亮）----
     if (!last.empty()) {
@@ -1177,11 +1176,7 @@ void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
 
         gui_.text(x, y, L"\u5df2\u542f\u7528\u4efb\u52a1", gui_.theme.dim, gui_.font_small);
         y += 20;
-        if (enabled_names.empty()) {
-            gui_.text(x, y, L"\u8fd8\u6ca1\u6709\u542f\u7528\u4efb\u52a1",
-                      gui_.theme.faint, gui_.font_small);
-            y += 22;
-        } else {
+        if (!enabled_names.empty()) {
             int row_h = 22;
             int avail = area.bottom - y - 4;
             int visible = avail / row_h;
