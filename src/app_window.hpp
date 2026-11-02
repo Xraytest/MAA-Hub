@@ -57,6 +57,13 @@ private:
 
     // 页面
     void draw_top_tabs(RECT r);
+    // 右下角 GIF 挂件（官方 GifImage：100x100、可拖拽、右键切换）
+    void draw_gif_widget(RECT client);
+    int gif_x_ = -1, gif_y_ = -1;          // -1 = 默认右下角
+    bool gif_dragging_ = false;
+    int gif_drag_dx_ = 0, gif_drag_dy_ = 0;
+    size_t gif_index_ = 0;
+    bool gif_hidden_ = true;   // 默认隐藏（无内置 GIF 资源，避免遮挡内容）
     void draw_executor_strip(RECT r);
     void draw_topbar(RECT r);
     void page_executor(RECT content);

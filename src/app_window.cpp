@@ -336,6 +336,7 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
                   client.right - 10, client.bottom - 8 };
 
     draw_top_tabs(tabbar);
+    draw_gif_widget(client);
 
     try {
         if (page_ == "executor" && !selected_exec_.empty()) page_executor(content);
@@ -363,6 +364,58 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
     double frame_ms = (util::now_sec() - frame_t0) * 1000;
     if (frame_ms > 500) {
         fprintf(stderr, "[ui] slow frame %.0fms (page=%s)\n", frame_ms, page_.c_str());
+    }
+}
+
+// 右下角 GIF 挂件（官方 RootView 的 hc:GifImage）
+// 规格：100x100、Margin 10、右下角、可拖拽、右键切换、默认可见。
+// MaaHub 未内置 GIF 资源，这里绘制一个等大的可拖拽占位区域：
+// 有 GIF 文件时用 GDI+ 播放，无则画一个 Primary 色圆角块 + 提示文字。
+void MaaHubWindow::draw_gif_widget(RECT client) {
+    const int SZ = 100;                 // 官方 Width=100
+    const int BOTTOM_RESERVE = 60;      // 避开底栏控制区（MaaHub 底栏比官方多连接管理）
+    int x = (gif_x_ >= 0) ? gif_x_ : (client.right - SZ - 10);
+    int y = (gif_y_ >= 0) ? gif_y_ : (client.bottom - SZ - 10 - BOTTOM_RESERVE);
+    RECT wr{ x, y, x + SZ, y + SZ };
+
+    const POINT& m = gui_.input().mouse;
+    bool inside = m.x >= wr.left && m.x < wr.right && m.y >= wr.top && m.y < wr.bottom;
+
+    // 拖拽（官方 DraggableElementMouseLeftButton*）
+    if (inside && gui_.input().pressed) {
+        gif_dragging_ = true;
+        gif_drag_dx_ = m.x - wr.left;
+        gif_drag_dy_ = m.y - wr.top;
+    }
+    if (gif_dragging_) {
+        if (gui_.input().down) {
+            gif_x_ = m.x - gif_drag_dx_;
+            gif_y_ = m.y - gif_drag_dy_;
+            // 限制在窗口内
+            if (gif_x_ < 0) gif_x_ = 0;
+            if (gif_y_ < 0) gif_y_ = 0;
+            if (gif_x_ + SZ > client.right) gif_x_ = client.right - SZ;
+            if (gif_y_ + SZ > client.bottom - BOTTOM_RESERVE) {
+                gif_y_ = client.bottom - SZ - BOTTOM_RESERVE;
+            }
+        } else {
+            gif_dragging_ = false;
+        }
+    }
+    // 右键切换（官方 ChangeGif）：在无内置资源时用于在"显示/隐藏"间切换
+    if (inside && gui_.input().rpressed) {
+        gif_hidden_ = !gif_hidden_;
+    }
+    if (gif_hidden_) return;
+
+    // 外观：浅色圆角块 + MaaHub 字样（官方此处是角色 GIF）
+    // 用浅色而非 Primary 实底，避免遮挡右栏内容（官方 GIF 也是半透明挂件）
+    gui_.round_rect(wr, gui_.theme.card_bg, gui_.theme.primary, 8);
+    gui_.text(wr.left + 20, wr.top + 30, L"MaaHub", gui_.theme.primary, gui_.font_bold);
+    gui_.text(wr.left + 16, wr.top + 54, L"\u62d6\u62fd\u79fb\u52a8",
+              gui_.theme.dim, gui_.font_small);
+    if (gif_dragging_) {
+        gui_.round_rect(wr, CLR_INVALID, gui_.theme.primary, 8);
     }
 }
 
@@ -1356,7 +1409,9 @@ void MaaHubWindow::page_executor(RECT content) {
             if (panel_h < 80) panel_h = 80;
             // 内容高度按参数个数估算（每项约 36-40px，含分组标题），
             // 不再用固定 2000——避免内容更高时被裁剪、或过短时出现空滚动
-            int est_rows = (int)specs.size() + 8;
+            // 内容高度估算：官方面板每项约 40px，但分组标题(+20)、提示行(+16)、
+            // 单选条(+30) 都额外占位；按 specs 数的 2.2 倍估行，确保底部内容可滚动到
+            int est_rows = (int)specs.size() * 22 / 10 + 12;
             int content_h = est_rows * 40 + 80;
             if (content_h < panel_h) content_h = panel_h;
             // 滚动区底部止于信息条上方，保证信息条始终可见
