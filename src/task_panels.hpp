@@ -223,11 +223,29 @@ inline bool panel_fight(PanelCtx& c) {
     // 官方 FightTaskUserControl：19 个控件，按官方顺序与分组复刻
     c.g.group_title(c.x, c.y, L"\u7406\u667a\u4e0e\u7269\u6599");
     c.y += 16;
-    pc_check(c, "use_medicine", L"\u4f7f\u7528\u836f\u5242",
-             L"\u8be5\u9009\u9879\u53f3\u952e\u9009\u4e2d\u65f6\u4ec5\u751f\u6548\u4e00\u6b21");
-    pc_check(c, "use_stone", L"\u4f7f\u7528\u6e90\u77f3",
-             L"\u8be5\u9009\u9879\u4ec5\u751f\u6548\u4e00\u6b21");
-    c.y += 4;
+    // 官方 Grid 双列：C0 复选框、C1 NumericUpDown(Width=70) 同行
+    {
+        const int C1_W = 84;
+        int split = c.right - C1_W;
+        auto row_cb_num = [&](const std::string& key, const std::wstring& label,
+                              const std::string& numkey, int lo, int hi) {
+            bool v = c.get_bool(key);
+            CheckState st = c.get_once(key) ? CheckState::Once
+                                            : (v ? CheckState::On : CheckState::Off);
+            c.g.checkbox3((c.exec_id + ":Fight:" + key).c_str(),
+                          { c.x, c.y, split - 8, c.y + 22 }, label, st);
+            c.set_bool(key, st == CheckState::On);
+            c.set_once(key, st == CheckState::Once);
+            int nv = c.get_int(numkey, 0);
+            c.g.number_input((c.exec_id + ":Fight:" + numkey).c_str(),
+                             { split, c.y - 2, c.right, c.y + 24 }, L"", nv, 1, lo, hi);
+            c.set_int(numkey, nv);
+            c.y += 28;
+        };
+        row_cb_num("use_medicine", L"\u4f7f\u7528\u836f\u5242", "medicine", 0, 999);
+        row_cb_num("use_stone", L"\u4f7f\u7528\u6e90\u77f3", "stone", 0, 999);
+    }
+    c.y += 2;
 
     c.g.group_title(c.x, c.y, L"\u5173\u5361\u4e0e\u6b21\u6570");
     c.y += 16;
