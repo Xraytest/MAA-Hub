@@ -78,11 +78,12 @@ inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& la
                      const std::wstring& tip = L"") {
     CheckState st = c.get_once(key) ? CheckState::Once
                                     : (c.get_bool(key) ? CheckState::On : CheckState::Off);
-    RECT r{ c.x, c.y, c.right, c.y + 22 };
+    // 官方 CheckBox 规格：Height=30 Margin=6
+    RECT r{ c.x, c.y + 3, c.right, c.y + 3 + 24 };
     c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st);
     c.set_bool(key, st == CheckState::On);
     c.set_once(key, st == CheckState::Once);
-    c.y += 24;
+    c.y += 30;
     if (!tip.empty()) {
         c.g.tip_line(c.x + 24, c.y, c.right, tip);
         c.y += 16;
@@ -118,38 +119,48 @@ inline void pc_times(PanelCtx& c, const std::string& key, const std::wstring& la
     int v = c.get_int(key, -1);
     if (v >= 2147483647) { v = -1; c.set_int(key, -1); }   // 兼容历史脏值
     bool inf = (v < 0);
-    RECT r{ c.x, c.y, c.x + 460, c.y + 26 };
-    c.g.text(r.left, r.top + (r.bottom - r.top - 17) / 2, label,
-             c.g.theme.text, c.g.font);
-    RECT ir{ r.left + 150, r.top, r.right - 150, r.bottom };
+    // 窄列竖排：标签 / 输入框+± / 无限勾选，各占一行
+    c.g.text(c.x, c.y, label, c.g.theme.dim, c.g.font_small);
+    c.y += 20;
+    int avail = c.right - c.x;
     std::string edit = inf ? std::string() : std::to_string(v);
-    c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), ir, edit,
-                   inf ? L"\u65e0\u9650" : nullptr);
+    if (avail >= 150) {
+        // 有足够宽度：输入框 + ± 按钮同行
+        RECT ir{ c.x, c.y, c.right - 84, c.y + 26 };
+        c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), ir, edit,
+                       inf ? L"\u65e0\u9650" : nullptr);
+        RECT minus_b{ c.right - 80, c.y, c.right - 46, c.y + 26 };
+        RECT plus_b{ c.right - 42, c.y, c.right - 8, c.y + 26 };
+        if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-m").c_str(),
+                       minus_b, L"-", 0)) {
+            if (!inf) v = (v - 1 < 0) ? 0 : v - 1;
+        }
+        if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-p").c_str(),
+                       plus_b, L"+", 0)) {
+            if (!inf) v += 1;
+        }
+        c.y += 30;
+    } else {
+        // 极窄：只放输入框
+        RECT ir{ c.x, c.y, c.right, c.y + 26 };
+        c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), ir, edit,
+                       inf ? L"\u65e0\u9650" : nullptr);
+        c.y += 30;
+    }
     if (!inf) {
         int nv = v;
         try { nv = std::stoi(edit); } catch (...) { nv = v; }
         if (nv < 0) nv = 0;
         v = nv;
     }
-    RECT minus_b{ r.right - 146, r.top, r.right - 114, r.bottom };
-    RECT plus_b{ r.right - 110, r.top, r.right - 78, r.bottom };
-    if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-m").c_str(),
-                   minus_b, L"-", 0)) {
-        if (!inf) v = (v - 1 < 0) ? 0 : v - 1;
-    }
-    if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-p").c_str(),
-                   plus_b, L"+", 0)) {
-        if (!inf) v += 1;
-    }
     CheckState inf_st = inf ? CheckState::On : CheckState::Off;
-    // 窄列：「无限」勾选独立一行，避免与输入框/步进按钮互相挤压
-    c.y += 30;
     RECT inf_r{ c.x, c.y, c.x + 90, c.y + 22 };
     c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key + "-inf").c_str(),
                   inf_r, L"\u65e0\u9650", inf_st);
     c.set_int(key, inf_st == CheckState::On ? -1 : v);
     c.y += 30;
 }
+
 
 // 横向单选（选项条）
 inline void pc_radio(PanelCtx& c, const std::string& key,
