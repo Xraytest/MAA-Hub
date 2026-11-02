@@ -3,6 +3,13 @@
 //   MaaHub.exe --check             干跑自检（控制台输出，不启动 UI）
 //   MaaHub.exe --worker K C        worker 子进程模式（内部使用）
 //   MaaHub.exe --core-version K D  探测某核心目录的版本（子进程，内部使用）
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// GDI+ 需要完整 windows.h，不能定义 WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 #include <cstdio>
 #include <string>
 
@@ -113,6 +120,11 @@ static int core_version_mode(const std::string& kind, const std::string& path) {
 }
 
 int main(int argc, char** argv) {
+    // GDI+ 初始化（抗锯齿圆角/线条需要；gui.hpp 的 round_rect 走 GDI+）
+    Gdiplus::GdiplusStartupInput gpsi;
+    ULONG_PTR gdiplus_token = 0;
+    Gdiplus::GdiplusStartup(&gdiplus_token, &gpsi, nullptr);
+
     SetConsoleOutputCP(CP_UTF8);
     setvbuf(stdout, nullptr, _IONBF, 0);
     std::set_terminate([] {
