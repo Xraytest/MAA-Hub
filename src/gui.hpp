@@ -294,14 +294,16 @@ public:
         if (hov && in_.pressed) active_ = id;
         if (hov && active_ == id && in_.released) click = true;
 
-        COLORREF fill = theme.panel, border = theme.border, txt = theme.text;
+        // 官方 MaaButtonDefaultStyle：Background=RegionBrushOpacity25(约#FBFBFB)、
+        // Foreground=PrimaryTextBrush、基于 ButtonBaseStyle(高28/圆角4/内边距(10,5))
+        COLORREF fill = theme.card_bg, border = theme.border, txt = theme.text;
         if (style == 1) { fill = theme.primary; border = theme.primary; txt = RGB(255, 255, 255); }
         else if (style == 2) { fill = RGB(254, 242, 242); border = theme.err; txt = theme.err; }
         else if (style == 3) { fill = RGB(255, 248, 235); border = theme.warn; txt = RGB(180, 120, 10); }
         if (!enabled) { fill = RGB(245, 246, 248); border = theme.border; txt = RGB(160, 168, 178); }
         else if (hov) { fill = (style == 1) ? theme.primary_dark : theme.hover; }
 
-        round_rect(r, fill, active_ == id && hov ? theme.primary : border, 6);
+        round_rect(r, fill, active_ == id && hov ? theme.primary : border, 4);
         // 标签自适应 + 裁进按钮自身矩形：
         // 原来直接按按钮宽度居中绘制，标签比按钮宽时既会溢出到相邻控件上，
         // 又会被外层裁剪区（滚动区/面板）拦腰截断 —— 即"按钮文本被剪裁"。
@@ -455,7 +457,8 @@ public:
             focus_ = id;
         }
         bool focused = focus_ == id;
-        round_rect(r, theme.input_bg, focused ? theme.primary : theme.border, 5);
+        // 官方 MaaTextBoxDefaultStyle：Background=RegionBrushOpacity25、圆角 4
+        round_rect(r, theme.card_bg, focused ? theme.primary : theme.border, 4);
         std::wstring w = widen(value);
         RECT save = clip_;
         if (w.empty() && hint) {
