@@ -57,6 +57,11 @@ struct Theme {
     COLORREF card_bg_soft = RGB(0xF6, 0xF6, 0xF6); // 次级卡片（略深一档）
     // 官方 MaaCheckBoxDefaultStyle：RegionBrushOpacity50（比按钮深一档）
     COLORREF checkbox_bg = RGB(0xF6, 0xF6, 0xF6);
+    // 官方 NoSelectedHighlightListBoxItemStyle：
+    //   Background=RegionBrushOpacity25(#FBFBFB)，选中态背景不变（无高亮），
+    //   IsMouseOver=MouseOverRegionBrushOpacity75(约#FAFAFA)
+    COLORREF item_bg = RGB(0xFB, 0xFB, 0xFB);
+    COLORREF item_hover = RGB(0xFA, 0xFA, 0xFA);
     COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）
 };
 
