@@ -160,21 +160,43 @@ inline void pc_radio(PanelCtx& c, const std::string& key,
 
 // ---- StartUp：开始唤醒 ----
 inline bool panel_startup(PanelCtx& c) {
-    c.g.group_title(c.x, c.y, L"账号与启动");
+    // 官方 StartUpTaskUserControl：12 个控件
+    c.g.group_title(c.x, c.y, L"\u8d26\u53f7\u4e0e\u542f\u52a8");
     c.y += 20;
-    pc_check(c, "account_name_set", L"账号切换", L"启用后按执行器绑定的账号自动切换");
-    pc_check(c, "start_game_enabled", L"是否启动客户端");
+    pc_check(c, "account_name_set", L"\u8d26\u53f7\u5207\u6362",
+             L"\u542f\u7528\u540e\u6309\u6267\u884c\u5668\u7ed1\u5b9a\u7684\u8d26\u53f7\u81ea\u52a8\u5207\u6362");
+    pc_check(c, "start_game_enabled", L"\u662f\u5426\u542f\u52a8\u5ba2\u6237\u7aef");
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"客户端类型");
+
+    c.g.group_title(c.x, c.y, L"\u5ba2\u6237\u7aef\u7c7b\u578b");
     c.y += 20;
-    pc_radio(c, "client_type", { L"官服", L"Bilibili", L"txwy", L"YoStarEN",
+    pc_radio(c, "client_type", { L"\u5b98\u670d", L"Bilibili", L"txwy", L"YoStarEN",
                                  L"YoStarJP", L"YoStarKR" }, 0);
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"连接");
+
+    c.g.group_title(c.x, c.y, L"\u8fde\u63a5");
     c.y += 20;
-    pc_check(c, "auto_detect", L"自动检测连接");
+    pc_check(c, "auto_detect", L"\u81ea\u52a8\u68c0\u6d4b\u8fde\u63a5");
+    pc_check(c, "always_auto_detect", L"\u6bcf\u6b21\u91cd\u65b0\u68c0\u6d4b");
+    c.y += 4;
+    pc_text(c, "adb_path", L"ADB \u8def\u5f84", L"\u7559\u7a7a\u4f7f\u7528\u9ed8\u8ba4");
+    pc_text(c, "connect_address", L"\u8fde\u63a5\u5730\u5740",
+            L"\u5982 127.0.0.1:16384\uff1b\u7559\u7a7a\u4e3a\u81ea\u52a8");
+    c.y += 4;
+    c.g.group_title(c.x, c.y, L"\u6a21\u62df\u5668\u589e\u5f3a");
+    c.y += 20;
+    pc_check(c, "mumu_extras", L"\u542f\u7528 MuMu \u622a\u56fe\u589e\u5f3a");
+    pc_check(c, "mumu_bridge", L"MuMu \u7f51\u7edc\u6865\u63a5\u6a21\u5f0f");
+    pc_check(c, "ld_extras", L"\u542f\u7528 LD \u622a\u56fe\u589e\u5f3a");
+    pc_check(c, "ld_manual_index", L"\u624b\u52a8\u586b\u5199 \u300c\u96c5\u5149\u6f0f\u6307\u6570\u300d");
+    c.y += 4;
+    c.g.group_title(c.x, c.y, L"\u622a\u56fe\u4e0e\u8f93\u5165");
+    c.y += 20;
+    pc_radio(c, "screencap_method", { L"\u9ed8\u8ba4", L"\u540e\u53f0", L"\u76f4\u8fde" }, 0);
+    pc_radio(c, "touch_mode", { L"\u9ed8\u8ba4", L"MuMu", L"\u5176\u4ed6" }, 0);
     return true;
 }
+
 
 // ---- Fight：理智作战 ----
 inline bool panel_fight(PanelCtx& c) {
@@ -463,6 +485,7 @@ inline bool panel_end_friends(PanelCtx& c) {
 
 // ---- Depot：仓库识别（库存保持）----
 inline bool panel_depot(PanelCtx& c) {
+    // 官方 DepotMaintainTaskUserControl：14 个控件
     c.g.group_title(c.x, c.y, L"\u4efb\u52a1\u884c\u4e3a");
     c.y += 20;
     pc_check(c, "update_before_start", L"\u4efb\u52a1\u5f00\u59cb\u524d\u66f4\u65b0\u5e93\u5b58\u6570\u636e");
@@ -473,12 +496,24 @@ inline bool panel_depot(PanelCtx& c) {
     pc_check(c, "sort_by_progress", L"\u6309\u5e93\u5b58\u8fbe\u6210\u7387\u6392\u5e8f\u6267\u884c");
     pc_check(c, "count_dual_chip_as_chip_pack", L"\u82af\u7247\u7ec4\u8ba1\u5165\u53cc\u82af\u7247\u6298\u7b97");
     c.y += 6;
-    c.g.group_title(c.x, c.y, L"\u5236\u84c4\u4e0e\u7269\u6599");
+
+    c.g.group_title(c.x, c.y, L"\u5173\u5361");
     c.y += 20;
-    pc_check(c, "use_medicine", L"\u4f7f\u7528\u836f\u5242", L"\u8be5\u9009\u9879\u53f3\u952e\u9009\u4e2d\u65f6\u4ec5\u751f\u6548\u4e00\u6b21");
-    pc_check(c, "use_stone", L"\u4f7f\u7528\u6e90\u77f3", L"\u8be5\u9009\u9879\u4ec5\u751f\u6548\u4e00\u6b21");
+    pc_text(c, "stage", L"\u5173\u5361", L"\u7559\u7a7a\u4e3a \u5f53\u524d/\u4e0a\u6b21");
+    pc_check(c, "use_custom_stage", L"\u624b\u52a8\u8f93\u5165\u5173\u5361\u540d");
+    pc_check(c, "auto_series", L"AUTO \u4ee3\u7406\u500d\u7387");
+    c.y += 6;
+
+    c.g.group_title(c.x, c.y, L"\u5236\u84b4\u4e0e\u7269\u6599");
+    c.y += 20;
+    pc_check(c, "use_medicine", L"\u542f\u7528 \u300c\u4f7f\u7528\u836f\u5242\u300d",
+             L"\u8be5\u9009\u9879\u53f3\u952e\u9009\u4e2d\u65f6\u4ec5\u751f\u6548\u4e00\u6b21");
+    pc_check(c, "use_stone", L"\u542f\u7528 \u300c\u4f7f\u7528\u6e90\u77f3\u300d",
+             L"\u8be5\u9009\u9879\u4ec5\u751f\u6548\u4e00\u6b21");
+    pc_check(c, "use_48h_expire_medicine", L"\u4f7f\u7528 48 \u5c0f\u65f6\u5185\u8fc7\u671f\u7684\u7406\u667a\u836f");
     return true;
 }
+
 
 // ---- OperBox：干员识别 ----
 inline bool panel_operbox(PanelCtx& c) {
