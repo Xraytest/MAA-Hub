@@ -2,7 +2,13 @@
 // 特性：按钮/复选框/文本输入/选项条/滚动区域/卡片面板、CJK 字体、剪裁栈、
 //       热激活焦点跟踪、后台线程数据快照友好（渲染只读快照）
 #pragma once
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// GDI+ 需要完整 windows.h，不能定义 WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 #include <algorithm>
 #include <codecvt>
 #include <deque>
@@ -139,16 +145,37 @@ public:
         GradientFill(dc_, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
     }
 
-    void round_rect(RECT r, COLORREF fill_c, COLORREF border_c, int radius) {
-        HBRUSH b = CreateSolidBrush(fill_c);
-        HPEN p = CreatePen(PS_INSIDEFRAME, 1, border_c);
-        HGDIOBJ ob = SelectObject(dc_, b);
-        HGDIOBJ op = SelectObject(dc_, p);
-        RoundRect(dc_, r.left, r.top, r.right, r.bottom, radius, radius);
-        SelectObject(dc_, ob);
-        SelectObject(dc_, op);
-        DeleteObject(b);
-        DeleteObject(p);
+    void round_rect(RECT r, COLORREF fill, COLORREF line, int radius) {
+        // GDI+ 抗锯齿圆角矩形（GDI RoundRect 边缘锯齿明显，与 WPF 观感差距大）
+        if (r.right <= r.left || r.bottom <= r.top) return;
+        int x = r.left, y = r.top;
+        int w = r.right - r.left, h = r.bottom - r.top;
+        if (radius < 0) radius = 0;
+        if (radius * 2 > w) radius = w / 2;
+        if (radius * 2 > h) radius = h / 2;
+        using namespace Gdiplus;
+        Graphics g(dc_);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(PixelOffsetModeHalf);
+        GraphicsPath path;
+        if (radius <= 0) {
+            path.AddRectangle(Rect(x, y, w, h));
+        } else {
+            int d = radius * 2;
+            path.AddArc(x, y, d, d, 180, 90);
+            path.AddArc(x + w - d - 1, y, d, d, 270, 90);
+            path.AddArc(x + w - d - 1, y + h - d - 1, d, d, 0, 90);
+            path.AddArc(x, y + h - d - 1, d, d, 90, 90);
+            path.CloseFigure();
+        }
+        if (fill != CLR_INVALID) {
+            SolidBrush br(Color(255, GetRValue(fill), GetGValue(fill), GetBValue(fill)));
+            g.FillPath(&br, &path);
+        }
+        if (line != CLR_INVALID) {
+            Pen pen(Color(255, GetRValue(line), GetGValue(line), GetBValue(line)), 1.0f);
+            g.DrawPath(&pen, &path);
+        }
     }
     SIZE text_size(const std::wstring& s, HFONT f) {
         SIZE sz{ 0, 0 };
@@ -519,16 +546,22 @@ public:
     void set_dc(HDC dc, RECT client) {
         dc_ = dc;
         clip_ = client;
+        // 文字背景透明 + 高质量拉伸（缩放/位图时不出现块状）
+        SetBkMode(dc_, TRANSPARENT);
+        SetStretchBltMode(dc_, HALFTONE);
+        SetBrushOrgEx(dc_, 0, 0, nullptr);
     }
 
     Input input() const { return in_; }
 
 private:
     static HFONT make_font(int px, bool bold) {
+        // ANTIALIASED_QUALITY：字体抗锯齿（WPF 文字平滑的关键；
+        // 默认 DEFAULT_QUALITY 在小字号下锯齿明显，是"不像官方"的主因之一）
         return CreateFontW(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
                            FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS,
+                           OUT_DEVICE_PRECIS, CLIP_DEFAULT_PRECIS,
+                           ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS,
                            L"Microsoft YaHei");
     }
 
