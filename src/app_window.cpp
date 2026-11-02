@@ -1469,7 +1469,74 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.checkbox3(("cb-" + id + "-" + name).c_str(), cbr, label, st);
         ui.checked = (st == CheckState::On);
         ui.once = (st == CheckState::Once);
-        // 官方任务项不显示序号（Index 仅用于配置索引，不渲染）
+        // 官方任务项右侧：ConfigGeometry 齿轮图标（常态 SecondaryText 色，
+        // 选中/hover 时 Primary 色）；hover 时再显示 复制/重命名/删除 三个
+        // 22x22 图标按钮（官方 TaskActionButtonStyle）
+        {
+            int isz = 16;
+            int ix = item.right - isz - 6;
+            int iy = item.top + ((item.bottom - item.top) - isz) / 2;
+            RECT gear_r{ ix, iy, ix + isz, iy + isz };
+            COLORREF gear_c = (ui.checked || ui.once) ? gui_.theme.primary
+                                                      : gui_.theme.dim;
+            gui_.icon_gear(gear_r, gear_c);
+            if (hov) {
+                // hover 操作按钮（从右往左：删除、重命名、复制）
+                int bx = item.right - 22;
+                int by = item.top + ((item.bottom - item.top) - 22) / 2;
+                struct Act { const char* id; const wchar_t* tip; int kind; };
+                const Act acts[] = {
+                    { "del",  L"\u5220\u9664", 2 },
+                    { "ren",  L"\u91cd\u547d\u540d", 1 },
+                    { "cpy",  L"\u590d\u5236", 0 },
+                };
+                for (auto& a : acts) {
+                    RECT br{ bx, by, bx + 22, by + 22 };
+                    bool bh = gui_.input().mouse.x >= br.left
+                           && gui_.input().mouse.x < br.right
+                           && gui_.input().mouse.y >= br.top
+                           && gui_.input().mouse.y < br.bottom;
+                    if (bh) gui_.round_rect(br, gui_.theme.hover, gui_.theme.hover, 3);
+                    RECT ir{ br.left + 4, br.top + 4, br.right - 4, br.bottom - 4 };
+                    if (a.kind == 0) gui_.icon_copy_task(ir, gui_.theme.dim);
+                    else if (a.kind == 1) gui_.icon_rename_task(ir, gui_.theme.dim);
+                    else gui_.icon_delete_task(ir, gui_.theme.err);
+                    if (bh && gui_.input().pressed) {
+                        if (a.kind == 1) {
+                            renaming_task_ = name;
+                            rename_exec_ = id;
+                            auto al = task_alias_.find(id + "|" + name);
+                            rename_buf_ = al == task_alias_.end() ? "" : al->second;
+                        } else if (a.kind == 0) {
+                            auto al = task_alias_.find(id + "|" + name);
+                            std::string base = al == task_alias_.end() ? name : al->second;
+                            task_alias_[id + "|" + name] = base + " (\u526f\u672c)";
+                            save_task_alias();
+                        } else {
+                            // 删除 = 移出左列列表
+                            if (task_list_.find(id) == task_list_.end()) {
+                                for (auto& t : tasks) task_list_[id].insert(t.get_str("name", ""));
+                            }
+                            task_list_[id].erase(name);
+                            save_task_list();
+                            set_notice("\u5df2\u5c06\u4efb\u52a1\u79fb\u51fa\u5217\u8868");
+                        }
+                    }
+                    bx -= 22;
+                }
+                // hover 时齿轮让位给操作按钮
+            } else {
+                // 非 hover：齿轮可点击打开设置
+                bool gh = gui_.input().mouse.x >= gear_r.left
+                       && gui_.input().mouse.x < gear_r.right
+                       && gui_.input().mouse.y >= gear_r.top
+                       && gui_.input().mouse.y < gear_r.bottom;
+                if (gh && gui_.input().pressed) {
+                    for (auto& kv : task_ui_[id]) kv.second.selected = false;
+                    ui.selected = true;
+                }
+            }
+        }
         if (hov && gui_.input().pressed) {
             for (auto& kv : task_ui_[id]) kv.second.selected = false;
             ui.selected = true;

@@ -380,6 +380,41 @@ public:
                        L"l-3.72 3.72L22.49 18l3.71-3.72a6 6 0 0 0 .06-8.54A6 6 0 0 0 22 4a6.07 6.07 0 0 0-4.32 1.8L14 9.51z",
                        r, c);
     }
+    // 任务操作图标（22x22 按钮内 14x14，官方 TaskActionButtonStyle）
+    void icon_copy_task(RECT r, COLORREF c) {
+        using namespace Gdiplus;
+        Graphics g(dc_);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        int w = r.right - r.left, h = r.bottom - r.top;
+        int bw = w * 6 / 10, bh = h * 6 / 10;
+        Pen pen(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.6f);
+        SolidBrush br(Color(255, GetRValue(theme.card_bg), GetGValue(theme.card_bg),
+                            GetBValue(theme.card_bg)));
+        g.FillRectangle(&br, r.left, r.top + h - bh - 1, bw, bh);
+        g.DrawRectangle(&pen, r.left, r.top + h - bh - 1, bw, bh);
+        g.DrawRectangle(&pen, r.left + w - bw - 1, r.top, bw, bh);
+    }
+    void icon_rename_task(RECT r, COLORREF c) {
+        using namespace Gdiplus;
+        Graphics g(dc_);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        int w = r.right - r.left, h = r.bottom - r.top;
+        SolidBrush br(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
+        Point pts[4] = { Point(r.left + 1, r.top + h - 3), Point(r.left + w - 4, r.top + 2),
+                         Point(r.left + w - 1, r.top + 5), Point(r.left + 4, r.top + h - 1) };
+        g.FillPolygon(&br, pts, 4);
+    }
+    void icon_delete_task(RECT r, COLORREF c) {
+        using namespace Gdiplus;
+        Graphics g(dc_);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        int w = r.right - r.left, h = r.bottom - r.top;
+        Pen pen(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.6f);
+        g.DrawLine(&pen, r.left + 1, r.top + 3, r.left + w - 1, r.top + 3);
+        g.DrawRectangle(&pen, r.left + 2, r.top + 5, w - 4, h - 7);
+        g.DrawLine(&pen, r.left + w / 2, r.top + 7, r.left + w / 2, r.top + h - 4);
+    }
+
     // 齿轮（ConfigGeometry 的简化等效：外圈 + 中心，官方为 32x32 Carbon 齿轮）
     void icon_gear(RECT r, COLORREF c) {
         using namespace Gdiplus;
