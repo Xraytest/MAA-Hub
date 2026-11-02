@@ -424,7 +424,8 @@ void MaaHubWindow::draw_gif_widget(RECT client) {
 // （一键长草 / 自动战斗 / 小工具 / 设置）。MaaHub 用同样形态的顶部标签，
 // 页签为：任务队列 / 账号管理 / 核心管理 / 智能规划 / 事件日志 / 设置。
 void MaaHubWindow::draw_top_tabs(RECT r) {
-    gui_.fill(r, gui_.theme.panel);
+    // 官方 TabControlInLine：headerPanel 背景透明（继承 RegionBrushOpacity25）
+    gui_.fill(r, gui_.theme.card_bg);
     gui_.fill({ r.left, r.bottom - 1, r.right, r.bottom }, gui_.theme.border);
 
     struct Tab { const char* page; const wchar_t* label; };
@@ -446,17 +447,18 @@ void MaaHubWindow::draw_top_tabs(RECT r) {
                    || (t.page == "executor" && page_ == "welcome");
         bool hov = gui_.input().mouse.x >= tr.left && gui_.input().mouse.x < tr.right
                 && gui_.input().mouse.y >= tr.top && gui_.input().mouse.y < tr.bottom;
+        // 官方 TabItemStyle：Padding=DefaultControlPadding(10,5)、MinHeight=28；
+        // 选中态 = 文字 PrimaryBrush + 底部 2px 下划线（TitleBrush），
+        // 未选中 = PrimaryTextBrush；hover 仅背景微亮（不是整块蓝底白字）
+        COLORREF txt = sel ? gui_.theme.primary : gui_.theme.text;
+        if (hov && !sel) {
+            gui_.round_rect(tr, gui_.theme.hover, gui_.theme.hover, 3);
+        }
+        gui_.text(tr.left + 10, tr.top + (h - 18) / 2, t.label, txt, gui_.font);
         if (sel) {
-            gui_.round_rect(tr, gui_.theme.primary, gui_.theme.primary, 4);
-            gui_.text(tr.left + 14, tr.top + (h - 18) / 2, t.label,
-                      RGB(255, 255, 255), gui_.font);
-        } else if (hov) {
-            gui_.round_rect(tr, gui_.theme.hover, gui_.theme.hover, 4);
-            gui_.text(tr.left + 14, tr.top + (h - 18) / 2, t.label,
-                      gui_.theme.text, gui_.font);
-        } else {
-            gui_.text(tr.left + 14, tr.top + (h - 18) / 2, t.label,
-                      gui_.theme.dim, gui_.font);
+            // 底部 2px 下划线（官方选中态标识）
+            gui_.fill({ tr.left + 4, tr.bottom - 2, tr.right - 4, tr.bottom },
+                      gui_.theme.primary);
         }
         if (hov && gui_.input().pressed) {
             page_ = t.page;
@@ -510,7 +512,8 @@ void MaaHubWindow::draw_executor_strip(RECT r) {
 
 // ================================================================ 顶栏
 void MaaHubWindow::draw_topbar(RECT r) {
-    gui_.fill(r, gui_.theme.panel);
+    // 官方 TabControlInLine：headerPanel 背景透明（继承 RegionBrushOpacity25）
+    gui_.fill(r, gui_.theme.card_bg);
     gui_.fill({ r.left, r.bottom - 1, r.right, r.bottom }, gui_.theme.border);
 
     std::wstring title = L"MaaHub";
