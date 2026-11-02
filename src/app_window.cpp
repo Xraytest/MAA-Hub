@@ -2773,23 +2773,30 @@ void MaaHubWindow::page_settings(RECT content) {
     if (mi >= 0) set_proxy_mode_ = mi;
     y += 32;
     if (set_proxy_mode_ != 0) {
+        // 标签统一 56px，输入框等宽（地址/端口一行，用户名/密码一行）
+        const int PL = 56;
+        int half = (content.right - content.left - PL - 12) / 2;
         gui_.text(content.left, y + 4, L"\u5730\u5740", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-proxy-host", { content.left + 40, y, content.left + 240, y + 26 },
+        gui_.text_input("set-proxy-host", { content.left + PL, y, content.left + PL + half, y + 26 },
                         set_proxy_host_, L"127.0.0.1");
-        gui_.text(content.left + 250, y + 4, L"\u7aef\u53e3", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-proxy-port", { content.left + 290, y, content.left + 390, y + 26 },
+        gui_.text(content.left + PL + half + 12, y + 4, L"\u7aef\u53e3",
+                  gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-proxy-port",
+                        { content.left + PL + half + 12 + 40, y, content.right, y + 26 },
                         set_proxy_port_, L"7890");
         y += 30;
         gui_.text(content.left, y + 4, L"\u7528\u6237\u540d", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-proxy-user", { content.left + 66, y, content.left + 260, y + 26 },
+        gui_.text_input("set-proxy-user", { content.left + PL, y, content.left + PL + half, y + 26 },
                         set_proxy_user_, L"\u53ef\u9009");
-        gui_.text(content.left + 270, y + 4, L"\u5bc6\u7801", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-proxy-pass", { content.left + 310, y, content.left + 500, y + 26 },
+        gui_.text(content.left + PL + half + 12, y + 4, L"\u5bc6\u7801",
+                  gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-proxy-pass",
+                        { content.left + PL + half + 12 + 40, y, content.right, y + 26 },
                         set_proxy_pass_, L"\u53ef\u9009");
         y += 34;
     }
     gui_.text(content.left, y + 4, L"Mirror\u9171 CDK", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-cdk", { content.left + 96, y, content.left + 420, y + 26 },
+    gui_.text_input("set-cdk", { content.left + 96, y, content.right, y + 26 },
                     set_cdk_, L"\u586b\u5199\u540e\u4f18\u5148\u4f7f\u7528 Mirror\u9171 \u4e0b\u8f7d");
     y += 32;
     note(L"\u7559\u7a7a\u5219\u6309 GitHub \u2192 gh-proxy \u2192 ghfast \u2192 moeyy \u987a\u5e8f\u56de\u9000");
@@ -2828,15 +2835,18 @@ void MaaHubWindow::page_settings(RECT content) {
                        L"\u542f\u7528 LLM \u89c4\u5212", es);
         set_llm_enabled_ = (es == CheckState::On);
         y += 28;
+        // 标签统一占 74px，输入框撑满剩余宽度（避免宽度参差）
+        const int LBL = 74;
         gui_.text(content.left, y + 4, L"Base URL", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-llm-base", { content.left + 74, y, content.left + 320, y + 26 },
+        gui_.text_input("set-llm-base", { content.left + LBL, y, content.right, y + 26 },
                         set_llm_url_, L"https://api.deepseek.com");
-        gui_.text(content.left + 330, y + 4, L"\u6a21\u578b", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-llm-model", { content.left + 372, y, content.left + 500, y + 26 },
+        y += 30;
+        gui_.text(content.left, y + 4, L"\u6a21\u578b", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-llm-model", { content.left + LBL, y, content.right, y + 26 },
                         set_llm_model_, L"deepseek-chat");
         y += 30;
         gui_.text(content.left, y + 4, L"API Key", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-llm-key", { content.left + 66, y, content.left + 460, y + 26 },
+        gui_.text_input("set-llm-key", { content.left + LBL, y, content.right, y + 26 },
                         set_llm_key_, L"sk-...");
         y += 30;
         note(L"\u672a\u914d\u7f6e\u6216\u4e0d\u53ef\u8fbe\u65f6\u81ea\u52a8\u9000\u56de\u53d1\u5f0f\u89c4\u5212");
