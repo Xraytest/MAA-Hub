@@ -213,6 +213,35 @@ LRESULT CALLBACK MaaHubWindow::wnd_proc(HWND hwnd, UINT m, WPARAM wp, LPARAM lp)
 
 LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
+    case WM_NCCALCSIZE:
+        // 自定义标题栏：客户区覆盖整个窗口（保留边框由 NCHITTEST 处理缩放）
+        if (wp) {
+            NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
+            RECT& r = p->rgrc[0];
+            // 保留 1px 边框用于边缘缩放命中
+            r.left += 1; r.right -= 1; r.bottom -= 1; r.top += 1;
+            return 0;
+        }
+        return DefWindowProcW(hwnd, m, wp, lp);
+    case WM_NCHITTEST: {
+        // 自定义标题栏命中测试：边缘 4px 缩放、标题栏拖拽
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(hwnd, &pt);
+        RECT rc; GetClientRect(hwnd, &rc);
+        const int B = 4;
+        bool left = pt.x < B, right = pt.x >= rc.right - B;
+        bool top = pt.y < B, bottom = pt.y >= rc.bottom - B;
+        if (top && left) return HTTOPLEFT;
+        if (top && right) return HTTOPRIGHT;
+        if (bottom && left) return HTBOTTOMLEFT;
+        if (bottom && right) return HTBOTTOMRIGHT;
+        if (left) return HTLEFT;
+        if (right) return HTRIGHT;
+        if (top) return HTTOP;
+        if (bottom) return HTBOTTOM;
+        if (pt.y < 32) return HTCAPTION;      // 标题栏区域可拖动
+        return HTCLIENT;
+    }
     case WM_MOUSEMOVE:
         input_.mouse.x = GET_X_LPARAM(lp);
         input_.mouse.y = GET_Y_LPARAM(lp);
@@ -338,10 +367,16 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
     gui_.begin(input_);
     gui_.fill(client, gui_.theme.bg);
 
+    // 自定义标题栏（官方 HandyControl ShowTitle=False + NonClientAreaContent）
+    const int TITLE_H = 32;
+    RECT titlebar{ client.left, client.top, client.right, client.top + TITLE_H };
+    draw_title_bar(titlebar);
+
     // 官方外壳：顶部 Tab 栏（TabControlInLine）+ 全宽内容区
-    RECT tabbar{ client.left, client.top, client.right, client.top + topbar_h_ };
+    RECT tabbar{ client.left, client.top + TITLE_H, client.right,
+                 client.top + TITLE_H + topbar_h_ };
     // 官方窗口 800x600，内容区边距收窄到 10（TaskQueueView 内部仍是 Margin 20 的比例）
-    RECT content{ client.left + 10, client.top + topbar_h_ + 12,
+    RECT content{ client.left + 10, client.top + TITLE_H + topbar_h_ + 12,
                   client.right - 10, client.bottom - 8 };
 
     draw_top_tabs(tabbar);
@@ -434,6 +469,65 @@ void MaaHubWindow::draw_gif_widget(RECT client) {
 // 官方 RootView 用 TabControlInLine：标签在顶部，四个页签
 // （一键长草 / 自动战斗 / 小工具 / 设置）。MaaHub 用同样形态的顶部标签，
 // 页签为：任务队列 / 账号管理 / 核心管理 / 智能规划 / 事件日志 / 设置。
+// 自定义标题栏（官方 NonClientAreaContent）：
+//   居中显示动态窗口标题（官方 UpdateWindowTitle：模拟器 + IP:端口）
+//   右侧：📌 置顶切换 + 最小化 / 最大化 / 关闭
+void MaaHubWindow::draw_title_bar(RECT r) {
+    gui_.fill(r, gui_.theme.card_bg);
+    gui_.fill({ r.left, r.bottom - 1, r.right, r.bottom }, gui_.theme.border);
+
+    // 动态窗口标题（对齐官方 UpdateWindowTitle 的信息）
+    std::wstring title = L"MaaHub";
+    if (page_ == "executor") {
+        mj::Value cur;
+        if (find_executor(selected_exec_, cur)) {
+            std::string lbl = cur.get_str("label", "");
+            std::string conn = cur.get_str("conn", "");
+            std::string addr = cur.get_str("conn_addr", "");
+            if (!lbl.empty()) title = gui::widen(lbl);
+            if (conn == "connected" && !addr.empty()) {
+                title += L" - " + gui::widen(addr);
+            }
+        }
+    }
+    SIZE ts = gui_.text_size(title, gui_.font);
+    int tx = (r.left + r.right - ts.cx) / 2;
+    gui_.text(tx, r.top + (r.bottom - r.top - 18) / 2, title, gui_.theme.text, gui_.font);
+
+    // 右侧按钮：📌 置顶 + 最小化/最大化/关闭（官方 NonClientAreaContent）
+    int bw = 40, bh = r.bottom - r.top - 2;
+    int bx = r.right - 1;
+    const wchar_t* labels[4] = { L"\u00d7", L"\u25a1", L"\u2014", L"\U0001f4cc" };
+    const char* ids[4] = { "tb-close", "tb-max", "tb-min", "tb-pin" };
+    for (int k = 0; k < 4; ++k) {
+        bx -= bw;
+        RECT br{ bx, r.top + 1, bx + bw, r.top + 1 + bh };
+        bool hov = gui_.input().mouse.x >= br.left && gui_.input().mouse.x < br.right
+                && gui_.input().mouse.y >= br.top && gui_.input().mouse.y < br.bottom;
+        COLORREF txt = gui_.theme.dim;
+        if (hov) {
+            gui_.round_rect(br, gui_.theme.hover, gui_.theme.hover, 3);
+            txt = gui_.theme.text;
+        }
+        if (k == 3 && topmost_) txt = gui_.theme.primary;
+        gui_.text(br.left + (bw - gui_.text_size(labels[k], gui_.font).cx) / 2,
+                  br.top + (bh - 18) / 2, labels[k], txt, gui_.font);
+        if (hov && gui_.input().pressed) {
+            if (k == 0) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+            else if (k == 1) {
+                if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+                else ShowWindow(hwnd_, SW_MAXIMIZE);
+            } else if (k == 2) ShowWindow(hwnd_, SW_MINIMIZE);
+            else {
+                topmost_ = !topmost_;
+                SetWindowPos(hwnd_, topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST,
+                             0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+        bx -= 2;
+    }
+}
+
 void MaaHubWindow::draw_top_tabs(RECT r) {
     // 官方 TabControlInLine：headerPanel 背景透明（继承 RegionBrushOpacity25）
     gui_.fill(r, gui_.theme.card_bg);

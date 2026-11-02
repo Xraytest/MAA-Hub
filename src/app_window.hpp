@@ -56,6 +56,9 @@ private:
     void render(RECT client);
 
     // 页面
+    // 自定义标题栏（官方 NonClientAreaContent）
+    void draw_title_bar(RECT r);
+    bool topmost_ = false;
     void draw_top_tabs(RECT r);
     // 右下角 GIF 挂件（官方 GifImage：100x100、可拖拽、右键切换）
     void draw_gif_widget(RECT client);
