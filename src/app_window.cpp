@@ -2494,7 +2494,7 @@ void MaaHubWindow::action_pull_latest(const std::string& kind) {
 
 // ================================================================ 设置页
 void MaaHubWindow::page_settings(RECT content) {
-    // 首次进入从快照回填
+    // 首次进入从快照回填（官方 SettingsView 多组设置）
     if (!settings_loaded_) {
         mj::Value snap;
         {
@@ -2519,95 +2519,117 @@ void MaaHubWindow::page_settings(RECT content) {
     }
 
     int y = content.top;
+    auto group = [&](const wchar_t* title) {
+        RECT card{ content.left, y, content.right, y + 28 };
+        gui_.round_rect(card, gui_.theme.primary, gui_.theme.primary, 4);
+        gui_.text(card.left + 12, card.top + 5, title, RGB(255, 255, 255), gui_.font_bold);
+        y += 34;
+    };
+    auto note = [&](const std::wstring& text) {
+        RECT save = gui_.clip();
+        gui_.text_clipped({ content.left, y, content.right, y + 34 },
+                          text, gui_.theme.dim, gui_.font_small);
+        (void)save;
+        y += 36;
+    };
 
-    // ---- 更新代理 ----
-    RECT p1{ content.left, y, content.right, y + 150 };
-    gui_.panel(p1, L"🌐 更新代理（用于更新检查与核心拉取）");
-    int yy = p1.top + 40;
+    // ---------------- 更新与代理 ----------------
+    group(L"\u66f4\u65b0\u4e0e\u4ee3\u7406");
     int mi = gui_.option_strip("set-proxy-mode",
-                               { p1.left + 18, yy, p1.left + 330, yy + 26 },
-                               { L"不使用代理", L"HTTP 代理", L"SOCKS5 代理" }, set_proxy_mode_);
+                               { content.left, y, content.left + 330, y + 26 },
+                               { L"\u4e0d\u4f7f\u7528\u4ee3\u7406", L"HTTP \u4ee3\u7406",
+                                 L"SOCKS5 \u4ee3\u7406" }, set_proxy_mode_);
     if (mi >= 0) set_proxy_mode_ = mi;
-    yy += 34;
-    gui_.text(p1.left + 18, yy + 4, L"地址", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-proxy-host", { p1.left + 56, yy, p1.left + 300, yy + 26 },
-                    set_proxy_host_, L"127.0.0.1");
-    gui_.text(p1.left + 316, yy + 4, L"端口", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-proxy-port", { p1.left + 352, yy, p1.left + 452, yy + 26 },
-                    set_proxy_port_, L"7890");
-    yy += 34;
-    gui_.text(p1.left + 18, yy + 4, L"用户名", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-proxy-user", { p1.left + 66, yy, p1.left + 280, yy + 26 },
-                    set_proxy_user_, L"可选");
-    gui_.text(p1.left + 296, yy + 4, L"密码", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-proxy-pass", { p1.left + 334, yy, p1.left + 548, yy + 26 },
-                    set_proxy_pass_, L"可选");
-    {
-        RECT save = gui_.clip();
-        gui_.text_clipped({ p1.left + 570, yy + 4, p1.right - 16, yy + 24 },
-                          L"HTTP 代理形如 127.0.0.1:7890（Clash/v2ray 混合端口）",
-                          gui_.theme.dim, gui_.font_small);
-        (void)save;
+    y += 32;
+    if (set_proxy_mode_ != 0) {
+        gui_.text(content.left, y + 4, L"\u5730\u5740", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-proxy-host", { content.left + 40, y, content.left + 240, y + 26 },
+                        set_proxy_host_, L"127.0.0.1");
+        gui_.text(content.left + 250, y + 4, L"\u7aef\u53e3", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-proxy-port", { content.left + 290, y, content.left + 390, y + 26 },
+                        set_proxy_port_, L"7890");
+        y += 30;
+        gui_.text(content.left, y + 4, L"\u7528\u6237\u540d", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-proxy-user", { content.left + 66, y, content.left + 260, y + 26 },
+                        set_proxy_user_, L"\u53ef\u9009");
+        gui_.text(content.left + 270, y + 4, L"\u5bc6\u7801", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-proxy-pass", { content.left + 310, y, content.left + 500, y + 26 },
+                        set_proxy_pass_, L"\u53ef\u9009");
+        y += 34;
     }
-    y = p1.bottom + 14;
+    gui_.text(content.left, y + 4, L"Mirror\u9171 CDK", gui_.theme.dim, gui_.font_small);
+    gui_.text_input("set-cdk", { content.left + 96, y, content.left + 420, y + 26 },
+                    set_cdk_, L"\u586b\u5199\u540e\u4f18\u5148\u4f7f\u7528 Mirror\u9171 \u4e0b\u8f7d");
+    y += 32;
+    note(L"\u7559\u7a7a\u5219\u6309 GitHub \u2192 gh-proxy \u2192 ghfast \u2192 moeyy \u987a\u5e8f\u56de\u9000");
 
-    // ---- 镜像源 ----
-    RECT p2{ content.left, y, content.right, y + 96 };
-    gui_.panel(p2, L"📡 镜像源");
-    yy = p2.top + 38;
-    gui_.text(p2.left + 18, yy + 4, L"Mirror酱 CDK", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-cdk", { p2.left + 110, yy, p2.left + 420, yy + 26 },
-                    set_cdk_, L"可选，填写后优先使用 Mirror酱 下载");
-    {
-        RECT save = gui_.clip();
-        gui_.text_clipped({ p2.left + 440, yy + 4, p2.right - 16, yy + 24 },
-                          L"留空则按 GitHub → gh-proxy → ghfast → moeyy 顺序回退",
-                          gui_.theme.dim, gui_.font_small);
-        (void)save;
-    }
-    y = p2.bottom + 14;
+    // ---------------- 连接设置 ----------------
+    group(L"\u8fde\u63a5\u8bbe\u7f6e");
+    note(L"\u5b98\u65b9\u5171 24 \u9879\u3002MaaHub \u5df2\u5b9e\u73b0\u5176\u4e2d\u5fc3\u90e8\u5206\uff1a"
+         L"\u81ea\u52a8\u68c0\u6d4b\u8fde\u63a5\u3001\u6bcf\u6b21\u91cd\u65b0\u68c0\u6d4b\u3001\u8fde\u63a5\u914d\u7f6e\u3001\u8fde\u63a5\u5730\u5740\u3001"
+         L"\u622a\u56fe\u65b9\u5f0f\u3001\u9f20\u6807\u8f93\u5165\u3001\u952e\u76d8\u8f93\u5165\u3001\u89e6\u63a7\u6a21\u5f0f\u3002\u8fd9\u4e9b\u9879\u76ee\u524d"
+         L"\u5728\u5404\u6267\u884c\u5668\u7684\u300c\u5f00\u59cb\u5524\u9192\u300d\u4efb\u52a1\u9762\u677f\u4e2d\u914d\u7f6e\uff08\u6bcf\u6267\u884c\u5668\u72ec\u7acb\uff09\u3002"
+         L"\u5176\u4f59\u4e3a\u6a21\u62df\u5668\u4e13\u5c5e\uff08ADB \u66ff\u6362\u3001\u7a97\u53e3\u6062\u590d\u7b49\uff09\u3002");
 
-    // ---- LLM ----
-    RECT p3{ content.left, y, content.right, y + 150 };
-    gui_.panel(p3, L"🧠 LLM 规划（OpenAI 兼容接口）");
-    yy = p3.top + 38;
-    gui_.checkbox("set-llm-enabled", { p3.left + 18, yy, p3.left + 200, yy + 24 },
-                  L"启用 LLM 规划", set_llm_enabled_);
-    yy += 32;
-    gui_.text(p3.left + 18, yy + 4, L"Base URL", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-llm-url", { p3.left + 96, yy, p3.left + 420, yy + 26 },
-                    set_llm_url_, L"https://api.deepseek.com");
-    gui_.text(p3.left + 436, yy + 4, L"模型", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-llm-model", { p3.left + 480, yy, p3.left + 680, yy + 26 },
-                    set_llm_model_, L"deepseek-chat");
-    yy += 32;
-    gui_.text(p3.left + 18, yy + 4, L"API Key", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-llm-key", { p3.left + 96, yy, p3.left + 480, yy + 26 },
-                    set_llm_key_, L"sk-...");
+    // ---------------- 界面设置 ----------------
+    group(L"\u754c\u9762\u8bbe\u7f6e");
     {
-        RECT save = gui_.clip();
-        gui_.text_clipped({ p3.left + 500, yy + 4, p3.right - 16, yy + 24 },
-                          L"未配置或不可达时自动回退启发式规划",
-                          gui_.theme.dim, gui_.font_small);
-        (void)save;
+        CheckState gs = gif_hidden_ ? CheckState::Off : CheckState::On;
+        gui_.checkbox3("set-gif-widget", { content.left, y, content.left + 280, y + 24 },
+                       L"\u663e\u793a\u53f3\u4e0b\u89d2\u6302\u4ef6", gs);
+        gif_hidden_ = (gs != CheckState::On);
+        y += 30;
     }
-    y = p3.bottom + 18;
+    note(L"\u5b98\u65b9\u8fd8\u652f\u6301\u754c\u9762\u4e3b\u9898\u3001\u8fc7\u6e21\u52a8\u753b\u3001\u5e72\u5458\u540d\u79f0\u8bed\u8a00\u3001"
+         L"\u65e5\u5fd7\u5361\u7247\u6837\u5f0f\u3001\u6258\u76d8\u56fe\u6807\u7b49\uff08MaaHub \u672a\u5b9e\u73b0\uff09");
 
-    // ---- 保存 ----
-    RECT sb{ content.left, y, content.left + 160, y + 34 };
-    if (gui_.button("set-save", sb, L"💾 保存设置", 1)) {
-        action_save_settings();
+    // ---------------- 启动设置 ----------------
+    group(L"\u542f\u52a8\u8bbe\u7f6e");
+    note(L"\u5b98\u65b9\u5171 8 \u9879\uff1a\u5f00\u673a\u81ea\u52a8\u542f\u52a8 MAA\u3001\u542f\u52a8\u540e\u76f4\u63a5\u6700\u5c0f\u5316\u3001"
+         L"\u542f\u52a8\u540e\u76f4\u63a5\u8fd0\u884c\u3001\u81ea\u52a8\u5f00\u542f\u6a21\u62df\u5668 / PC \u5ba2\u6237\u7aef\u3002"
+         L"MaaHub \u672a\u5b9e\u73b0\uff08\u4e0d\u5199\u6ce8\u518c\u8868\u3001\u4e0d\u63a5\u7ba1\u6a21\u62df\u5668\u8fdb\u7a0b\uff09\u3002");
+
+    // ---------------- 智能规划（LLM）----------------
+    group(L"\u667a\u80fd\u89c4\u5212\uff08LLM\uff09");
+    {
+        CheckState es = set_llm_enabled_ ? CheckState::On : CheckState::Off;
+        gui_.checkbox3("set-llm-enabled", { content.left, y, content.left + 240, y + 24 },
+                       L"\u542f\u7528 LLM \u89c4\u5212", es);
+        set_llm_enabled_ = (es == CheckState::On);
+        y += 28;
+        gui_.text(content.left, y + 4, L"Base URL", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-llm-base", { content.left + 74, y, content.left + 320, y + 26 },
+                        set_llm_url_, L"https://api.deepseek.com");
+        gui_.text(content.left + 330, y + 4, L"\u6a21\u578b", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-llm-model", { content.left + 372, y, content.left + 500, y + 26 },
+                        set_llm_model_, L"deepseek-chat");
+        y += 30;
+        gui_.text(content.left, y + 4, L"API Key", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-llm-key", { content.left + 66, y, content.left + 460, y + 26 },
+                        set_llm_key_, L"sk-...");
+        y += 30;
+        note(L"\u672a\u914d\u7f6e\u6216\u4e0d\u53ef\u8fbe\u65f6\u81ea\u52a8\u9000\u56de\u53d1\u5f0f\u89c4\u5212");
     }
-    if (!core_msg_.empty()) {
-        RECT save = gui_.clip();
-        gui_.text_clipped({ content.left + 180, y + 8, content.right, y + 30 },
-                          gui::widen(core_msg_),
-                          core_msg_.find("失败") != std::string::npos
-                              ? gui_.theme.err : gui_.theme.ok,
-                          gui_.font);
-        (void)save;
+
+    // ---------------- 保存 ----------------
+    {
+        RECT sb{ content.left, y, content.left + 140, y + 30 };
+        if (gui_.button("set-save", sb, L"\u4fdd\u5b58\u8bbe\u7f6e", 1)) {
+            action_save_settings();
+        }
+        if (!core_msg_.empty()) {
+            RECT save = gui_.clip();
+            gui_.text_clipped({ content.left + 156, y + 6, content.right, y + 28 },
+                              gui::widen(core_msg_),
+                              core_msg_.find("\u5931\u8d25") != std::string::npos
+                                  ? gui_.theme.err : gui_.theme.ok,
+                              gui_.font);
+            (void)save;
+        }
     }
 }
+
+
 
 void MaaHubWindow::action_save_settings() {
     int port = 7890;
