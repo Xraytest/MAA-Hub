@@ -592,7 +592,9 @@ public:
 
     // ------------------------------------------------------------ 卡片
     void panel(RECT r, const std::wstring& title = L"") {
-        round_rect(r, theme.panel, theme.border, 10);
+        // 官方 RegionBrushOpacity25（约 #FBFBFB）+ CornerRadius=4
+        // （原为纯白 #FFFFFF + 圆角 10，形成"大白板"观感）
+        round_rect(r, theme.card_bg, theme.border, 4);
         if (!title.empty()) {
             RECT save = clip_;
             text(r.left + 18, r.top + 14, title, theme.text, font_bold);
