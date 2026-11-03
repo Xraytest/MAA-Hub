@@ -2096,7 +2096,7 @@ void MaaHubWindow::page_executor(RECT content) {
 // ================================================================ 欢迎页
 void MaaHubWindow::page_welcome(RECT content) {
     RECT panel{ content.left + 60, content.top + 40, content.right - 60, content.bottom - 40 };
-    gui_.panel(panel, L"🎮 欢迎使用 MaaHub");
+    gui_.panel(panel, L"\u6b22\u8fce\u4f7f\u7528 MaaHub");
     int y = panel.top + 56;
     const wchar_t* lines[] = {
         L"MaaHub 统一管理 MAA（明日方舟）与 MaaEnd（终末地）实例。",
@@ -2310,14 +2310,15 @@ void MaaHubWindow::page_copilot(RECT content) {
     gui_.text(rx, y + 4, L"\u8bfb\u53d6\u526a\u8d34\u677f", gui_.theme.dim, gui_.font_small);
     {
         CheckState st = CheckState::Off;
-        gui_.checkbox3("copilot-clip", { rx + 80, y, rx + 200, y + 22 },
+        // 复选框矩形给足宽度，避免文字换行溢出到下方卡片
+        gui_.checkbox3("copilot-clip", { rx + 80, y, rx + rw, y + 22 },
                        L"\u81ea\u52a8\u8bc6\u522b\u4f5c\u4e1a/\u4f5c\u4e1a\u96c6", st);
     }
-    y += 32;
+    y += 34;
 
     // ---- 作业选项（官方 CopilotView 开关组）----
     {
-        RECT card{ rx, y, rx + rw, y + 190 };
+        RECT card{ rx, y, rx + rw, y + 210 };
         gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
         int cy = card.top + 12;
         gui_.text(card.left + 12, cy, L"\u4f5c\u4e1a\u9009\u9879", gui_.theme.dim,
