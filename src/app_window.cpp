@@ -1915,6 +1915,19 @@ void MaaHubWindow::page_executor(RECT content) {
               daily_done ? gui_.theme.ok : gui_.theme.warn);
     }
 
+    // 官方底部控制区第二行：「自动重载资源」复选框
+    // （EnableAutoReload，可见性由 CanShowAutoReload 控制；MaaHub 连接后可用）
+    {
+        bool can_show = (conn == "connected");
+        if (can_show) {
+            CheckState st = auto_reload_ ? CheckState::On : CheckState::Off;
+            RECT ar{ right_col.left + 4, frame.bottom - BAR_H + 8,
+                     right_col.left + 4 + 160, frame.bottom - BAR_H + 8 + 22 };
+            gui_.checkbox3("auto-reload", ar, L"\u81ea\u52a8\u91cd\u8f7d\u8d44\u6e90", st);
+            auto_reload_ = (st == CheckState::On);
+        }
+    }
+
     // 中列底部：常规设置 / 高级设置 切换标签（官方 Grid.Row=1 ButtonGroup Width=220）
     {
         bool has_params = false;
@@ -1936,6 +1949,18 @@ void MaaHubWindow::page_executor(RECT content) {
             if (gh == 0) advanced_view_ = false;
             if (gh == 1) advanced_view_ = true;
         }
+    }
+
+    // 官方中列 Grid.Row=2（底部，位于「常规/高级设置」按钮组下方）：
+    //   今日开放关卡提示（StagesOfTodayInlines，Width=200）
+    {
+        int ty = RC_BOTTOM - 14;
+        RECT stage_box{ right_col.left + 4, ty - 16, right_col.left + 4 + 220, ty + 2 };
+        RECT save = gui_.clip();
+        gui_.text_clipped(stage_box,
+                          L"\u4eca\u65e5\u5f00\u653e\u5173\u5361\uff1a\u5173\u95ed\u4e2d",
+                          gui_.theme.faint, gui_.font_small);
+        (void)save;
     }
 
     // ---------------- 右列：日志区（官方 Column=2）----------------
