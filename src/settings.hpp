@@ -21,6 +21,15 @@ struct AppSettings {
     std::string llm_api_key;
     std::string llm_model = "deepseek-chat";
     bool llm_enabled = false;
+    // 启动设置（官方 StartSettings）
+    bool auto_start = false;          // 开机自动启动
+    bool start_minimized = false;     // 启动后直接最小化
+    bool start_run = false;           // 启动后直接运行
+    // 更新设置（官方 VersionUpdateSettings）
+    bool update_check_on_start = true;   // 启动时检查更新
+    bool update_auto_download = false;   // 自动下载更新包
+    bool update_auto_install = false;    // 自动安装更新包
+    bool update_force_github = false;    // 强制使用 GitHub
 
     mj::Value to_json() const {
         mj::Value v = mj::Value::object();
@@ -38,6 +47,16 @@ struct AppSettings {
         l.set("api_key", llm_api_key);
         l.set("model", llm_model);
         v.set("llm", std::move(l));
+        // 启动 / 更新设置
+        mj::Value st = mj::Value::object();
+        st.set("auto_start", auto_start);
+        st.set("start_minimized", start_minimized);
+        st.set("start_run", start_run);
+        st.set("update_check_on_start", update_check_on_start);
+        st.set("update_auto_download", update_auto_download);
+        st.set("update_auto_install", update_auto_install);
+        st.set("update_force_github", update_force_github);
+        v.set("startup_update", std::move(st));
         return v;
     }
 
@@ -56,6 +75,15 @@ struct AppSettings {
             s.llm_base_url = l->get_str("base_url", s.llm_base_url);
             s.llm_api_key = l->get_str("api_key", "");
             s.llm_model = l->get_str("model", s.llm_model);
+        }
+        if (auto* su = v.find("startup_update")) {
+            s.auto_start = su->get_bool("auto_start", false);
+            s.start_minimized = su->get_bool("start_minimized", false);
+            s.start_run = su->get_bool("start_run", false);
+            s.update_check_on_start = su->get_bool("update_check_on_start", true);
+            s.update_auto_download = su->get_bool("update_auto_download", false);
+            s.update_auto_install = su->get_bool("update_auto_install", false);
+            s.update_force_github = su->get_bool("update_force_github", false);
         }
         return s;
     }
