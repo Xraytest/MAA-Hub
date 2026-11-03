@@ -59,6 +59,7 @@ private:
     // 自定义标题栏（官方 NonClientAreaContent）
     void draw_title_bar(RECT r);
     bool topmost_ = false;
+    bool auto_reload_ = false;   // 官方 EnableAutoReload（自动重载资源）
     // 任务切换过渡动画（官方 TransitioningContentControl 简化实现）
     std::string panel_anim_task_;      // 正在动画的任务
     std::string panel_anim_exec_;      // 动画所属执行器
