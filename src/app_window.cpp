@@ -3257,13 +3257,56 @@ void MaaHubWindow::page_settings(RECT content) {
     note(L"\u5b98\u65b9\u8fd8\u652f\u6301\u754c\u9762\u4e3b\u9898\u3001\u8fc7\u6e21\u52a8\u753b\u3001\u5e72\u5458\u540d\u79f0\u8bed\u8a00\u3001"
          L"\u65e5\u5fd7\u5361\u7247\u6837\u5f0f\u3001\u6258\u76d8\u56fe\u6807\u7b49\uff08MaaHub \u672a\u5b9e\u73b0\uff09");
 
-    // ---------------- 启动设置 ----------------
+            // ---------------- 启动设置（官方 9 项，MaaHub 实现可行子集）----------------
     group(L"\u542f\u52a8\u8bbe\u7f6e");
-    note(L"\u5b98\u65b9\u5171 8 \u9879\uff1a\u5f00\u673a\u81ea\u52a8\u542f\u52a8 MAA\u3001\u542f\u52a8\u540e\u76f4\u63a5\u6700\u5c0f\u5316\u3001"
-         L"\u542f\u52a8\u540e\u76f4\u63a5\u8fd0\u884c\u3001\u81ea\u52a8\u5f00\u542f\u6a21\u62df\u5668 / PC \u5ba2\u6237\u7aef\u3002"
-         L"MaaHub \u672a\u5b9e\u73b0\uff08\u4e0d\u5199\u6ce8\u518c\u8868\u3001\u4e0d\u63a5\u7ba1\u6a21\u62df\u5668\u8fdb\u7a0b\uff09\u3002");
+    {
+        AppSettings s = hub_->settings().get();
+        set_auto_start_   = s.auto_start;
+        set_start_min_    = s.start_minimized;
+        set_start_run_    = s.start_run;
+        struct U { const char* key; const wchar_t* label; bool* val; };
+        const U us[] = {
+            { "set-auto-start", L"\u5f00\u673a\u81ea\u52a8\u542f\u52a8 MaaHub", &set_auto_start_ },
+            { "set-start-min",  L"\u542f\u52a8\u540e\u76f4\u63a5\u6700\u5c0f\u5316", &set_start_min_ },
+            { "set-start-run",  L"\u542f\u52a8\u540e\u76f4\u63a5\u8fd0\u884c", &set_start_run_ },
+        };
+        for (auto& u : us) {
+            CheckState st = *u.val ? CheckState::On : CheckState::Off;
+            gui_.checkbox3(u.key, { content.left, y, content.left + 300, y + 22 },
+                           u.label, st);
+            *u.val = (st == CheckState::On);
+            y += 28;
+        }
+        note(L"\u5b98\u65b9\u8fd8\u6709\u201c\u81ea\u52a8\u5f00\u542f\u6a21\u62df\u5668 / PC \u5ba2\u6237\u7aef\u201d\u4e0e\u201c\u9644\u52a0\u547d\u4ee4\u201d\uff0cMaaHub \u672a\u5b9e\u73b0\u3002");
+    }
 
-    // ---------------- 智能规划（LLM）----------------
+    // ---------------- 更新设置（官方 9 项，MaaHub 实现核心子集）----------------
+    group(L"\u66f4\u65b0\u8bbe\u7f6e");
+    {
+        AppSettings s = hub_->settings().get();
+        set_upd_check_   = s.update_check_on_start;
+        set_upd_dl_      = s.update_auto_download;
+        set_upd_install_ = s.update_auto_install;
+        set_upd_gh_      = s.update_force_github;
+        struct U { const char* key; const wchar_t* label; bool* val; };
+        const U us[] = {
+            { "set-upd-check",   L"\u542f\u52a8\u65f6\u68c0\u67e5\u66f4\u65b0", &set_upd_check_ },
+            { "set-upd-dl",      L"\u81ea\u52a8\u4e0b\u8f7d\u66f4\u65b0\u5305", &set_upd_dl_ },
+            { "set-upd-install", L"\u81ea\u52a8\u5b89\u88c5\u66f4\u65b0\u5305", &set_upd_install_ },
+            { "set-upd-gh",      L"\u5f3a\u5236\u4f7f\u7528 GitHub", &set_upd_gh_ },
+        };
+        for (auto& u : us) {
+            CheckState st = *u.val ? CheckState::On : CheckState::Off;
+            gui_.checkbox3(u.key, { content.left, y, content.left + 300, y + 22 },
+                           u.label, st);
+            *u.val = (st == CheckState::On);
+            y += 28;
+        }
+        note(L"\u6838\u5fc3\u62c9\u53d6\u4e0e\u66f4\u65b0\u5728\u201c\u6838\u5fc3\u7ba1\u7406\u201d\u4e2d\u6267\u884c\uff1b\u5b98\u65b9\u8fd8\u6709\u5b9a\u65f6\u68c0\u67e5\u3001\u66f4\u65b0\u65e5\u5fd7\u3001\u8d44\u6e90\u66f4\u65b0\u7b49\u3002");
+    }
+
+
+// ---------------- 智能规划（LLM）----------------
     group(L"\u667a\u80fd\u89c4\u5212\uff08LLM\uff09");
     {
         CheckState es = set_llm_enabled_ ? CheckState::On : CheckState::Off;
@@ -3316,7 +3359,12 @@ void MaaHubWindow::action_save_settings() {
     std::string url = set_llm_url_, key = set_llm_key_, model = set_llm_model_;
     std::string host = set_proxy_host_, user = set_proxy_user_, pass = set_proxy_pass_;
     std::string cdk = set_cdk_;
-    post_action([this, mode, host, port, user, pass, cdk, enabled, url, key, model] {
+    bool auto_start = set_auto_start_, start_min = set_start_min_, start_run = set_start_run_;
+    bool upd_check = set_upd_check_, upd_dl = set_upd_dl_,
+         upd_install = set_upd_install_, upd_gh = set_upd_gh_;
+    post_action([this, mode, host, port, user, pass, cdk, enabled, url, key, model,
+                 auto_start, start_min, start_run,
+                 upd_check, upd_dl, upd_install, upd_gh] {
         hub_->settings().update([&](AppSettings& s) {
             s.proxy_mode = mode;
             s.proxy_host = host;
@@ -3328,6 +3376,13 @@ void MaaHubWindow::action_save_settings() {
             s.llm_base_url = url;
             s.llm_api_key = key;
             s.llm_model = model;
+            s.auto_start = auto_start;
+            s.start_minimized = start_min;
+            s.start_run = start_run;
+            s.update_check_on_start = upd_check;
+            s.update_auto_download = upd_dl;
+            s.update_auto_install = upd_install;
+            s.update_force_github = upd_gh;
         });
         set_notice("设置已保存");
     }, "保存设置");

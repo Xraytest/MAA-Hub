@@ -203,6 +203,15 @@ private:
     std::string set_llm_url_ = "https://api.deepseek.com";
     std::string set_llm_key_, set_llm_model_ = "deepseek-chat";
     bool set_llm_enabled_ = false;
+    // 启动设置（官方 StartSettings）
+    bool set_auto_start_ = false;
+    bool set_start_min_ = false;
+    bool set_start_run_ = false;
+    // 更新设置（官方 VersionUpdateSettings）
+    bool set_upd_check_ = true;
+    bool set_upd_dl_ = false;
+    bool set_upd_install_ = false;
+    bool set_upd_gh_ = false;
     bool settings_loaded_ = false;
     // 规划
     int planner_sel_ = 0;

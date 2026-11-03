@@ -141,12 +141,14 @@ int main(int argc, char** argv) {
     bool show_ctx_menu = false;
     std::string ctx_menu_task;
     bool dump_render = false;
+    bool settings_dump = false;
     std::string dump_render_path;
     std::string dump_page;
     std::string dump_task;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--check") check_only = true;
+        else if (a == "--settings-dump") settings_dump = true;
         else if (a == "--self-test") self_test = true;
         else if (a == "--startup-bench") startup_bench = true;
         else if (a == "--offscreen") offscreen = true;
@@ -253,6 +255,15 @@ int main(int argc, char** argv) {
     }
 
     // ---------------- 干跑自检（控制台） ----------------
+    if (settings_dump) {
+        // 加载 settings.json -> 规范化输出（验证 from_json/to_json 往返）
+        std::string sdir = util::exe_dir() + "\\state";
+        hub::SettingsStore store(sdir);
+        hub::AppSettings st = store.get();
+        printf("%s\n", mj::Value::dump_pretty(st.to_json()).c_str());
+        return 0;
+    }
+
     if (check_only) {
         Hub hub(config);
         printf("== MaaHub 自检 ==\n");
