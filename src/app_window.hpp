@@ -59,6 +59,12 @@ private:
     // 自定义标题栏（官方 NonClientAreaContent）
     void draw_title_bar(RECT r);
     bool topmost_ = false;
+    // 任务切换过渡动画（官方 TransitioningContentControl 简化实现）
+    std::string panel_anim_task_;      // 正在动画的任务
+    std::string panel_anim_exec_;      // 动画所属执行器
+    double panel_anim_t0_ = 0;         // 动画开始时间（秒）
+    int panel_anim_dir_ = 1;           // 1=向下进入, -1=向上进入
+    static constexpr double PANEL_ANIM_MS = 140.0;
     void draw_top_tabs(RECT r);
     // 右下角 GIF 挂件（官方 GifImage：100x100、可拖拽、右键切换）
     void draw_gif_widget(RECT client);
