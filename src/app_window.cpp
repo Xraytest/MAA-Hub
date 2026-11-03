@@ -82,6 +82,26 @@ bool MaaHubWindow::create() {
     if (!hwnd_) return false;
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, (LONG_PTR)this);
 
+    // 应用界面主题（官方 界面设置-界面主题：light/dark/system）
+    {
+        std::string tm = hub_->settings().get().theme;
+        bool dark = false;
+        if (tm == "dark") dark = true;
+        else if (tm == "system") {
+            // 跟随系统：读注册表 AppsUseLightTheme
+            HKEY hk = nullptr;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                    0, KEY_READ, &hk) == ERROR_SUCCESS) {
+                DWORD v = 1, sz = sizeof(v);
+                if (RegQueryValueExW(hk, L"AppsUseLightTheme", nullptr, nullptr,
+                        (LPBYTE)&v, &sz) == ERROR_SUCCESS)
+                    dark = (v == 0);
+                RegCloseKey(hk);
+            }
+        }
+        gui_.set_theme_mode(dark);
+    }
     gui_.init_fonts();
     if (offscreen_) {
         // 移到屏幕外并保持隐藏：窗口始终不可见，仅供离屏渲染
@@ -3181,6 +3201,7 @@ void MaaHubWindow::page_settings(RECT content) {
             set_llm_url_ = st.llm_base_url;
             set_llm_key_ = st.llm_api_key;
             set_llm_model_ = st.llm_model;
+            set_theme_ = st.theme;
         }
         settings_loaded_ = true;
     }
@@ -3247,6 +3268,30 @@ void MaaHubWindow::page_settings(RECT content) {
 
     // ---------------- 界面设置 ----------------
     group(L"\u754c\u9762\u8bbe\u7f6e");
+    {
+        // 官方 界面设置-界面主题（light/dark/system）
+        int cur = set_theme_ == "dark" ? 1 : (set_theme_ == "system" ? 2 : 0);
+        int hit = gui_.option_strip("set-theme",
+                { content.left, y, content.left + 360, y + 26 },
+                { L"\u4eae\u8272", L"\u6697\u8272", L"\u8ddf\u968f\u7cfb\u7edf" }, cur);
+        if (hit >= 0) {
+            set_theme_ = hit == 1 ? "dark" : hit == 2 ? "system" : "light";
+            bool dark = (set_theme_ == "dark");
+            if (set_theme_ == "system") {
+                HKEY hk = nullptr;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                        0, KEY_READ, &hk) == ERROR_SUCCESS) {
+                    DWORD v = 1, sz = sizeof(v);
+                    if (RegQueryValueExW(hk, L"AppsUseLightTheme", nullptr, nullptr,
+                            (LPBYTE)&v, &sz) == ERROR_SUCCESS) dark = (v == 0);
+                    RegCloseKey(hk);
+                }
+            }
+            gui_.set_theme_mode(dark);
+        }
+        y += 32;
+    }
     {
         CheckState gs = gif_hidden_ ? CheckState::Off : CheckState::On;
         gui_.checkbox3("set-gif-widget", { content.left, y, content.left + 280, y + 24 },
@@ -3359,10 +3404,11 @@ void MaaHubWindow::action_save_settings() {
     std::string url = set_llm_url_, key = set_llm_key_, model = set_llm_model_;
     std::string host = set_proxy_host_, user = set_proxy_user_, pass = set_proxy_pass_;
     std::string cdk = set_cdk_;
+    std::string theme = set_theme_;
     bool auto_start = set_auto_start_, start_min = set_start_min_, start_run = set_start_run_;
     bool upd_check = set_upd_check_, upd_dl = set_upd_dl_,
          upd_install = set_upd_install_, upd_gh = set_upd_gh_;
-    post_action([this, mode, host, port, user, pass, cdk, enabled, url, key, model,
+    post_action([this, mode, host, port, user, pass, cdk, enabled, url, key, model, theme,
                  auto_start, start_min, start_run,
                  upd_check, upd_dl, upd_install, upd_gh] {
         hub_->settings().update([&](AppSettings& s) {
@@ -3376,6 +3422,7 @@ void MaaHubWindow::action_save_settings() {
             s.llm_base_url = url;
             s.llm_api_key = key;
             s.llm_model = model;
+            s.theme = theme;
             s.auto_start = auto_start;
             s.start_minimized = start_min;
             s.start_run = start_run;

@@ -204,6 +204,7 @@ private:
     std::string set_llm_key_, set_llm_model_ = "deepseek-chat";
     bool set_llm_enabled_ = false;
     // 启动设置（官方 StartSettings）
+    std::string set_theme_ = "light";   // 界面主题 light|dark|system
     bool set_auto_start_ = false;
     bool set_start_min_ = false;
     bool set_start_run_ = false;

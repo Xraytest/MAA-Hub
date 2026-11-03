@@ -61,6 +61,42 @@ struct Theme {
     //   Background=RegionBrushOpacity25(#FBFBFB)，选中态背景不变（无高亮），
     //   IsMouseOver=MouseOverRegionBrushOpacity75(约#FAFAFA)
     COLORREF item_bg = RGB(0xFB, 0xFB, 0xFB);
+
+    // ---- 亮/暗主题（官方 Res/Themes/Dark.xaml）----
+    bool dark = false;
+
+    // 官方 Dark.xaml 权威值：
+    //   RegionBrush #1C1C1C、PrimaryTextBrush #E6E6E6、PrimaryBrush #326cf3、
+    //   MouseOverRegionBrush #2B2B30、RegionBrushOpacity50 #7F1C1C1C
+    // 无 alpha 合成能力，Opacity* 折算为等效实色（卡片略亮于背景，靠边框分层）
+    static Theme make_dark() {
+        Theme t;
+        t.dark = true;
+        t.bg             = RGB(0x1C, 0x1C, 0x1C);   // RegionBrush（官方）
+        t.panel          = RGB(0x23, 0x23, 0x26);
+        t.card_bg        = RGB(0x23, 0x23, 0x26);   // RegionBrushOpacity25 等效
+        t.card_bg_soft   = RGB(0x1F, 0x1F, 0x22);
+        t.input_bg       = RGB(0x23, 0x23, 0x26);
+        t.checkbox_bg    = RGB(0x2E, 0x2E, 0x33);   // RegionBrushOpacity50 等效
+        t.item_bg        = RGB(0x23, 0x23, 0x26);
+        t.item_hover     = RGB(0x2B, 0x2B, 0x30);   // MouseOverRegionBrush（官方）
+        t.hover          = RGB(0x2B, 0x2B, 0x30);
+        t.row_alt        = RGB(0x1F, 0x1F, 0x22);
+        t.border         = RGB(0x3E, 0x3E, 0x42);
+        t.text           = RGB(0xE6, 0xE6, 0xE6);   // PrimaryTextBrush（官方）
+        t.dim            = RGB(0x9E, 0x9E, 0x9E);   // SecondaryText 等效
+        t.faint          = RGB(0x6B, 0x6B, 0x6B);   // ThirdlyText 等效
+        t.primary        = RGB(0x32, 0x6C, 0xF3);   // PrimaryBrush（官方，亮暗同色）
+        t.primary_dark   = RGB(0x2A, 0x5C, 0xD6);
+        t.primary_light  = RGB(0x1E, 0x2A, 0x40);
+        t.ok_light       = RGB(0x14, 0x28, 0x1A);
+        t.warn_light     = RGB(0x2A, 0x24, 0x12);
+        t.err_light      = RGB(0x2A, 0x16, 0x18);
+        return t;
+    }
+
+    // 切换主题（dark=false 回到默认亮色）
+    void set_dark(bool d) { *this = d ? make_dark() : Theme{}; }
     COLORREF item_hover = RGB(0xFA, 0xFA, 0xFA);
     COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）
 };
@@ -789,6 +825,9 @@ public:
     RECT clip() const { return clip_; }
 
     // ------------------------------------------------------------ 渲染目标
+    // 切换亮/暗主题（官方界面主题设置；影响所有控件配色）
+    void set_theme_mode(bool dark) { theme.set_dark(dark); }
+
     void set_dc(HDC dc, RECT client) {
         dc_ = dc;
         clip_ = client;

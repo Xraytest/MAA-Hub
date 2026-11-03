@@ -30,6 +30,8 @@ struct AppSettings {
     bool update_auto_download = false;   // 自动下载更新包
     bool update_auto_install = false;    // 自动安装更新包
     bool update_force_github = false;    // 强制使用 GitHub
+    // 界面主题（官方 GuiSettings）：light | dark | system
+    std::string theme = "light";
 
     mj::Value to_json() const {
         mj::Value v = mj::Value::object();
@@ -57,6 +59,7 @@ struct AppSettings {
         st.set("update_auto_install", update_auto_install);
         st.set("update_force_github", update_force_github);
         v.set("startup_update", std::move(st));
+        v.set("theme", theme);
         return v;
     }
 
@@ -85,6 +88,7 @@ struct AppSettings {
             s.update_auto_install = su->get_bool("update_auto_install", false);
             s.update_force_github = su->get_bool("update_force_github", false);
         }
+        s.theme = v.get_str("theme", "light");
         return s;
     }
 
