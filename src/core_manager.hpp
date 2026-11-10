@@ -5,6 +5,7 @@
 // - 解包使用 Windows 自带 tar.exe（支持 zip），零第三方依赖
 #pragma once
 #include <windows.h>
+#include <bcrypt.h>
 #include <winhttp.h>
 #include <shellapi.h>
 
@@ -22,6 +23,7 @@
 namespace hub {
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 struct CoreInfo {
     std::string id;           // core-xxxx
@@ -30,6 +32,7 @@ struct CoreInfo {
     std::string path;         // 程序目录
     std::string version;      // 探测到的版本
     std::string source;       // adopt | download | manual
+    std::string release_tag;  // 来源 release tag（下载安装时记录，版本比较以此为准）
     double created_at = 0;
     double updated_at = 0;
     bool is_default = false;  // 该类型的默认核心（新建执行器时使用）
@@ -42,6 +45,7 @@ struct CoreInfo {
         v.set("path", path);
         v.set("version", version);
         v.set("source", source);
+        v.set("release_tag", release_tag);
         v.set("created_at", created_at);
         v.set("updated_at", updated_at);
         v.set("is_default", is_default);
@@ -55,6 +59,7 @@ struct CoreInfo {
         c.path = v.get_str("path", "");
         c.version = v.get_str("version", "");
         c.source = v.get_str("source", "manual");
+        c.release_tag = v.get_str("release_tag", "");
         c.created_at = v.get_int("created_at", 0);
         c.updated_at = v.get_int("updated_at", 0);
         c.is_default = v.get_bool("is_default", false);
@@ -66,12 +71,20 @@ struct UpdateInfo {
     bool ok = false;
     std::string error;
     std::string kind;            // maa | maaend（由调用方填充）
-    std::string current;
-    std::string latest;
+    std::string current;         // 当前版本（探测值）
+    std::string current_tag;     // 当前核心记录的 release tag（可空）
+    std::string latest;          // 上游版本名（tag_name / Mirror酱 version_name）
+    std::string latest_tag;      // 上游 release tag
     std::string download_url;
+    std::string asset_name;      // 选中的资产文件名
+    long long asset_size = 0;    // 资产字节数（0 = 未知）
+    std::string asset_sha256;    // 上游给出的 sha256（可空，空则不校验）
     std::string source_name;
     std::string release_notes;
     bool has_update = false;
+    // 当前核心没有 tag 且版本口径与上游不同（如 MaaEnd tag=v3.0.0 / interface=5.15.0-beta.1）
+    // 此时无法可靠判定新旧，置位让 UI 提示「口径不一致，建议按上游 tag 安装」
+    bool tag_mismatch = false;
 };
 
 class CoreManager {
@@ -316,53 +329,109 @@ public:
     }
 
     // ---------------------------------------------------------------- 更新检查
-    // current: 当前版本；返回最新版本信息。多源回退。
+    // 对齐 MAA 官方 Update 组：VersionType(stable/beta/nightly) / UpdateSource / GitHubToken
+    // current: 当前版本（探测值）；current_tag: 当前核心记录的 release tag（可空）
     static UpdateInfo check_update(const std::string& kind, const std::string& current,
-                                   const std::string& cdk = "",
+                                   const std::string& current_tag = "",
                                    const AppSettings* settings = nullptr) {
         UpdateInfo ui;
         ui.current = current;
+        ui.current_tag = current_tag;
         std::string repo = kind == "maa"
             ? "MaaAssistantArknights/MaaAssistantArknights"
             : "MaaEnd/MaaEnd";
-        // 源列表：直连 → 镜像 → Mirror酱
+        std::string cdk = settings ? settings->mirrorchyan_cdk : "";
+        std::string ver_type = settings ? settings->update_version_type : "stable";
+        std::string src_pref = settings ? settings->update_source : "auto";
+        std::string gh_token = settings ? settings->github_token : "";
+
+        std::vector<std::pair<std::string, std::string>> headers;
+        if (!gh_token.empty()) headers.push_back({ "Authorization", "Bearer " + gh_token });
+        headers.push_back({ "Accept", "application/vnd.github+json" });
+
+        // stable 用 /releases/latest（GitHub 自动跳过 prerelease）；beta/nightly 用列表过滤
+        std::string gh_path = "/releases/latest";
+        if (ver_type == "beta" || ver_type == "nightly") gh_path = "/releases?per_page=20";
+
         std::vector<std::pair<std::string, std::string>> sources;
-        if (!cdk.empty()) {
+        auto add_mirror = [&]() {
+            if (cdk.empty()) return;
             std::string rid = kind == "maa" ? "MAA" : "MaaEnd";
+            std::string ch = ver_type.empty() ? "stable" : ver_type;
             sources.push_back({ "Mirror酱",
                 "https://mirrorchyan.com/api/resources/" + rid + "/latest?cdk=" + cdk
-                + "&os=win&arch=x64&channel=stable" });
-        }
-        sources.push_back({ "GitHub", "https://api.github.com/repos/" + repo + "/releases/latest" });
-        sources.push_back({ "gh-proxy", "https://gh-proxy.com/https://api.github.com/repos/" + repo + "/releases/latest" });
-        sources.push_back({ "ghfast", "https://ghfast.top/https://api.github.com/repos/" + repo + "/releases/latest" });
-        sources.push_back({ "moeyy", "https://github.moeyy.xyz/https://api.github.com/repos/" + repo + "/releases/latest" });
+                + "&os=win&arch=x64&channel=" + ch });
+        };
+        auto add_github = [&]() {
+            sources.push_back({ "GitHub", "https://api.github.com/repos/" + repo + gh_path });
+            sources.push_back({ "gh-proxy", "https://gh-proxy.com/https://api.github.com/repos/" + repo + gh_path });
+            sources.push_back({ "ghfast", "https://ghfast.top/https://api.github.com/repos/" + repo + gh_path });
+            sources.push_back({ "moeyy", "https://github.moeyy.xyz/https://api.github.com/repos/" + repo + gh_path });
+        };
+        if (src_pref == "mirrorchyan") { add_mirror(); add_github(); }
+        else { add_github(); add_mirror(); }
 
         for (auto& [name, url] : sources) {
-            std::string body = http_get(url, 20000, settings);   // 走用户配置的代理/Mirror酱直连
+            std::string body = http_get(url, 20000, settings, headers);
             if (body.empty()) continue;
             mj::Value v;
             if (!mj::try_parse(body, v)) continue;
-            ui.source_name = name;
-            if (name == "Mirror酱") {
+            bool is_mirror = (name == "Mirror酱");
+            mj::Value rel_storage;
+            mj::Value* rel = nullptr;
+            if (is_mirror) {
                 // {"code":0,"msg":"success","data":{"url":"...","version_name":"v2.36.0"}}
                 if (v.get_int("code", -1) != 0) continue;
                 auto* d = v.find("data");
                 if (!d) continue;
                 ui.latest = d->get_str("version_name", "");
+                ui.latest_tag = ui.latest;
                 ui.download_url = d->get_str("url", "");
+                ui.source_name = name;
             } else {
-                ui.latest = v.get_str("tag_name", "");
-                auto* assets = v.find("assets");
+                if (v.is_array()) {
+                    for (auto& r : v.items()) {
+                        std::string tag = r.get_str("tag_name", "");
+                        std::string lower = tag;
+                        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                        bool pre = r.get_bool("prerelease", false);
+                        bool is_beta = lower.find("beta") != std::string::npos;
+                        bool is_nightly = lower.find("nightly") != std::string::npos
+                                       || lower.find("alpha") != std::string::npos;
+                        bool pick = false;
+                        if (ver_type == "nightly") pick = is_nightly || pre;
+                        else if (ver_type == "beta") pick = is_beta || (pre && !is_nightly);
+                        else pick = !pre;
+                        if (pick) { rel_storage = r; rel = &rel_storage; break; }
+                    }
+                    if (!rel) continue;
+                } else {
+                    rel_storage = v;
+                    rel = &rel_storage;
+                }
+                ui.latest_tag = rel->get_str("tag_name", "");
+                ui.latest = ui.latest_tag;
+                ui.source_name = name;
+                ui.release_notes = rel->get_str("body", "").substr(0, 2000);
+                auto* assets = rel->find("assets");
                 if (assets && assets->is_array()) {
                     for (auto& a : assets->items()) {
                         std::string n = a.get_str("name", "");
                         std::string lower = n;
                         std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                        if (lower.find("win") != std::string::npos
-                            && lower.find("x64") != std::string::npos
+                        // 注意 "x86_64" 不含 "x64" 子串，必须显式枚举；并排除 arm 包
+                        bool is_arm = lower.find("aarch64") != std::string::npos
+                                   || lower.find("arm64") != std::string::npos;
+                        bool is_x64 = lower.find("x86_64") != std::string::npos
+                                   || lower.find("x64") != std::string::npos
+                                   || lower.find("amd64") != std::string::npos;
+                        if (!is_arm && is_x64
+                            && lower.find("win") != std::string::npos
                             && lower.size() > 4 && lower.substr(lower.size() - 4) == ".zip") {
                             ui.download_url = a.get_str("browser_download_url", "");
+                            ui.asset_name = n;
+                            ui.asset_size = a.get_int("size", 0);
+                            ui.asset_sha256 = a.get_str("digest", "");
                             break;
                         }
                     }
@@ -371,18 +440,32 @@ public:
                             std::string n = a.get_str("name", "");
                             std::string lower = n;
                             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                            if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".zip") {
+                            // 回退时同样排除 arm 包，避免在 x64 机器上拉到 aarch64 核心
+                            bool is_arm = lower.find("aarch64") != std::string::npos
+                                       || lower.find("arm64") != std::string::npos;
+                            if (!is_arm
+                                && lower.size() > 4 && lower.substr(lower.size() - 4) == ".zip") {
                                 ui.download_url = a.get_str("browser_download_url", "");
+                                ui.asset_name = n;
+                                ui.asset_size = a.get_int("size", 0);
+                                ui.asset_sha256 = a.get_str("digest", "");
                                 break;
                             }
                         }
                     }
                 }
-                ui.release_notes = v.get_str("body", "").substr(0, 2000);
             }
             if (ui.latest.empty()) continue;
+            if (ui.download_url.empty()) continue;
             ui.ok = true;
-            ui.has_update = normalize_ver(ui.latest) != normalize_ver(current);
+            // 版本比较优先 tag vs tag：MaaEnd 的 release tag(v3.0.0) 与 interface.json 版本
+            // (5.15.0-beta.1) 口径不同，用数字比较会永远判「有更新」
+            if (!current_tag.empty()) {
+                ui.has_update = normalize_ver(ui.latest_tag) != normalize_ver(current_tag);
+            } else {
+                ui.has_update = normalize_ver(ui.latest_tag) != normalize_ver(current);
+                if (ui.has_update) ui.tag_mismatch = true;
+            }
             return ui;
         }
         ui.error = "所有更新源均不可达（GitHub 与镜像均无法连接）";
@@ -390,21 +473,42 @@ public:
     }
 
     // ---------------------------------------------------------------- 拉取核心
-    // 下载 zip → tar 解包 → 定位程序目录 → 登记为新核心
-    // progress: 0~100
+    // 下载 zip → 校验 sha256 → tar 解包 → 定位程序目录 → 登记为新核心（可设为默认）
+    // progress: 0~100；返回核心 id（失败返回空）
+    // installed_version: 输出探测到的版本
+    // already_latest: 输出「同版本已存在，直接复用」标记（不重复下载占盘）
     static std::string pull_core(const std::string& kind, const std::string& url,
                                  const std::string& display_name,
                                  std::atomic<int>* progress = nullptr,
                                  std::string* stage = nullptr,
-                                 const AppSettings* settings = nullptr) {
+                                 const AppSettings* settings = nullptr,
+                                 const std::string& release_tag = "",
+                                 bool set_default = false,
+                                 const std::string& expected_sha256 = "",
+                                 std::string* installed_version = nullptr,
+                                 bool* already_latest = nullptr) {
         auto set_stage = [&](const std::string& s) { if (stage) *stage = s; };
         set_stage("准备下载");
 
         std::string tmp = default_cores_root() + "\\.tmp";
+        remove_tree(tmp);
         util::ensure_dir(tmp);
         std::string zip = tmp + "\\core.zip";
         if (!http_download(url, zip, progress, settings)) {
+            set_stage("下载失败");
             return "";
+        }
+        // 完整性校验：上游给了 sha256 才校验（GitHub release asset digest）
+        if (!expected_sha256.empty()) {
+            set_stage("校验哈希");
+            std::string want = expected_sha256;
+            if (want.rfind("sha256:", 0) == 0) want = want.substr(7);
+            std::transform(want.begin(), want.end(), want.begin(), ::tolower);
+            std::string got = sha256_file(zip);
+            if (got.empty() || got != want) {
+                set_stage(got.empty() ? "哈希计算失败" : "哈希校验失败");
+                return "";
+            }
         }
         set_stage("解压中");
         std::string out_dir = tmp + "\\extract";
@@ -433,18 +537,56 @@ public:
         set_stage("校验中");
         // 在解包目录中查找核心目录（可能在子目录里）
         std::string core_dir = find_core_dir(kind, out_dir);
-        if (core_dir.empty()) return "";
+        if (core_dir.empty()) {
+            set_stage("包内未找到核心目录");
+            return "";
+        }
 
         // 移入 MaaHub 内部 cores 目录：<cores_root>\<kind>-<version>
         CoreManager self(dir_of_state(), default_cores_root());
         std::string version = probe_version(kind, core_dir);
+        if (installed_version) *installed_version = version;
+
+        // 同版本 / 同 tag 已登记 → 直接复用（不重复占盘）
+        std::string reuse_id;
+        {
+            std::lock_guard<std::mutex> lk(self.mtx_);
+            for (auto& x : self.cores_) {
+                if (x.kind != kind) continue;
+                bool same = (!release_tag.empty() && x.release_tag == release_tag)
+                         || (!version.empty() && x.version == version);
+                if (same) { reuse_id = x.id; break; }
+            }
+        }
+        if (!reuse_id.empty()) {
+            // 回填 release_tag：MaaEnd 的 release tag(v3.0.0) 与包内 interface.json
+            // 版本(5.15.0-beta.1) 口径不同，只有记下 tag 才能做 tag-vs-tag 比较，
+            // 否则每次检查都会误报「有更新」。
+            if (!release_tag.empty()) {
+                {
+                    std::lock_guard<std::mutex> lk(self.mtx_);
+                    for (auto& x : self.cores_) {
+                        if (x.id == reuse_id) { x.release_tag = release_tag; break; }
+                    }
+                }
+                self.save();
+            }
+            if (set_default) self.set_default(reuse_id);
+            if (already_latest) *already_latest = true;
+            if (progress) *progress = 100;
+            set_stage("已是最新（复用现有核心）");
+            remove_tree(default_cores_root() + "\\.tmp");
+            return reuse_id;
+        }
+
         std::string dest = self.cores_root_ + "\\" + kind + "-"
                            + (version.empty() ? "unknown" : version);
         {
             std::lock_guard<std::mutex> lk(self.mtx_);
             for (auto& x : self.cores_) {
                 if (x.path == dest) {
-                    dest = self.cores_root_ + "\\" + kind + "-" + version + "-" + random_hex(4);
+                    dest = self.cores_root_ + "\\" + kind + "-"
+                           + (version.empty() ? "unknown" : version) + "-" + random_hex(4);
                     break;
                 }
             }
@@ -455,6 +597,7 @@ public:
         if (!MoveFileExW(util::utf8_to_wide(core_dir).c_str(),
                          util::utf8_to_wide(dest).c_str(),
                          MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
+            set_stage("移入核心目录失败");
             return "";
         }
         CoreInfo c;
@@ -465,6 +608,7 @@ public:
             ? (std::string(kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + " " + version)
             : display_name;
         c.source = "download";
+        c.release_tag = release_tag;
         c.created_at = util::now_sec();
         c.version = version;
         c.is_default = false;
@@ -473,8 +617,11 @@ public:
             self.cores_.push_back(c);
         }
         self.save();
+        if (set_default) self.set_default(c.id);
         if (progress) *progress = 100;
         set_stage("完成");
+        // 清掉 .tmp（zip + 解包副本，通常 >1GB），避免白占磁盘
+        remove_tree(default_cores_root() + "\\.tmp");
         return c.id;
     }
 
@@ -491,6 +638,70 @@ public:
     }
 
     // ---------------------------------------------------------------- 工具
+    // 文件 SHA-256（小写 hex）；失败返回空串
+    static std::string sha256_file(const std::string& path) {
+        // 诊断开关：设置 MAAHUB_DEBUG_SHA=1 时把每一步的失败原因打到 stderr
+        const bool dbg = getenv("MAAHUB_DEBUG_SHA") != nullptr;
+        // 刚下载完的大包常被杀软/索引器短暂占用，open 失败要重试而不是直接判失败
+        HANDLE f = INVALID_HANDLE_VALUE;
+        DWORD last_err = 0;
+        for (int i = 0; i < 8; ++i) {
+            f = CreateFileW(util::utf8_to_wide(path).c_str(), GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f != INVALID_HANDLE_VALUE) break;
+            last_err = GetLastError();
+            Sleep(250);
+        }
+        if (f == INVALID_HANDLE_VALUE) {
+            if (dbg) fprintf(stderr, "[sha] open failed err=%lu path=%s\n",
+                             last_err, path.c_str());
+            return "";
+        }
+        BCRYPT_ALG_HANDLE alg = nullptr;
+        NTSTATUS st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+        if (st != 0) {
+            if (dbg) fprintf(stderr, "[sha] open alg failed st=0x%08lx\n", (unsigned long)st);
+            CloseHandle(f);
+            return "";
+        }
+        DWORD hash_len = 0, cb = 0;
+        BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, (PUCHAR)&hash_len, sizeof(hash_len), &cb, 0);
+        BCRYPT_HASH_HANDLE h = nullptr;
+        st = BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0);
+        if (st != 0) {
+            if (dbg) fprintf(stderr, "[sha] create hash failed st=0x%08lx\n", (unsigned long)st);
+            BCryptCloseAlgorithmProvider(alg, 0);
+            CloseHandle(f);
+            return "";
+        }
+        {
+            std::vector<BYTE> buf(1 << 20);
+            DWORD n = 0;
+            while (ReadFile(f, buf.data(), (DWORD)buf.size(), &n, nullptr) && n > 0)
+                BCryptHashData(h, buf.data(), n, 0);
+            std::vector<BYTE> digest(hash_len ? hash_len : 32);
+            st = BCryptFinishHash(h, digest.data(), (ULONG)digest.size(), 0);
+            if (st == 0) {
+                std::string out;
+                char hex[4];
+                for (BYTE b : digest) {
+                    sprintf_s(hex, "%02x", b);
+                    out += hex;
+                }
+                BCryptDestroyHash(h);
+                BCryptCloseAlgorithmProvider(alg, 0);
+                CloseHandle(f);
+                return out;
+            }
+            if (dbg) fprintf(stderr, "[sha] finish failed st=0x%08lx\n", (unsigned long)st);
+            BCryptDestroyHash(h);
+        }
+        BCryptCloseAlgorithmProvider(alg, 0);
+        CloseHandle(f);
+        return "";
+    }
+
     static std::string normalize_ver(const std::string& v) {
         std::string out;
         for (char ch : v) {
@@ -636,7 +847,8 @@ private:
         return session;
     }
     static std::string http_get(const std::string& url, int timeout_ms,
-                                const AppSettings* settings = nullptr) {
+                                const AppSettings* settings = nullptr,
+                                const std::vector<std::pair<std::string, std::string>>& headers = {}) {
         std::wstring host, path;
         INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
         bool https = true;
@@ -665,7 +877,12 @@ private:
         if (!req) { WinHttpCloseHandle(conn); WinHttpCloseHandle(session); return ""; }
         DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
         WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof(redirect));
-        if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        std::wstring header_block;
+        for (auto& [hk, hv] : headers)
+            header_block += util::utf8_to_wide(hk) + L": " + util::utf8_to_wide(hv) + L"\r\n";
+        if (!WinHttpSendRequest(req,
+                                header_block.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : header_block.c_str(),
+                                header_block.empty() ? 0 : (DWORD)-1L,
                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
             WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
             return "";
@@ -713,6 +930,9 @@ private:
         }
         HINTERNET session = open_session(120000, settings);
         if (!session) return false;
+        // 下载用更短的超时：资产 CDN 不可达时要在半分钟内失败，而不是把后台线程
+        // 永久挂住（ENG01 上实测 objects.githubusercontent.com 不通，旧代码会挂死）
+        WinHttpSetTimeouts(session, 10000, 20000, 30000, 30000);
         HINTERNET conn = WinHttpConnect(session, host.c_str(), port, 0);
         if (!conn) { WinHttpCloseHandle(session); return false; }
         HINTERNET req = WinHttpOpenRequest(conn, L"GET", path.c_str(), nullptr,

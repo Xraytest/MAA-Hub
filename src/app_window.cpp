@@ -2269,17 +2269,17 @@ void MaaHubWindow::page_cores(RECT content) {
     gui_.panel(bar);
     int bx = bar.left + 14;
     if (gui_.button("core-check", { bx, bar.top + 8, bx + 120, bar.top + 32 }, L"🔄 检查更新", 1)) {
-        action_check_update("");
+        post_action([this] { action_check_update(""); }, "检查更新");
     }
     bx += 130;
     if (gui_.button("core-pull-maa", { bx, bar.top + 8, bx + 180, bar.top + 32 },
-                    L"⬇ 拉取 MAA 核心", 1, dl_progress_.load() < 0)) {
-        action_pull_latest("maa");
+                    L"⬇ 更新 MAA 核心", 1, dl_progress_.load() < 0)) {
+        post_action([this] { action_auto_update("maa"); }, "更新 MAA");
     }
     bx += 190;
     if (gui_.button("core-pull-end", { bx, bar.top + 8, bx + 180, bar.top + 32 },
-                    L"⬇ 拉取 MaaEnd 核心", 1, dl_progress_.load() < 0)) {
-        action_pull_latest("maaend");
+                    L"⬇ 更新 MaaEnd 核心", 1, dl_progress_.load() < 0)) {
+        post_action([this] { action_auto_update("maaend"); }, "更新 MaaEnd");
     }
     // 内部目录提示 + 共享核心说明
     {
@@ -2299,40 +2299,70 @@ void MaaHubWindow::page_cores(RECT content) {
     }
 
     int y = bar.bottom + 12;
-    if (has_update_info_) {
-        RECT up{ content.left, y, content.right, y + 96 };
+    bool has_upd = false;
+    UpdateInfo upd;
+    {
+        std::lock_guard<std::mutex> lk(upd_mtx_);
+        has_upd = has_update_info_;
+        upd = update_info_;
+    }
+    if (has_upd) {
+        RECT up{ content.left, y, content.right, y + 150 };
         gui_.panel(up, L"🔄 更新检查");
-        int uy = up.top + 38;
-        gui_.text(up.left + 18, uy, L"当前版本:", gui_.theme.dim, gui_.font_small);
-        gui_.text(up.left + 96, uy,
-                  gui::widen(update_info_.current.empty() ? "-" : update_info_.current),
+        int uy = up.top + 32;
+        gui_.text(up.left + 18, uy + 2, L"当前:", gui_.theme.dim, gui_.font_small);
+        gui_.text(up.left + 64, uy, gui::widen(upd.current.empty() ? "-" : upd.current),
                   gui_.theme.text, gui_.font);
-        gui_.text(up.left + 240, uy, L"最新版本:", gui_.theme.dim, gui_.font_small);
-        gui_.text(up.left + 316, uy,
-                  gui::widen(update_info_.latest.empty() ? "-" : update_info_.latest),
-                  update_info_.has_update ? gui_.theme.ok : gui_.theme.dim, gui_.font);
-        gui_.text(up.left + 450, uy, L"来源:", gui_.theme.dim, gui_.font_small);
-        gui_.text(up.left + 498, uy, gui::widen(update_info_.source_name), gui_.theme.dim, gui_.font_small);
-        uy += 28;
-        if (update_info_.ok && update_info_.has_update && !update_info_.download_url.empty()) {
-            RECT pb{ up.left + 18, uy, up.left + 200, uy + 26 };
-            if (gui_.button("core-pull", pb, L"⬇ 拉取并安装", 1, dl_progress_.load() < 0)) {
-                std::string url = update_info_.download_url;
-                std::string kind = update_info_.kind;
-                post_action([this, kind, url] { action_pull_core(kind, url); }, "拉取核心");
+        gui_.text(up.left + 320, uy + 2, L"上游最新:", gui_.theme.dim, gui_.font_small);
+        gui_.text(up.left + 396, uy, gui::widen(upd.latest.empty() ? "-" : upd.latest),
+                  upd.has_update ? gui_.theme.ok : gui_.theme.dim, gui_.font);
+        gui_.text(up.left + 540, uy + 2, L"来源:", gui_.theme.dim, gui_.font_small);
+        gui_.text(up.left + 588, uy + 2, gui::widen(upd.source_name), gui_.theme.dim, gui_.font_small);
+        if (upd.asset_size > 0) {
+            wchar_t sz[64];
+            swprintf_s(sz, L"%.1f MB", (double)upd.asset_size / (1024.0 * 1024.0));
+            gui_.text(up.left + 660, uy + 2, sz, gui_.theme.dim, gui_.font_small);
+        }
+        // 当前 tag 单独一行（小字），不与下面的动作行重叠
+        if (!upd.current_tag.empty()) {
+            gui_.text(up.left + 64, uy + 20, L"tag " + gui::widen(upd.current_tag),
+                      gui_.theme.dim, gui_.font_small);
+        }
+        int ay = up.top + 74;
+        if (upd.ok && upd.has_update && !upd.download_url.empty()) {
+            RECT pb{ up.left + 18, ay, up.left + 200, ay + 26 };
+            if (gui_.button("core-pull", pb, L"⬇ 下载并安装", 1, dl_progress_.load() < 0)) {
+                std::string kind = upd.kind;
+                post_action([this, kind] { action_auto_update(kind); }, "下载并安装");
             }
             RECT save = gui_.clip();
-            gui_.text_clipped({ up.left + 210, uy + 5, up.right - 16, uy + 23 },
-                              L"下载地址: " + gui::widen(update_info_.download_url),
+            gui_.text_clipped({ up.left + 210, ay + 5, up.right - 16, ay + 23 },
+                              L"资产: " + gui::widen(upd.asset_name)
+                              + (upd.asset_sha256.empty() ? L"（上游无 sha256）"
+                                                          : L"（sha256 校验）"),
                               gui_.theme.dim, gui_.font_small);
             (void)save;
-        } else if (update_info_.ok) {
-            gui_.text(up.left + 18, uy, L"已是最新版本", gui_.theme.ok, gui_.font);
+        } else if (upd.ok) {
+            gui_.text(up.left + 18, ay + 4, L"已是最新版本", gui_.theme.ok, gui_.font);
         } else {
             RECT save = gui_.clip();
-            gui_.text_clipped({ up.left + 18, uy, up.right - 16, uy + 20 },
-                              gui::widen(update_info_.error), gui_.theme.err, gui_.font_small);
+            gui_.text_clipped({ up.left + 18, ay + 4, up.right - 16, ay + 24 },
+                              gui::widen(upd.error), gui_.theme.err, gui_.font_small);
             (void)save;
+        }
+        if (upd.tag_mismatch) {
+            RECT save2 = gui_.clip();
+            gui_.text_clipped({ up.left + 18, up.top + 104, up.right - 16, up.top + 122 },
+                              L"⚠ 当前核心未记录来源 tag，版本口径与上游不同（探测值 "
+                              + gui::widen(upd.current) + L"），下载后按包内真实版本比对",
+                              gui_.theme.warn, gui_.font_small);
+            (void)save2;
+        }
+        // 下载/解压进度
+        int dp = dl_progress_.load();
+        if (dp >= 0) {
+            std::wstring line = gui::widen(dl_stage_) + L"  " + std::to_wstring(dp) + L"%";
+            gui_.text(up.left + 18, up.bottom - 26, line.c_str(), gui_.theme.primary, gui_.font_small);
         }
         y = up.bottom + 12;
     }
@@ -2340,10 +2370,26 @@ void MaaHubWindow::page_cores(RECT content) {
     RECT panel{ content.left, y, content.right, content.bottom };
     gui_.panel(panel, L"📦 已登记核心");
     int ty = panel.top + 38;
-    int cols[] = { panel.left + 16, panel.left + 64, panel.left + 240, panel.left + 420,
-                   panel.left + 560, panel.left + 700, panel.left + 790, panel.left + 890 };
-    const wchar_t* heads[] = { L"类型", L"名称", L"版本", L"来源", L"路径", L"默认", L"更新", L"操作" };
-    for (int i = 0; i < 8; ++i) gui_.text(cols[i], ty, heads[i], gui_.theme.dim, gui_.font_small);
+    // 列宽按面板实际宽度排：右侧三个按钮组右对齐，其余列向左均分，
+    // 避免在默认窗口宽度下「操作」列被挤出可视区（旧布局固定偏移会溢出）
+    const int row_gap = 6, bw_ck = 66, bw_def = 58, bw_del = 52;
+    const int btn_r = panel.right - 12;
+    const int ck_x = btn_r - bw_del - row_gap - bw_def - row_gap - bw_ck;
+    const int def_x = btn_r - bw_del - row_gap - bw_def;
+    const int del_x = btn_r - bw_del;
+    const int c_type = panel.left + 16;
+    const int c_name = c_type + 48;
+    const int c_ver = c_name + 152;
+    const int c_src = c_ver + 96;
+    const int c_path = c_src + 76;
+    const int c_def = ck_x - 72;
+    gui_.text(c_type, ty, L"类型", gui_.theme.dim, gui_.font_small);
+    gui_.text(c_name, ty, L"名称", gui_.theme.dim, gui_.font_small);
+    gui_.text(c_ver, ty, L"版本", gui_.theme.dim, gui_.font_small);
+    gui_.text(c_src, ty, L"来源", gui_.theme.dim, gui_.font_small);
+    gui_.text(c_path, ty, L"路径", gui_.theme.dim, gui_.font_small);
+    gui_.text(c_def, ty, L"默认", gui_.theme.dim, gui_.font_small);
+    gui_.text(ck_x, ty, L"操作", gui_.theme.dim, gui_.font_small);
     ty += 22;
     gui_.fill({ panel.left + 12, ty - 4, panel.right - 12, ty - 3 }, gui_.theme.border);
 
@@ -2368,28 +2414,28 @@ void MaaHubWindow::page_cores(RECT content) {
         std::string id = c.get_str("id", "");
         std::string kind = c.get_str("kind", "");
         bool is_def = c.get_bool("is_default", false);
-        gui_.text(cols[0], ry + 6, kind == "maa" ? L"MAA" : L"MaaEnd", gui_.theme.primary, gui_.font_small);
+        gui_.text(c_type, ry + 6, kind == "maa" ? L"MAA" : L"MaaEnd", gui_.theme.primary, gui_.font_small);
         {
             RECT save = gui_.clip();
-            gui_.text_clipped({ cols[1], ry + 6, cols[2] - 10, ry + 26 },
+            gui_.text_clipped({ c_name, ry + 6, c_ver - 10, ry + 26 },
                               gui::widen(c.get_str("name", "")), gui_.theme.text, gui_.font_small);
             (void)save;
         }
-        gui_.text(cols[2], ry + 6, gui::widen(c.get_str("version", "")), gui_.theme.text, gui_.font_small);
-        gui_.text(cols[3], ry + 6, gui::widen(c.get_str("source", "")), gui_.theme.dim, gui_.font_small);
+        gui_.text(c_ver, ry + 6, gui::widen(c.get_str("version", "")), gui_.theme.text, gui_.font_small);
+        gui_.text(c_src, ry + 6, gui::widen(c.get_str("source", "")), gui_.theme.dim, gui_.font_small);
         {
             RECT save = gui_.clip();
-            gui_.text_clipped({ cols[4], ry + 6, cols[5] - 10, ry + 26 },
+            gui_.text_clipped({ c_path, ry + 6, c_def - 10, ry + 26 },
                               gui::widen(c.get_str("path", "")), gui_.theme.dim, gui_.font_small);
             (void)save;
         }
-        gui_.text(cols[5], ry + 6, is_def ? L"✓ 默认" : L"", gui_.theme.ok, gui_.font_small);
-        if (gui_.button(("core-ck-" + id).c_str(), { cols[6], ry + 2, cols[6] + 70, ry + 26 },
+        gui_.text(c_def, ry + 6, is_def ? L"✓ 默认" : L"", gui_.theme.ok, gui_.font_small);
+        if (gui_.button(("core-ck-" + id).c_str(), { ck_x, ry + 2, ck_x + bw_ck, ry + 26 },
                         L"检查", 0)) {
-            action_check_update(id);
+            post_action([this, id] { action_check_update(id); }, "检查更新");
         }
-        RECT b2{ cols[7], ry + 2, cols[7] + 60, ry + 26 };
-        RECT b3{ cols[7] + 68, ry + 2, cols[7] + 128, ry + 26 };
+        RECT b2{ def_x, ry + 2, def_x + bw_def, ry + 26 };
+        RECT b3{ del_x, ry + 2, del_x + bw_del, ry + 26 };
         if (gui_.button(("core-def-" + id).c_str(), b2, L"设默认", 0, !is_def)) {
             post_action([this, id] {
                 hub_->cores().set_default(id);
@@ -2713,6 +2759,60 @@ void MaaHubWindow::backend_loop() {
     fprintf(stderr, "[startup] first_paint=%.0fms start_all=%.0fms full_ready=%.0fms\n",
             (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t0) * 1000);
     while (running_) {
+        // ---- 自动更新：启动检查 + 定时检查（对齐 MAA CheckOnStartup / CheckOnSchedule）
+        // 二者都在 backend 线程执行，不占 UI 线程。
+        {
+            AppSettings st = hub_->app_settings();
+            double now = util::now_sec();
+            bool due = false;
+            if (!startup_checked_) {
+                startup_checked_ = true;
+                if (st.update_check_on_start) due = true;
+            } else if (st.update_check_on_schedule && last_update_check_ > 0
+                       && now - last_update_check_ > 6 * 3600.0) {
+                due = true;
+            }
+            if (due && !update_checking_.exchange(true)) {
+                std::string auto_kind = "maaend";
+                CoreInfo c = hub_->cores().default_core(auto_kind);
+                if (c.id.empty()) {
+                    auto_kind = "maa";
+                    c = hub_->cores().default_core("maa");
+                }
+                UpdateInfo ui = CoreManager::check_update(auto_kind, c.version, c.release_tag, &st);
+                ui.kind = auto_kind;
+                {
+                    std::lock_guard<std::mutex> lk(upd_mtx_);
+                    update_info_ = ui;
+                    has_update_info_ = true;
+                }
+                last_update_check_ = now;
+                update_checking_ = false;
+                if (ui.ok && ui.has_update) {
+                    if (st.update_auto_download && !ui.download_url.empty()) {
+                        set_notice("发现新版本 " + ui.latest + "，自动下载中…");
+                        dl_progress_ = 0;
+                        dl_stage_ = "下载";
+                        std::string installed;
+                        bool unchanged = false;
+                        std::string id = CoreManager::pull_core(
+                            auto_kind, ui.download_url, "", &dl_progress_, &dl_stage_, &st,
+                            ui.latest_tag, st.update_auto_install, ui.asset_sha256,
+                            &installed, &unchanged);
+                        dl_progress_ = -1;
+                        if (!id.empty()) {
+                            std::lock_guard<std::mutex> lk(upd_mtx_);
+                            update_info_.has_update = false;
+                        }
+                        set_notice(id.empty() ? ("自动更新失败：" + dl_stage_)
+                                              : ("已自动更新到 " + installed));
+                    } else {
+                        set_notice("发现新版本 " + ui.latest + "（自动下载未开启）");
+                    }
+                    PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
+                }
+            }
+        }
         std::pair<std::function<void()>, std::string> job;
         bool have_job = false;
         {
@@ -2984,72 +3084,128 @@ void MaaHubWindow::action_stop_exec() {
     set_notice("已请求停止执行");
 }
 
+// 注意：以下更新类 action 全部在 backend 线程执行（UI 侧用 post_action 入队），
+// 检查最长 5×20s、下载 ~300MB 都不会阻塞界面。
 void MaaHubWindow::action_check_update(const std::string& core_id) {
     std::string kind = "maa";
-    std::string current;
+    std::string current, current_tag;
+    auto pick = [&](const CoreInfo& c) {
+        if (c.id.empty()) return false;
+        kind = c.kind;
+        current = c.version;
+        current_tag = c.release_tag;
+        return true;
+    };
     if (!core_id.empty()) {
         CoreInfo c;
-        if (hub_->cores().get(core_id, c)) {
-            kind = c.kind;
-            current = c.version;
-        }
+        if (hub_->cores().get(core_id, c)) pick(c);
     } else {
-        CoreInfo c = hub_->cores().default_core("maa");
-        if (!c.id.empty()) current = c.version;
+        // 未指定时看已登记的默认核心（MaaEnd 优先，主用）
+        CoreInfo ce = hub_->cores().default_core("maaend");
+        CoreInfo cm = hub_->cores().default_core("maa");
+        if (!pick(ce)) pick(cm);
     }
     AppSettings st = hub_->app_settings();
-    UpdateInfo ui = CoreManager::check_update(kind, current, st.mirrorchyan_cdk, &st);
+    UpdateInfo ui = CoreManager::check_update(kind, current, current_tag, &st);
     ui.kind = kind;
-    update_info_ = ui;
-    has_update_info_ = true;
+    {
+        std::lock_guard<std::mutex> lk(upd_mtx_);
+        update_info_ = ui;
+        has_update_info_ = true;
+    }
+    last_update_check_ = util::now_sec();
     if (ui.ok) {
-        set_notice(ui.has_update ? "发现新版本 " + ui.latest : "已是最新版本 " + ui.latest);
+        std::string msg = ui.has_update ? ("发现新版本 " + ui.latest)
+                                        : ("已是最新版本 " + ui.latest);
+        if (ui.tag_mismatch) msg += "（版本口径不同：当前 " + current + "）";
+        set_notice(msg);
     } else {
         set_notice("更新检查失败：" + ui.error);
     }
 }
 
 void MaaHubWindow::action_pull_core(const std::string& kind, const std::string& url) {
+    UpdateInfo ui;
+    {
+        std::lock_guard<std::mutex> lk(upd_mtx_);
+        ui = update_info_;
+    }
+    std::string real_url = url.empty() ? ui.download_url : url;
+    if (real_url.empty()) {
+        set_notice("没有可用的下载地址");
+        return;
+    }
     dl_progress_ = 0;
     dl_stage_ = "下载";
     AppSettings st = hub_->app_settings();
-    std::string id = CoreManager::pull_core(kind, url, "", &dl_progress_, &dl_stage_, &st);
+    std::string installed;
+    bool unchanged = false;
+    std::string id = CoreManager::pull_core(kind, real_url, "", &dl_progress_, &dl_stage_, &st,
+                                            ui.latest_tag, /*set_default=*/true,
+                                            ui.asset_sha256, &installed, &unchanged);
     dl_progress_ = -1;
     if (id.empty()) {
-        set_notice("拉取失败：下载或解压出错（请检查网络/镜像源）");
-    } else {
-        CoreInfo c;
-        hub_->cores().get(id, c);
-        set_notice("已拉取新核心：" + c.name + " " + c.version);
+        set_notice("更新失败：" + dl_stage_ + "（请检查网络/镜像源）");
+        return;
     }
+    CoreInfo c;
+    hub_->cores().get(id, c);
+    {
+        std::lock_guard<std::mutex> lk(upd_mtx_);
+        update_info_.has_update = false;
+    }
+    set_notice(unchanged ? ("已是最新核心（" + c.version + "），已设为默认")
+                         : ("已安装 " + c.name + " " + c.version + " 并设为默认"));
 }
 
 void MaaHubWindow::action_pull_latest(const std::string& kind) {
-    // 检查更新 -> 有新版则直接拉取安装到内部 cores 目录
+    action_auto_update(kind);
+}
+
+// 一键更新：检查 → 下载 → 校验 sha256 → 安装 → 设为默认（对齐 MAA 的自动更新链路）
+void MaaHubWindow::action_auto_update(const std::string& kind) {
+    CoreInfo c = hub_->cores().default_core(kind);
     AppSettings st = hub_->app_settings();
-    std::string current;
-    {
-        CoreInfo c = hub_->cores().default_core(kind);
-        if (!c.id.empty()) current = c.version;
-    }
-    UpdateInfo ui = CoreManager::check_update(kind, current, st.mirrorchyan_cdk, &st);
+    UpdateInfo ui = CoreManager::check_update(kind, c.version, c.release_tag, &st);
     ui.kind = kind;
-    update_info_ = ui;
-    has_update_info_ = true;
+    {
+        std::lock_guard<std::mutex> lk(upd_mtx_);
+        update_info_ = ui;
+        has_update_info_ = true;
+    }
+    last_update_check_ = util::now_sec();
     if (!ui.ok) {
         set_notice("更新检查失败：" + ui.error);
         return;
     }
     if (!ui.has_update) {
-        set_notice("已是最新版本 " + ui.latest);
+        set_notice((kind == "maa" ? std::string("MAA ") : std::string("MaaEnd "))
+                   + "已是最新版本 " + ui.latest);
         return;
     }
     if (ui.download_url.empty()) {
         set_notice("未找到可用的下载地址");
         return;
     }
-    set_notice("开始拉取 " + ui.latest);
-    action_pull_core(kind, ui.download_url);
+    set_notice("开始下载 " + ui.latest + " …");
+    dl_progress_ = 0;
+    dl_stage_ = "下载";
+    std::string installed;
+    bool unchanged = false;
+    std::string id = CoreManager::pull_core(kind, ui.download_url, "", &dl_progress_, &dl_stage_,
+                                            &st, ui.latest_tag, /*set_default=*/true,
+                                            ui.asset_sha256, &installed, &unchanged);
+    dl_progress_ = -1;
+    if (id.empty()) {
+        set_notice("更新失败：" + dl_stage_);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(upd_mtx_);
+        update_info_.has_update = false;
+    }
+    set_notice(unchanged ? ("已是最新核心（" + installed + "），已设为默认")
+                         : ("已更新到 " + installed + " 并设为默认"));
 }
 
 // ================================================================ 设置页
@@ -3082,9 +3238,14 @@ void MaaHubWindow::page_settings(RECT content) {
             set_start_min_    = st.start_minimized;
             set_start_run_    = st.start_run;
             set_upd_check_    = st.update_check_on_start;
+            set_upd_sched_    = st.update_check_on_schedule;
             set_upd_dl_       = st.update_auto_download;
             set_upd_install_  = st.update_auto_install;
-            set_upd_gh_       = st.update_force_github;
+            set_upd_channel_  = st.update_version_type == "beta" ? 1
+                              : st.update_version_type == "nightly" ? 2 : 0;
+            set_upd_source_   = st.update_source == "github" ? 1
+                              : st.update_source == "mirrorchyan" ? 2 : 0;
+            set_gh_token_     = st.github_token;
             settings_loaded_ = true;
         }
     }
@@ -3207,25 +3368,37 @@ void MaaHubWindow::page_settings(RECT content) {
         note(L"\u5b98\u65b9\u8fd8\u6709\u201c\u81ea\u52a8\u5f00\u542f\u6a21\u62df\u5668 / PC \u5ba2\u6237\u7aef\u201d\u4e0e\u201c\u9644\u52a0\u547d\u4ee4\u201d\uff0cMaaHub \u672a\u5b9e\u73b0\u3002");
     }
 
-    // ---------------- 更新设置（官方 9 项，MaaHub 实现核心子集）----------------
+    // ---------------- 更新设置（对齐 MAA 官方 Update 组）----------------
     group(L"\u66f4\u65b0\u8bbe\u7f6e");
     {
         // 值已在一次性回填里赋好；这里每帧重赋会覆盖用户勾选
         struct U { const char* key; const wchar_t* label; bool* val; };
         const U us[] = {
             { "set-upd-check",   L"\u542f\u52a8\u65f6\u68c0\u67e5\u66f4\u65b0", &set_upd_check_ },
+            { "set-upd-sched",   L"\u5b9a\u65f6\u68c0\u67e5\uff08\u8fd0\u884c\u671f\u95f4\u6bcf 6 \u5c0f\u65f6\uff09", &set_upd_sched_ },
             { "set-upd-dl",      L"\u81ea\u52a8\u4e0b\u8f7d\u66f4\u65b0\u5305", &set_upd_dl_ },
-            { "set-upd-install", L"\u81ea\u52a8\u5b89\u88c5\u66f4\u65b0\u5305", &set_upd_install_ },
-            { "set-upd-gh",      L"\u5f3a\u5236\u4f7f\u7528 GitHub", &set_upd_gh_ },
+            { "set-upd-install", L"\u81ea\u52a8\u5b89\u88c5\uff08\u4e0b\u8f7d\u540e\u8bbe\u4e3a\u9ed8\u8ba4\u6838\u5fc3\uff09", &set_upd_install_ },
         };
         for (auto& u : us) {
             CheckState st = *u.val ? CheckState::On : CheckState::Off;
-            gui_.checkbox3(u.key, { content.left, y, content.left + 300, y + 22 },
+            gui_.checkbox3(u.key, { content.left, y, content.left + 380, y + 22 },
                            u.label, st);
             *u.val = (st == CheckState::On);
             y += 28;
         }
-        note(L"\u6838\u5fc3\u62c9\u53d6\u4e0e\u66f4\u65b0\u5728\u201c\u6838\u5fc3\u7ba1\u7406\u201d\u4e2d\u6267\u884c\uff1b\u5b98\u65b9\u8fd8\u6709\u5b9a\u65f6\u68c0\u67e5\u3001\u66f4\u65b0\u65e5\u5fd7\u3001\u8d44\u6e90\u66f4\u65b0\u7b49\u3002");
+        gui_.text(content.left, y + 4, L"\u66f4\u65b0\u6e20\u9053", gui_.theme.dim, gui_.font_small);
+        gui_.option_strip("set-upd-channel", { content.left + 74, y, content.left + 374, y + 26 },
+                          { L"\u6b63\u5f0f\u7248", L"\u6d4b\u8bd5\u7248", L"Nightly" }, set_upd_channel_);
+        y += 30;
+        gui_.text(content.left, y + 4, L"\u66f4\u65b0\u6e90", gui_.theme.dim, gui_.font_small);
+        gui_.option_strip("set-upd-source", { content.left + 74, y, content.left + 374, y + 26 },
+                          { L"\u81ea\u52a8", L"GitHub", L"Mirror\u9171" }, set_upd_source_);
+        y += 30;
+        gui_.text(content.left, y + 4, L"GitHub Token", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("set-gh-token", { content.left + 110, y, content.right, y + 26 },
+                        set_gh_token_, L"ghp_...\uff08\u53ef\u9009\uff0c\u63d0\u9ad8 API \u9650\u989d\uff09");
+        y += 30;
+        note(L"\u66f4\u65b0\u94fe\u8def\uff1a\u68c0\u67e5 \u2192 \u4e0b\u8f7d \u2192 sha256 \u6821\u9a8c \u2192 \u89e3\u5305 \u2192 \u767b\u8bb0 \u2192 \u8bbe\u4e3a\u9ed8\u8ba4\u6838\u5fc3\u3002");
     }
 
 
@@ -3288,11 +3461,13 @@ void MaaHubWindow::action_save_settings() {
     std::string cdk = set_cdk_;
     std::string theme = set_theme_;
     bool auto_start = set_auto_start_, start_min = set_start_min_, start_run = set_start_run_;
-    bool upd_check = set_upd_check_, upd_dl = set_upd_dl_,
-         upd_install = set_upd_install_, upd_gh = set_upd_gh_;
+    bool upd_check = set_upd_check_, upd_sched = set_upd_sched_, upd_dl = set_upd_dl_,
+         upd_install = set_upd_install_;
+    int upd_channel = set_upd_channel_, upd_source = set_upd_source_;
+    std::string gh_token = set_gh_token_;
     post_action([this, mode, host, port, user, pass, cdk, enabled, url, key, model, theme,
                  auto_start, start_min, start_run,
-                 upd_check, upd_dl, upd_install, upd_gh] {
+                 upd_check, upd_sched, upd_dl, upd_install, upd_channel, upd_source, gh_token] {
         // update 返回真实落盘结果；LLM 配置保存后立即生效
         bool ok = hub_->settings().update([&](AppSettings& s) {
             s.proxy_mode = mode;
@@ -3310,9 +3485,14 @@ void MaaHubWindow::action_save_settings() {
             s.start_minimized = start_min;
             s.start_run = start_run;
             s.update_check_on_start = upd_check;
+            s.update_check_on_schedule = upd_sched;
             s.update_auto_download = upd_dl;
             s.update_auto_install = upd_install;
-            s.update_force_github = upd_gh;
+            s.update_version_type = upd_channel == 1 ? "beta"
+                                  : upd_channel == 2 ? "nightly" : "stable";
+            s.update_source = upd_source == 1 ? "github"
+                            : upd_source == 2 ? "mirrorchyan" : "auto";
+            s.github_token = gh_token;
         });
         if (ok) {
             hub_->reload_llm_config();

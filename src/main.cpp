@@ -158,7 +158,7 @@ static std::string cli_read_blob(const std::string& s) {
 static int run_cli(const std::vector<std::string>& args, const mj::Value& config) {
     std::string cmd = args.empty() ? "" : args[0];
     if (cmd.empty()) {
-        printf("usage: MaaHub --cli ping|devices|tasks|import|sched-list|sched-run|sched-tick|serve|connect|run|seq|stop|events|get-connect|set-connect|override|accounts|add-account|use-account|link\n");
+        printf("usage: MaaHub --cli ping|devices|tasks|import|sched-list|sched-run|sched-tick|serve|connect|run|seq|stop|events|get-connect|set-connect|override|accounts|add-account|use-account|link|core-check|core-update\n");
         return 2;
     }
     Hub hub(config);
@@ -215,6 +215,50 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
         }
         printf("events=%zu\n", evs.size());
     };
+
+    // 核心更新：自动更新链路的命令行入口（便于脚本化实测）
+    if (cmd == "core-check" || cmd == "core-update") {
+        std::string kind = args.size() > 1 ? args[1] : "maaend";
+        std::string state = util::exe_dir() + "\\state";
+        util::ensure_dir(state);
+        CoreManager cm(state, CoreManager::default_cores_root());
+        CoreInfo cur = cm.default_core(kind);
+        SettingsStore ss(state);
+        AppSettings st = ss.get();
+        printf("CURRENT kind=%s id=%s version=%s tag=%s\n", kind.c_str(), cur.id.c_str(),
+               cur.version.c_str(), cur.release_tag.c_str());
+        UpdateInfo ui = CoreManager::check_update(kind, cur.version, cur.release_tag, &st);
+        if (!ui.ok) {
+            printf("CHECK_FAILED %s\n", ui.error.c_str());
+            return 1;
+        }
+        printf("CHECK source=%s latest=%s latest_tag=%s has_update=%d tag_mismatch=%d"
+               " asset=%s size=%lld sha=%s\n",
+               ui.source_name.c_str(), ui.latest.c_str(), ui.latest_tag.c_str(),
+               (int)ui.has_update, (int)ui.tag_mismatch, ui.asset_name.c_str(),
+               (long long)ui.asset_size, ui.asset_sha256.c_str());
+        if (cmd == "core-check") return 0;
+        if (!ui.has_update) { printf("ALREADY_LATEST\n"); return 0; }
+        if (ui.download_url.empty()) { printf("NO_DOWNLOAD_URL\n"); return 1; }
+        std::atomic<int> prog{ 0 };
+        std::string stage, installed;
+        bool unchanged = false;
+        std::string id = CoreManager::pull_core(kind, ui.download_url, "", &prog, &stage, &st,
+                                                ui.latest_tag, /*set_default=*/true,
+                                                ui.asset_sha256, &installed, &unchanged);
+        if (id.empty()) {
+            printf("UPDATE_FAILED stage=%s\n", stage.c_str());
+            return 1;
+        }
+        // pull_core 内部另建 CoreManager 写盘，这里要重新加载才能读到新核心
+        CoreManager cm2(state, CoreManager::default_cores_root());
+        CoreInfo c;
+        cm2.get(id, c);
+        printf("UPDATED id=%s version=%s tag=%s unchanged=%d is_default=%d\n",
+               c.id.c_str(), c.version.c_str(), c.release_tag.c_str(),
+               (int)unchanged, (int)c.is_default);
+        return 0;
+    }
 
     hub.start_all();   // 拉起 worker + discover + load（并行，无窗口）
 
@@ -627,6 +671,7 @@ int main(int argc, char** argv) {
     std::string dump_page;
     std::string dump_task;
     int dump_w = 0, dump_h = 0;   // --dump-size WxH：覆盖离屏画布客户区尺寸
+    bool dump_update_demo = false; // --dump-update-demo：注入假更新结果核对面板排版
     bool cli_mode = false;
     std::vector<std::string> cli_args;
     for (int i = 1; i < argc; ++i) {
@@ -651,6 +696,9 @@ int main(int argc, char** argv) {
         }
         else if (a == "--dump-size" && i + 1 < argc) {
             sscanf(argv[++i], "%dx%d", &dump_w, &dump_h);
+        }
+        else if (a == "--dump-update-demo") {
+            dump_update_demo = true;   // 注入一条假更新结果，核对「更新检查」面板排版
         }
         else if (a == "--cli") {
             for (int j = i + 1; j < argc; ++j) cli_args.emplace_back(argv[j]);
@@ -749,6 +797,23 @@ int main(int argc, char** argv) {
             if (all_ready) break;
         }
         win.debug_refresh_snapshot();   // 强制拉一次完整快照（含 catalog）
+        if (dump_update_demo) {
+            UpdateInfo ui;
+            ui.ok = true;
+            ui.kind = "maaend";
+            ui.current = "v5.15.0-beta.1";
+            ui.current_tag = "";
+            ui.latest = "v3.0.0";
+            ui.latest_tag = "v3.0.0";
+            ui.source_name = "GitHub";
+            ui.has_update = true;
+            ui.tag_mismatch = true;
+            ui.asset_name = "MaaEnd-win-x86_64-v3.0.0.zip";
+            ui.asset_size = 315946882LL;
+            ui.asset_sha256 = "sha256:36cd998fadd361ed82a3917a5b618674c192ae7ca02a2174136fc1f69313ce4d";
+            ui.download_url = "https://example.invalid/core.zip";
+            win.debug_set_update_info(ui);
+        }
         if (!dump_task.empty()) win.debug_select_task(dump_task);
         if (show_advanced) win.debug_show_advanced();
         if (show_add_task) win.debug_open_add_task();

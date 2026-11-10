@@ -52,6 +52,12 @@ public:
     void debug_open_new_exec();
     // 离屏画布尺寸（真实窗口客户区为 800x600；不设置就按这个值建）
     void debug_set_client_size(int w, int h) { dump_w_ = w; dump_h_ = h; }
+    // 离屏渲染专用：注入一条假的更新检查结果，用于核对「更新检查」面板的排版
+    void debug_set_update_info(const UpdateInfo& ui) {
+        std::lock_guard<std::mutex> lk(upd_mtx_);
+        update_info_ = ui;
+        has_update_info_ = true;
+    }
     int run();
 
 private:
@@ -150,6 +156,7 @@ private:
     void action_check_update(const std::string& core_id);
     void action_pull_core(const std::string& kind, const std::string& url);
     void action_pull_latest(const std::string& kind);
+    void action_auto_update(const std::string& kind);   // 一键：检查 → 下载 → 设为默认
     void action_adopt(const std::string& kind);
     void action_save_settings();
     void action_import_config();
@@ -238,9 +245,12 @@ private:
     bool set_start_run_ = false;
     // 更新设置（官方 VersionUpdateSettings）
     bool set_upd_check_ = true;
+    bool set_upd_sched_ = true;
     bool set_upd_dl_ = false;
     bool set_upd_install_ = false;
-    bool set_upd_gh_ = false;
+    int  set_upd_channel_ = 0;   // 0=正式版 1=测试版 2=Nightly
+    int  set_upd_source_ = 0;    // 0=自动 1=GitHub 2=Mirror酱
+    std::string set_gh_token_;
     bool settings_loaded_ = false;
     // 规划
     int planner_sel_ = 0;
@@ -250,6 +260,7 @@ private:
     std::string core_msg_;
     double core_msg_ts_ = 0;
     UpdateInfo update_info_;
+    std::mutex upd_mtx_;   // 保护 update_info_ / has_update_info_（backend 写、UI 读）
     bool has_update_info_ = false;
 
     mutable std::mutex snap_mtx_;
@@ -262,8 +273,11 @@ private:
     std::mutex action_mtx_;
     std::deque<std::pair<std::function<void()>, std::string>> actions_;
 
-    // 下载进度
+    // 下载进度 / 更新串行化
     std::atomic<int> dl_progress_{ -1 };
+    std::atomic<bool> update_checking_{ false };
+    double last_update_check_ = 0;
+    bool startup_checked_ = false;   // backend 线程独占：启动检查是否已尝试过
     std::string dl_stage_;
 
     static const UINT WM_APP_SNAP = WM_APP + 1;

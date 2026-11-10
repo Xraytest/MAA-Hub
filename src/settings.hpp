@@ -26,11 +26,15 @@ struct AppSettings {
     bool auto_start = false;          // 开机自动启动
     bool start_minimized = false;     // 启动后直接最小化
     bool start_run = false;           // 启动后直接运行
-    // 更新设置（官方 VersionUpdateSettings）
-    bool update_check_on_start = true;   // 启动时检查更新
-    bool update_auto_download = false;   // 自动下载更新包
-    bool update_auto_install = false;    // 自动安装更新包
-    bool update_force_github = false;    // 强制使用 GitHub
+    // 更新设置（对齐 MAA 官方 Update 组：VersionType / UpdateSource / GitHubToken /
+    // CheckOnStartup / CheckOnSchedule / AutoDownloadUpdatePackage / AutoInstallUpdatePackage）
+    bool update_check_on_start = true;      // 启动时检查更新
+    bool update_check_on_schedule = true;   // 定时检查（运行期间每 6 小时）
+    bool update_auto_download = false;      // 自动下载更新包
+    bool update_auto_install = false;       // 自动安装（下载后切换为默认核心）
+    std::string update_version_type = "stable";  // 更新渠道：stable | beta | nightly
+    std::string update_source = "auto";          // 更新源：auto | github | mirrorchyan
+    std::string github_token;                    // GitHub API Token（提高限额）
     // 界面主题（官方 GuiSettings）：light | dark | system
     std::string theme = "light";
 
@@ -56,9 +60,12 @@ struct AppSettings {
         st.set("start_minimized", start_minimized);
         st.set("start_run", start_run);
         st.set("update_check_on_start", update_check_on_start);
+        st.set("update_check_on_schedule", update_check_on_schedule);
         st.set("update_auto_download", update_auto_download);
         st.set("update_auto_install", update_auto_install);
-        st.set("update_force_github", update_force_github);
+        st.set("update_version_type", update_version_type);
+        st.set("update_source", update_source);
+        st.set("github_token", github_token);
         v.set("startup_update", std::move(st));
         v.set("theme", theme);
         return v;
@@ -85,9 +92,12 @@ struct AppSettings {
             s.start_minimized = su->get_bool("start_minimized", false);
             s.start_run = su->get_bool("start_run", false);
             s.update_check_on_start = su->get_bool("update_check_on_start", true);
+            s.update_check_on_schedule = su->get_bool("update_check_on_schedule", true);
             s.update_auto_download = su->get_bool("update_auto_download", false);
             s.update_auto_install = su->get_bool("update_auto_install", false);
-            s.update_force_github = su->get_bool("update_force_github", false);
+            s.update_version_type = su->get_str("update_version_type", "stable");
+            s.update_source = su->get_str("update_source", "auto");
+            s.github_token = su->get_str("github_token", "");
         }
         s.theme = v.get_str("theme", "light");
         return s;
