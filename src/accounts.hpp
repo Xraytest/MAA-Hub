@@ -196,7 +196,8 @@ public:
         mj::Value out = params.is_object() ? params : mj::Value::object();
         if (!account || !account->enabled || account->identifier.empty()) return out;
         if (game == "maa") {
-            if ((task == "StartUp" || task == "CloseDown") && !out.has("account_name")) {
+            // catalog 默认值会把 account_name 预填成 ""，所以"缺失"和"空串"都按未指定处理
+            if ((task == "StartUp" || task == "CloseDown") && out.get_str("account_name", "").empty()) {
                 out.set("account_name", account->identifier);
             }
         } else if (game == "maaend") {

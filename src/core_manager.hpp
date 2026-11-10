@@ -8,7 +8,9 @@
 #include <winhttp.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -79,7 +81,7 @@ public:
     CoreManager(std::string state_dir, std::string cores_root)
         : dir_(std::move(state_dir)), cores_root_(std::move(cores_root)) {
         util::ensure_dir(cores_root_);
-        load();
+        if (!load()) rebuild_from_cores_dir();
     }
 
     // 核心根目录（UI 展示用）
@@ -337,7 +339,7 @@ public:
         sources.push_back({ "moeyy", "https://github.moeyy.xyz/https://api.github.com/repos/" + repo + "/releases/latest" });
 
         for (auto& [name, url] : sources) {
-            std::string body = http_get(url, 20000);
+            std::string body = http_get(url, 20000, settings);   // 走用户配置的代理/Mirror酱直连
             if (body.empty()) continue;
             mj::Value v;
             if (!mj::try_parse(body, v)) continue;
@@ -526,14 +528,62 @@ private:
         return "";
     }
 
-    void load() {
+    // 返回 false 代表登记表本身丢了（文件缺失/损坏），需要按磁盘重建
+    bool load() {
         std::string content;
-        if (!util::read_file(dir_ + "\\cores.json", content)) return;
+        if (!util::read_file(dir_ + "\\cores.json", content)) return false;
         mj::Value v;
-        if (!mj::try_parse(content, v)) return;
+        if (!mj::try_parse(content, v)) return false;
         if (auto* arr = v.find("cores"); arr && arr->is_array()) {
             for (auto& c : arr->items()) cores_.push_back(CoreInfo::from_json(c));
         }
+        return true;
+    }
+
+    // cores 目录里的文件是主体，登记表只是索引；丢了索引不该让已下载的核心变成孤儿。
+    // 只在 cores.json 读不出来时调用：文件存在但登记为空代表用户主动删除，尊重它。
+    void rebuild_from_cores_dir() {
+        std::vector<std::string> names;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(util::utf8_to_wide(cores_root_ + "\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            names.push_back(util::wide_to_utf8(name));
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        std::sort(names.begin(), names.end());
+        for (auto& name : names) {
+            // 目录名固定是 <kind>-<version>；先判 maaend，"maa-" 前缀才不会抢走它
+            std::string kind;
+            for (const char* k : { "maaend", "maa" }) {
+                size_t n = strlen(k);
+                if (name.size() > n + 1 && name.compare(0, n, k) == 0 && name[n] == '-') {
+                    kind = k;
+                    break;
+                }
+            }
+            if (kind.empty()) continue;
+            std::string path = cores_root_ + "\\" + name;
+            if (!valid_core_dir(kind, path)) continue;
+            CoreInfo c;
+            c.id = "core-" + random_hex(8);
+            c.kind = kind;
+            c.path = path;
+            c.version = probe_version(kind, path);
+            c.name = std::string(kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + " " + c.version;
+            c.source = "download";
+            c.created_at = util::now_sec();
+            bool has_same_kind = false;
+            for (auto& x : cores_) {
+                if (x.kind == kind) has_same_kind = true;
+            }
+            c.is_default = !has_same_kind;
+            cores_.push_back(c);
+        }
+        if (!cores_.empty()) save();
     }
 
     void save() {

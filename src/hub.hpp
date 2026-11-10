@@ -4,6 +4,7 @@
 //   - 绑定一个核心 (core) 与一个账号 (account)
 //   - 多个执行器可同时运行，实现多账号并行
 #pragma once
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -81,6 +82,7 @@ struct ExecutorEntry {
     bool enabled = true;
     double created_at = 0;
     mj::Value config = mj::Value::object();   // worker 配置
+    mj::Value connect = mj::Value::object();  // 用户覆盖的连接参数（持久化）
 
     // 运行时（不持久化）
     std::shared_ptr<WorkerClient> worker;
@@ -98,6 +100,7 @@ struct ExecutorEntry {
         v.set("core_id", core_id);
         v.set("enabled", enabled);
         v.set("created_at", created_at);
+        if (connect.is_object() && !connect.members().empty()) v.set("connect", connect);
         return v;
     }
     static ExecutorEntry from_json(const mj::Value& v) {
@@ -109,6 +112,7 @@ struct ExecutorEntry {
         e.core_id = v.get_str("core_id", "");
         e.enabled = v.get_bool("enabled", true);
         e.created_at = v.get_int("created_at", 0);
+        if (auto* c = v.find("connect"); c && c->is_object()) e.connect = *c;
         return e;
     }
 };
@@ -125,24 +129,38 @@ public:
         settings_ = std::make_unique<SettingsStore>(state_dir);
         load_executors();
         load_task_params();
+        load_schedules();
         load_llm_config();
+        sched_thread_ = std::thread([this] { scheduler_loop(); });
     }
 
     ~Hub() {
         // 通知执行线程退出，再并行关停 worker
+        util::trace("hub dtor begin");
         stopping_ = true;
         stop_execution();
+        // 调度器线程可能正跑 run_task_sequence（同步、可长达数小时），不能无限等：
+        // sched_done_ 由调度器线程退出前自设，有界等 1.5s；仍没退就 detach
+        //（joinable 的 std::thread 析构 = terminate，必须先 detach 再销毁 Hub）
+        if (sched_thread_.joinable()) {
+            for (int i = 0; i < 150 && !sched_done_.load(); ++i) Sleep(10);
+            if (sched_done_.load()) sched_thread_.join();
+            else { util::trace("hub dtor sched still running, detach"); sched_thread_.detach(); }
+        }
         std::vector<std::thread> stops;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (auto& kv : executors_) {
                 auto w = kv.second.worker;
                 if (!w) continue;
+                util::trace("hub dtor shutdown " + kv.second.kind + " " + kv.first);
                 stops.emplace_back([w] { w->shutdown(); });
             }
         }
         for (auto& t : stops) t.join();
+        util::trace("hub dtor workers stopped");
         if (save_thread_.joinable()) save_thread_.join();
+        util::trace("hub dtor end");
     }
 
     // ================================================================ 执行器
@@ -150,6 +168,12 @@ public:
         std::lock_guard<std::mutex> lk(mtx_);
         std::vector<ExecutorEntry> out;
         for (auto& kv : executors_) out.push_back(kv.second);
+        // map 按 id 迭代 = 按随机十六进制排，左列顺序会随机；
+        // 按创建时间稳定排，ids[0] 默认选中才可预期
+        std::sort(out.begin(), out.end(), [](const ExecutorEntry& a, const ExecutorEntry& bb) {
+            return a.created_at != bb.created_at ? a.created_at < bb.created_at
+                                                   : a.id < bb.id;
+        });
         return out;
     }
 
@@ -192,12 +216,18 @@ public:
     }
 
     bool remove_executor(const std::string& id) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        auto it = executors_.find(id);
-        if (it == executors_.end()) return false;
-        if (it->second.worker) it->second.worker->shutdown();
-        executors_.erase(it);
-        save_executors();
+        std::shared_ptr<WorkerClient> old;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            auto it = executors_.find(id);
+            if (it == executors_.end()) return false;
+            old = it->second.worker;
+            it->second.worker.reset();
+            executors_.erase(it);
+            save_executors_locked();
+        }
+        // shutdown 会等 worker 线程退出，而 worker 事件回调也要拿 mtx_，必须在锁外调用
+        if (old) old->shutdown();
         return true;
     }
 
@@ -208,7 +238,22 @@ public:
         if (patch.has("label")) it->second.label = patch.get_str("label", it->second.label);
         if (patch.has("account_id")) it->second.account_id = patch.get_str("account_id", "");
         if (patch.has("enabled")) it->second.enabled = patch.get_bool("enabled", true);
-        save_executors();
+        save_executors_locked();
+        return true;
+    }
+
+    // 覆盖某执行器的连接参数（mode / adb_path / touch_mode / mouse_method …）并重启其 worker
+    bool update_executor_connect(const std::string& id, const mj::Value& patch) {
+        if (!patch.is_object()) return false;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            auto it = executors_.find(id);
+            if (it == executors_.end()) return false;
+            for (auto& kv : patch.members()) it->second.connect.set(kv.first, kv.second);
+            it->second.config = build_worker_config(it->second);
+            save_executors_locked();
+        }
+        restart_worker(id);
         return true;
     }
 
@@ -286,6 +331,21 @@ public:
         return mj::Value::array();
     }
 
+    // 无头核对 entry + pipeline_override 的构造：只走映射，不连设备、不 post。
+    // MaaEnd 的展示名/option 建模全靠这层，本地没游戏也能把 50 个任务全过一遍。
+    mj::Value probe_override(const std::string& id, const std::string& task,
+                             const mj::Value& params) {
+        executor_catalog(id, 0.0);      // worker 里的 routes_ 要先建好
+        auto w = worker_of(id);
+        if (!w) return mj::Value::object();
+        mj::Value req = mj::Value::object();
+        req.set("task", task);
+        req.set("params", params);
+        mj::Value r;
+        if (!w->call("override", req, 15000, r)) return mj::Value::object();
+        return r;
+    }
+
     // 把 UI 面板的辅助键转换为 MaaCore/MaaEnd 真实参数名
     // （面板用更友好的键，下发前在此归一化）
     static mj::Value normalize_task_params(const std::string& kind,
@@ -311,6 +371,19 @@ public:
             int d = (int)num("drones_idx", 0);
             if (d < 0 || d > 4) d = 0;
             out.set("drones", std::string(kDrones[d]));
+            // 面板「换班设施」8 个勾选 -> 核心 facility 数组（数组序即换班优先级）
+            // 名字必须是核心 infrast.json roomType 里的键，Workshop/Mine 之类会被拒
+            static const char* kFac[] = { "Control", "Mfg", "Trade", "Power", "Reception",
+                                          "Office", "Training", "Processing" };
+            bool touched = false;
+            mj::Value fac = mj::Value::array();
+            for (int k = 0; k < 8; ++k) {
+                std::string key = "facility_" + std::to_string(k);
+                if (!in.find(key)) continue;
+                touched = true;
+                if (boolean(key, false)) fac.push(kFac[k]);
+            }
+            if (touched) out.set("facility", std::move(fac));
         }
         if (task == "Recruit") {
             // confirm_3..6 -> confirm 数组；select_tags -> select 数组
@@ -357,6 +430,27 @@ public:
         return out;
     }
 
+    // MaaCore 会校验任务参数：缺 required 字段时 AsstAppendTask 直接返回 0
+    // （实测 StartUp 只给 {"account_name":...} 会被拒）。面板打开时已用 catalog
+    // 的 default 预填，但 seq / 计划 / 从没配置过的任务拿到的是空参数，这里兜底补齐。
+    static mj::Value fill_defaults(const mj::Value& catalog, const std::string& task,
+                                   const mj::Value& in) {
+        mj::Value out = in.is_object() ? in : mj::Value::object();
+        if (!catalog.is_array()) return out;
+        for (auto& t : catalog.items()) {
+            if (t.get_str("name", "") != task) continue;
+            auto* ps = t.find("params");
+            if (!ps || !ps->is_array()) return out;
+            for (auto& p : ps->items()) {
+                std::string key = p.get_str("name", "");
+                if (key.empty() || out.has(key) || !p.has("default")) continue;
+                out.set(key, p["default"]);
+            }
+            return out;
+        }
+        return out;
+    }
+
     int64_t run_on_executor(const std::string& id, const std::string& task,
                             const mj::Value& params) {
         auto w = worker_of(id);
@@ -368,7 +462,9 @@ public:
         if (!e.account_id.empty()) has_acc = accounts_->get(e.account_id, acc);
         static const std::vector<std::string> aware_tasks = { "StartUp", "CloseDown", "AccountSwitch" };
         bool is_aware = std::find(aware_tasks.begin(), aware_tasks.end(), task) != aware_tasks.end();
-        mj::Value normalized = normalize_task_params(e.kind, task, params);
+        mj::Value filled = e.kind == "maa" ? fill_defaults(executor_catalog(id), task, params)
+                                           : params;
+        mj::Value normalized = normalize_task_params(e.kind, task, filled);
         mj::Value final_params = (is_aware || has_acc)
             ? AccountStore::apply_to_task(e.kind, task, normalized, has_acc ? &acc : nullptr)
             : normalized;
@@ -595,6 +691,184 @@ public:
         return plan.to_json();
     }
 
+    // 顺序跑一串任务（每个一次 run，等空闲再下一个），同步执行。
+    // 设备联调 / 无头流程用；params 取各任务已保存的面板参数。
+    std::string run_task_sequence(const std::string& exec_id,
+                                  const std::vector<std::string>& tasks) {
+        ExecutorEntry e;
+        if (!get_executor(exec_id, e)) return "no-executor";
+        Plan plan;
+        plan.id = "cli-" + random_hex(6);
+        plan.ts = util::now_sec();
+        plan.planner = "cli";
+        plan.goal = "cli sequence";
+        for (auto& t : tasks) {
+            PlanStep s;
+            s.exec_id = exec_id;
+            s.kind = e.kind;
+            s.exec_label = e.label;
+            s.task = t;
+            s.params = task_params(exec_id, t);
+            plan.steps.push_back(std::move(s));
+        }
+        if (plan.steps.empty()) return "empty";
+        {
+            std::lock_guard<std::mutex> lk(plans_mtx_);
+            plans_.push_back(plan);
+            if (plans_.size() > 50) plans_.erase(plans_.begin());
+        }
+        stop_flag_ = false;
+        int ran = 0;
+        exec_worker(plan, &ran);   // 同步：CLI 直接等整串跑完
+        std::string status = "done";
+        {
+            std::lock_guard<std::mutex> lk(plans_mtx_);
+            for (auto& p : plans_) if (p.id == plan.id) { status = p.status; break; }
+        }
+        return status;
+    }
+
+    // 合并导入的调度条目（GUI 导入按钮与 CLI import 共用）。
+    // 按 exec_id+\x1f+source 去重：同键覆盖（保留已记录的 last_run_date），新键追加。
+    void merge_schedules(const mj::Value& incoming_entries) {
+        if (!incoming_entries.is_array() || incoming_entries.items().empty()) return;
+        std::lock_guard<std::mutex> lk(sched_mtx_);
+        // entries 缺失时 operator[] 会创建 Object；对 Object push 只进 arr_ 不改 type_，
+        // dump 时静默丢数据——先保证它是 Array
+        if (!schedules_.has("entries") || !schedules_["entries"].is_array())
+            schedules_.set("entries", mj::Value::array());
+        for (auto& in : incoming_entries.items()) {
+            std::string key = in.get_str("exec_id", "") + "\x1f" + in.get_str("source", "");
+            bool replaced = false;
+            mj::Value& cur = schedules_["entries"];
+            if (cur.is_array()) {
+                for (auto& ex : cur.items()) {
+                    if (ex.get_str("exec_id", "") + "\x1f" + ex.get_str("source", "") != key)
+                        continue;
+                    std::string lrd = ex.get_str("last_run_date", "");
+                    ex = in;
+                    if (!lrd.empty()) ex.set("last_run_date", lrd);
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) schedules_["entries"].push(in);
+        }
+        schedules_.set("version", 1);
+        save_schedules_locked();
+    }
+
+    // schedules.json 只读快照（CLI sched-list / GUI 展示用）
+    mj::Value schedules_snapshot() const {
+        std::lock_guard<std::mutex> lk(sched_mtx_);
+        return schedules_;
+    }
+
+    // 调度器一次扫描。返回触发的执行器数。
+    // 只从调度器线程或 CLI sched-tick 调用：会重置 stop_flag_ 并同步跑完任务串。
+    int scheduler_tick() {
+        if (stopping_) return 0;
+        mj::Value sched;
+        {
+            std::lock_guard<std::mutex> lk(sched_mtx_);
+            sched = schedules_;
+        }
+        auto* entries = sched.find("entries");
+        if (!entries || !entries->is_array()) return 0;
+
+        // 本地时间（wDayOfWeek 0=周日，直接对应 weekdays 约定；0=周日..6=周六）
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char hh[3] = { 0, 0, 0 }, mm[3] = { 0, 0, 0 };
+        hh[0] = char('0' + st.wHour / 10);   hh[1] = char('0' + st.wHour % 10);
+        mm[0] = char('0' + st.wMinute / 10); mm[1] = char('0' + st.wMinute % 10);
+        std::string hhmm = std::string(hh) + ":" + mm;
+        std::string today = util::today_str();
+
+        // 任务序列：GUI 一键长草选择是唯一权威（state\task-lists.json）
+        mj::Value lists = mj::Value::object();
+        {
+            std::string content;
+            if (util::read_file(util::exe_dir() + "\\state\\task-lists.json", content)
+                && mj::try_parse(content, lists) && !lists.is_object()) {
+                lists = mj::Value::object();
+            }
+        }
+
+        struct Fire { std::string exec_id; std::vector<std::string> tasks; };
+        struct Due { size_t idx; std::string key; };
+        std::vector<Fire> fires;
+        std::vector<Due> due;
+
+        size_t idx = 0;
+        for (auto& entry : entries->items()) {
+            const size_t i = idx++;
+            if (!entry.get_bool("enabled", false)) continue;
+            const std::string exec_id = entry.get_str("exec_id", "");
+            if (exec_id.empty() || !running_task_of(exec_id).empty()) continue; // 忙：跳过且不标记
+            // 到点判定
+            if (entry.get_str("kind", "") == "maaend") {
+                auto* wd = entry.find("weekdays");
+                if (!wd || !wd->is_array()) continue;
+                bool day_ok = false;
+                for (auto& d : wd->items())
+                    if (d.as_int(-1) == (int64_t)st.wDayOfWeek) { day_ok = true; break; }
+                if (!day_ok) continue;
+                auto* ts = entry.find("times");
+                bool time_hit = false;
+                if (ts && ts->is_array())
+                    for (auto& t : ts->items())
+                        if (t.as_string() == hhmm) { time_hit = true; break; }
+                if (!time_hit) continue;
+            } else {   // maa：hour/min 单点
+                if (entry.get_int("hour", -1) != (int64_t)st.wHour
+                    || entry.get_int("min", -1) != (int64_t)st.wMinute) continue;
+            }
+            if (entry.get_str("last_run_date", "") == today) continue;   // 当天已触发
+            auto* lst = lists.find(exec_id);
+            if (!lst || !lst->is_array() || lst->items().empty()) continue;
+            std::vector<std::string> tasks;
+            for (auto& t : lst->items()) {
+                std::string name = t.as_string();
+                if (!name.empty()) tasks.push_back(name);
+            }
+            if (tasks.empty()) continue;
+            // 执行器存在且启用；worker 懒生成（executors.json 加载后 worker 为空）
+            ExecutorEntry e;
+            if (!get_executor(exec_id, e) || !e.enabled) continue;
+            if (!worker_of(exec_id)) spawn_worker(exec_id);
+            due.push_back({ i, exec_id + "\x1f" + entry.get_str("source", "") });
+            fires.push_back({ exec_id, std::move(tasks) });
+        }
+        if (fires.empty()) return 0;
+
+        // 先标记当日已触发再 fire：长任务期间 10 秒 tick 不会重复入队
+        {
+            std::lock_guard<std::mutex> lk(sched_mtx_);
+            mj::Value& live = schedules_["entries"];
+            if (live.is_array()) {
+                auto& arr = live.items();
+                for (auto& d : due) {
+                    if (d.idx >= arr.size()) continue;
+                    mj::Value& e2 = arr[d.idx];
+                    // 内容一致性检查：导入并发替换后索引可能错位
+                    if (e2.get_str("exec_id", "") + "\x1f" + e2.get_str("source", "") == d.key)
+                        e2.set("last_run_date", today);
+                }
+            }
+        }
+        schedule_save_schedules();
+
+        int fired = 0;
+        for (auto& f : fires) {
+            if (stopping_) break;
+            std::string status = run_task_sequence(f.exec_id, f.tasks);
+            util::trace("[sched] " + f.exec_id + " -> " + status);
+            ++fired;
+        }
+        return fired;
+    }
+
     bool execute_plan(const std::string& plan_id) {
         Plan plan;
         {
@@ -628,11 +902,12 @@ public:
         return arr;
     }
 
-    bool update_plan_status(const std::string& id, const std::string& status) {
+    bool update_plan_status(const std::string& id, const std::string& status,
+                            const std::string& error = std::string()) {
         {
             std::lock_guard<std::mutex> lk(plans_mtx_);
             for (auto& p : plans_) {
-                if (p.id == id) { p.status = status; break; }
+                if (p.id == id) { p.status = status; p.error = error; break; }
             }
         }
         schedule_save();
@@ -719,6 +994,8 @@ public:
     CoreManager& cores() { return *cores_; }
     SettingsStore& settings() { return *settings_; }
     AppSettings app_settings() const { return settings_->get(); }
+    // 保存设置后让 LLM 配置立即生效（llm_cfg_ 原先只在构造时读一次）
+    void reload_llm_config() { load_llm_config(); }
     mj::Value& config() { return config_; }
 
     // 后台线程：并行拉起所有执行器 worker
@@ -765,6 +1042,13 @@ public:
         }
     }
 
+    // 绕过 800ms 节流立即落盘：批量导入后进程可能很快退出，
+    // 节流窗口内的尾部写入不能丢
+    void flush_task_params() {
+        last_tp_save_ = GetTickCount64();
+        save_task_params();
+    }
+
 private:
     std::shared_ptr<WorkerClient> worker_of(const std::string& id) {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -795,31 +1079,42 @@ private:
         }
         mj::Value r;
         w->call("discover", mj::Value::object(), 180000, r);
-        w->call("load", mj::Value::object(), 180000, r);
+        bool loaded = w->call("load", mj::Value::object(), 180000, r);
+        std::string ld = mj::Value::dump(r);
+        if (ld.size() > 300) ld = ld.substr(0, 300);
+        util::trace("spawn_worker id=" + id + " load_ok=" + (loaded ? "1" : "0") + " reply=" + ld);
     }
 
-    void exec_worker(Plan plan) {
+    void exec_worker(Plan plan, int* ran = nullptr) {
+        int completed = 0;
+        std::string status = "done";
+        std::string fail_reason;
         for (auto& step : plan.steps) {
             if (stop_flag_ || stopping_) {
-                update_plan_status(plan.id, "stopped");
-                return;
+                status = "stopped";
+                break;
             }
             auto w = worker_of(step.exec_id);
             if (!w) {
-                update_plan_status(plan.id, "failed");
-                return;
+                status = "failed";
+                break;
             }
             mj::Value st;
             if (w->call("status", mj::Value::object(), 15000, st)) {
                 if (st.get_str("conn", "") != "connected") {
-                    if (!connect_executor(step.exec_id)) continue;
+                    // 连不上就停在这里：后续任务同样依赖这个连接，跳过只会整串空跑
+                    if (!connect_executor(step.exec_id)) {
+                        status = "connect-failed";
+                        break;
+                    }
                 }
             }
             int64_t tid = run_on_executor(step.exec_id, step.task, step.params);
             if (tid <= 0) {
-                update_plan_status(plan.id, "failed");
-                return;
+                status = "failed";
+                break;
             }
+            ++completed;
             ExecutorEntry e;
             if (get_executor(step.exec_id, e) && !e.account_id.empty()
                 && (step.task == "Award" || step.task == "DailyRewards")) {
@@ -827,18 +1122,52 @@ private:
             }
             // 轮询任务完成；stopping_ 时立即退出，避免 Hub 析构后仍访问成员
             int idle_rounds = 0;
+            const double t0 = util::now_sec();
+            std::string run_state, run_error;
+            bool lost = false;
             while (!stop_flag_ && !stopping_) {
-                mj::Value s2;
-                if (w->call("status", mj::Value::object(), 15000, s2)) {
-                    if (s2.get_str("run", "idle") != "running") break;
-                    idle_rounds = 0;
-                } else {
-                    if (++idle_rounds > 3) break;   // worker 无响应，放弃等待
-                }
                 Sleep(500);
+                mj::Value s2;
+                if (!w->call("status", mj::Value::object(), 15000, s2)) {
+                    // worker 不再应答基本就是进程没了（核心崩在 DLL 里就是这样）；
+                    // 继续等只会把"这一步根本没跑成"读成最后一个 run_state 报成 done
+                    if (++idle_rounds > 3) {
+                        lost = true;
+                        status = "failed";
+                        fail_reason = step.task + ": executor 无响应（worker 可能已崩溃）";
+                        break;
+                    }
+                    continue;
+                }
+                run_state = s2.get_str("run", "idle");
+                run_error = s2.get_str("last_error", "");
+                if (run_state == "running" || run_state == "stopping") {
+                    idle_rounds = 0;
+                    continue;
+                }
+                // append 之后 MaaCore 要过一会儿才进入 running：首轮就判完成会让
+                // 下一步在"上一个仍在跑"时被 AsstAppendTask 拒绝，整串 failed
+                if (util::now_sec() - t0 >= 2.0 && ++idle_rounds >= 2) break;
+            }
+            // 适配器把失败写在 run 里；不读它就会把"这一步根本没跑成"报成 done
+            if (!lost && run_state == "failed") {
+                status = "failed";
+                fail_reason = step.task + ": " + run_error;
+                break;
             }
         }
-        update_plan_status(plan.id, (stop_flag_ || stopping_) ? "stopped" : "done");
+        if (ran) *ran = completed;
+        if (stop_flag_ || stopping_) status = "stopped";
+        update_plan_status(plan.id, status, fail_reason);
+        // run_on_executor 正常完成后不清 running_task_（只清 call 失败路径）。
+        // 这里按 steps 涉及的执行器统一收尾，调度器 tick 才能靠 running_task_of
+        // 判断"忙"，否则上一串跑完后 executor 会被永久视作忙。
+        for (size_t i = 0; i < plan.steps.size(); ++i) {
+            bool last = true;
+            for (size_t j = i + 1; j < plan.steps.size(); ++j)
+                if (plan.steps[j].exec_id == plan.steps[i].exec_id) { last = false; break; }
+            if (last) set_running_task(plan.steps[i].exec_id, "");
+        }
     }
 
     std::vector<mj::Value> accounts_json() const {
@@ -852,6 +1181,40 @@ private:
         return out;
     }
 
+    // 各 kind 的默认连接方式：
+    //   MAA  —— 明日方舟常跑在模拟器里，优先探测 adb 并用 MaaTouch（仿真触控）；
+    //           探测不到再退回 win32 挂窗。
+    //   MaaEnd —— 官方 Win32-Front：ScreenDC 截图 + Seize 前台输入（取自官方运行日志）
+    static mj::Value default_connect(const std::string& kind) {
+        mj::Value conn = mj::Value::object();
+        if (kind == "maa") {
+            // adb devices 是秒级开销，只在首次调用时探测一次
+            static const util::AdbDevice dev = [] {
+                util::AdbDevice d;
+                util::detect_adb(d);
+                return d;
+            }();
+            if (!dev.address.empty()) {
+                conn.set("mode", "adb");
+                conn.set("adb_path", dev.adb_path);
+                conn.set("address", dev.address);
+                conn.set("config", dev.config);
+                conn.set("touch_mode", "maatouch");
+                return conn;
+            }
+            conn.set("mode", "win32");
+            conn.set("screencap_method", 32);
+            conn.set("mouse_method", 1);
+            conn.set("keyboard_method", 1);
+            return conn;
+        }
+        conn.set("mode", "win32");
+        conn.set("screencap_method", 32);   // ScreenDC
+        conn.set("mouse_method", 1);        // Seize
+        conn.set("keyboard_method", 1);     // Seize
+        return conn;
+    }
+
     mj::Value build_worker_config(const ExecutorEntry& e) const {
         CoreInfo core;
         // 绑定的核心可能已被删除：回退到该类型的默认核心（保证可用性）
@@ -863,13 +1226,87 @@ private:
         wcfg.set("display_name", e.label);
         wcfg.set("game_window_class", "UnityWndClass");
         wcfg.set("game_window_title_regex", e.kind == "maa" ? "Arknights" : "Endfield");
-        mj::Value conn = mj::Value::object();
-        conn.set("mode", "win32");
-        conn.set("screencap_method", 32);
-        conn.set("mouse_method", 1);
-        conn.set("keyboard_method", 1);
+        mj::Value conn = default_connect(e.kind);
+        // 执行器上的覆盖项（UI/CLI 写入）逐键合并
+        if (e.connect.is_object()) {
+            for (auto& kv : e.connect.members()) conn.set(kv.first, kv.second);
+        }
+        std::string mode = conn.get_str("mode", "win32");
+        if (mode == "adb") {
+            mj::Value adb = mj::Value::object();
+            adb.set("adb_path", conn.get_str("adb_path", ""));
+            adb.set("address", conn.get_str("address", ""));
+            adb.set("config", conn.get_str("config", "General"));
+            wcfg.set("adb", std::move(adb));
+        }
         wcfg.set("connect", std::move(conn));
         return wcfg;
+    }
+
+    void restart_worker(const std::string& id) {
+        std::shared_ptr<WorkerClient> old;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            auto it = executors_.find(id);
+            if (it == executors_.end()) return;
+            old = it->second.worker;
+            it->second.worker.reset();
+        }
+        if (old) old->shutdown();
+        spawn_worker(id);
+    }
+
+    // ================================================================ 调度
+    // schedules.json 规范见 config_import.hpp 头部注释：
+    // {"version":1,"entries":[{exec_id,kind,label,enabled,weekdays,times,hour,min,config,source,last_run_date}]}
+    void load_schedules() {
+        std::string content;
+        if (!util::read_file(util::exe_dir() + "\\state\\schedules.json", content)) return;
+        mj::Value v;
+        if (!mj::try_parse(content, v)) return;
+        std::lock_guard<std::mutex> lk(sched_mtx_);
+        schedules_ = std::move(v);
+    }
+
+    // 调用方已持有 sched_mtx_ 时用这个（save_schedules 内部还要加锁，
+    // 持锁调用 = 同线程递归加锁 UB，同 save_executors_locked 的教训）。
+    // 磁盘 IO 在锁内做：schedules_ 体量小（几十条），换不来多少并发收益。
+    void save_schedules_locked() {
+        util::write_file(util::exe_dir() + "\\state\\schedules.json",
+                         mj::Value::dump_pretty(schedules_));
+    }
+
+    void save_schedules() {
+        std::lock_guard<std::mutex> lk(sched_mtx_);
+        save_schedules_locked();
+    }
+
+    // 调度器线程保存节流（1s），避免每次 tick 都写盘
+    void schedule_save_schedules() {
+        uint64_t now = GetTickCount64();
+        {
+            std::lock_guard<std::mutex> lk(sched_save_mtx_);
+            if (now - last_sched_save_ < 1000) return;
+            last_sched_save_ = now;
+        }
+        save_schedules();
+    }
+
+    void scheduler_loop() {
+        util::trace("[sched] scheduler_loop start");
+        while (!stopping_) {
+            for (int i = 0; i < 10 && !stopping_; ++i) Sleep(1000);   // 10s tick
+            if (stopping_) break;
+            try {
+                scheduler_tick();
+            } catch (const std::exception& e) {
+                util::trace(std::string("[sched] tick exception: ") + e.what());
+            } catch (...) {
+                util::trace("[sched] tick unknown exception");
+            }
+        }
+        util::trace("[sched] scheduler_loop exit");
+        sched_done_ = true;
     }
 
     void load_task_params() {
@@ -928,27 +1365,37 @@ private:
         }
     }
 
-    void save_executors() {
+    // 调用方已持有 mtx_ 时用这个：save_executors 内部还会再加一次锁，
+    // 持锁再调用 = 同线程递归加锁（未定义行为，实测直接崩进程）
+    void save_executors_locked() {
         mj::Value v = mj::Value::object();
         mj::Value arr = mj::Value::array();
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            for (auto& kv : executors_) arr.push(kv.second.to_json());
-        }
+        for (auto& kv : executors_) arr.push(kv.second.to_json());
         v.set("executors", std::move(arr));
         util::write_file(util::exe_dir() + "\\state\\executors.json",
                          mj::Value::dump_pretty(v));
     }
 
+    void save_executors() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        save_executors_locked();
+    }
+
+    // LLM 配置以设置存储为唯一事实来源（UI 保存后立即生效）。
+    // config.json 的 llm 段只保留旧版兼容：settings 未填 api_key 时回退；
+    // temperature / max_tokens / timeout_sec 不在 AppSettings 里，继续读 config.json。
     void load_llm_config() {
+        AppSettings st = settings_->get();
+        llm_cfg_.enabled = st.llm_enabled;
+        if (!st.llm_base_url.empty()) llm_cfg_.base_url = st.llm_base_url;
+        llm_cfg_.api_key = st.llm_api_key;
+        if (!st.llm_model.empty()) llm_cfg_.model = st.llm_model;
         if (auto* llm = config_.find("llm")) {
-            llm_cfg_.enabled = llm->get_bool("enabled", false);
-            llm_cfg_.base_url = llm->get_str("base_url", llm_cfg_.base_url);
-            llm_cfg_.api_key = llm->get_str("api_key", "");
-            llm_cfg_.model = llm->get_str("model", llm_cfg_.model);
-            llm_cfg_.temperature = (double)llm->get_int("temperature", 0);
-            llm_cfg_.max_tokens = (int)llm->get_int("max_tokens", 2000);
-            llm_cfg_.timeout_sec = (int)llm->get_int("timeout_sec", 60);
+            if (llm_cfg_.api_key.empty()) llm_cfg_.api_key = llm->get_str("api_key", "");
+            if (auto* t = llm->find("temperature"); t && t->is_number())
+                llm_cfg_.temperature = t->as_double();   // 原先 get_int 把 0.2 截成 0
+            llm_cfg_.max_tokens = (int)llm->get_int("max_tokens", (int64_t)llm_cfg_.max_tokens);
+            llm_cfg_.timeout_sec = (int)llm->get_int("timeout_sec", (int64_t)llm_cfg_.timeout_sec);
         }
     }
 
@@ -1014,6 +1461,14 @@ private:
     std::thread exec_thread_;
     std::thread save_thread_;
     uint64_t last_save_ = 0;
+
+    // 调度器（构造起线程，析构 stopping_ + 有界等待回收）
+    std::thread sched_thread_;
+    std::atomic<bool> sched_done_{ false };
+    mj::Value schedules_ = mj::Value::object();   // schedules.json 镜像
+    mutable std::mutex sched_mtx_;
+    uint64_t last_sched_save_ = 0;
+    std::mutex sched_save_mtx_;
 };
 
 } // namespace hub

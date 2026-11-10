@@ -19,8 +19,10 @@ import time
 from pathlib import Path
 
 BUILD = Path(r"D:\WorkSpace\maa-hub-cpp\build")
-EXE = str(BUILD / "MaaHub.exe")
-STATE = BUILD / "state"
+# 运行状态跟着 exe 走（exe_dir\state），把 exe 复制进沙箱跑，免得删掉开发机正在用的 state
+SANDBOX = BUILD / "_headless"
+EXE = str(SANDBOX / "MaaHub.exe")
+STATE = SANDBOX / "state"
 
 
 def run(args, timeout=60):
@@ -35,7 +37,9 @@ def main() -> int:
     time.sleep(1)
 
     # 准备：导入核心 + 默认执行器
-    shutil.rmtree(STATE, ignore_errors=True)
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+    SANDBOX.mkdir(parents=True)
+    shutil.copy2(BUILD / "MaaHub.exe", EXE)
     for kind, path in [("maa", r"D:\Application\MAA"), ("maaend", r"D:\Application\MaaEnd")]:
         run(["--import-core", kind, path], timeout=1800)
     run(["--check"], timeout=600)

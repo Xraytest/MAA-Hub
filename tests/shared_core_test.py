@@ -5,8 +5,10 @@ import subprocess
 from pathlib import Path
 
 BUILD = Path(r"D:\WorkSpace\maa-hub-cpp\build")
-STATE = BUILD / "state"
-EXE = BUILD / "MaaHub.exe"
+# 同 headless_tests：在 build\_headless 沙箱里跑，正式 build\state 不受影响
+SANDBOX = BUILD / "_headless"
+STATE = SANDBOX / "state"
+EXE = SANDBOX / "MaaHub.exe"
 
 
 def run(args, timeout=300):
@@ -18,8 +20,9 @@ def run(args, timeout=300):
 
 def main() -> int:
     # 干净起点
-    shutil.rmtree(STATE, ignore_errors=True)
-    shutil.rmtree(BUILD / "cores", ignore_errors=True)
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+    SANDBOX.mkdir(parents=True)
+    shutil.copy2(BUILD / "MaaHub.exe", EXE)
 
     print("=== 导入两个核心（内部管理） ===")
     for kind, path in [("maa", r"D:\Application\MAA"), ("maaend", r"D:\Application\MaaEnd")]:

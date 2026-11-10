@@ -34,10 +34,15 @@ struct AppStatus {
     // 控制器
     std::string ctrl_mode;
     int64_t ctrl_hwnd = 0;
+    // 适配器实际解析后的方法位标志（-1 = 未解析，回退到配置原值）
+    int64_t screencap_method = -1;
+    int64_t mouse_method = -1;
+    int64_t keyboard_method = -1;
     int res_w = 0, res_h = 0;
     std::string uuid;
     std::string resource_hash;
     int64_t task_count = 0;
+    std::string log_state;      // MaaCore 侧日志目录是否设置成功
 };
 
 class IAdapter {
@@ -55,6 +60,14 @@ public:
     virtual bool is_running() = 0;
     virtual AppStatus status() const = 0;
     virtual std::vector<mj::Value> task_catalog() const = 0;
+
+    // 无头诊断：只构造 {"entry":..., "override":{...}}，不 post。
+    // MaaEnd 的任务名到 pipeline 节点要靠这层映射，没连设备也能先在本地核对构造结果；
+    // 不支持的执行器返回 false。
+    virtual bool build_override(const std::string& task, const mj::Value& params, mj::Value& out) {
+        (void)task; (void)params; (void)out;
+        return false;
+    }
 
     // 取出并清空事件队列（worker 循环调用）
     virtual std::vector<AdapterEvent> drain_events() = 0;

@@ -35,6 +35,9 @@ constexpr uint64_t SCREENCAP_FRAMEPOOL = 2;
 constexpr uint64_t SCREENCAP_SCREENDC = 32;
 constexpr uint64_t INPUT_SEIZE = 1;
 
+// AsstInstanceOpt::TouchMode（实测 MaaCore v6.13.0：仅接受小写 maatouch / minitouch）
+constexpr int INST_TOUCH_MODE = 2;
+
 class MaaAdapter : public IAdapter {
 public:
     MaaAdapter() { kind_ = "maa"; }
@@ -117,13 +120,58 @@ public:
             std::string adb = cfg_.get_path_str("adb.adb_path", "");
             std::string addr = cfg_.get_path_str("adb.address", "");
             std::string conf = cfg_.get_path_str("adb.config", "General");
+            std::string touch = cfg_.get_path_str("connect.touch_mode", "");
+            if (adb.empty() || addr.empty()) {
+                st_.conn = "failed";
+                st_.last_error = "ADB 未配置（adb_path / address 为空）";
+                return false;
+            }
+            // 触控方式必须在连接前设置；仿真触控 = maatouch
+            std::string touch_note;
+            if (!touch.empty()) {
+                bool set_ok = fn_.AsstSetInstanceOption(handle_, INST_TOUCH_MODE, touch.c_str());
+                touch_note = " touch_mode=" + touch + (set_ok ? "" : "(核心不接受)");
+            }
             int r = fn_.AsstAsyncConnect(handle_, adb.c_str(), addr.c_str(), conf.c_str(), true);
             if (r <= 0) {
                 st_.conn = "failed";
-                st_.last_error = "AsstAsyncConnect failed";
+                st_.last_error = "AsstAsyncConnect 返回 " + std::to_string(r)
+                                 + " (adb=" + adb + ", addr=" + addr + ", config=" + conf + ")"
+                                 + touch_note;
                 return false;
             }
+            bool connected = fn_.AsstConnected(handle_) != 0;
+            for (int i = 0; i < 80 && !connected; ++i) {   // 20s：装 mini-program + 首帧截图
+                Sleep(250);
+                connected = fn_.AsstConnected(handle_) != 0;
+            }
+            st_.ctrl_mode = "adb";
+            if (!connected) {
+                st_.conn = "failed";
+                std::string why;
+                {
+                    std::lock_guard<std::mutex> lk(ev_mtx_);
+                    for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
+                        if (it->category == "connection" || it->category == "error") {
+                            why = it->what + " " + it->raw;
+                            break;
+                        }
+                    }
+                }
+                st_.last_error = "连接失败：设备 " + addr + " 未就绪。" + why + touch_note;
+                return false;
+            }
+            {   // 设备信息（uuid / 分辨率）来自 ConnectionInfo 事件
+                std::lock_guard<std::mutex> lk(ev_mtx_);
+                for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
+                    std::string u = it->details.get_str("uuid", "");
+                    if (u.empty()) continue;
+                    st_.uuid = u;
+                    break;
+                }
+            }
             st_.conn = "connected";
+            st_.last_error.clear();
             return true;
         }
         // Win32 挂窗
@@ -195,6 +243,7 @@ public:
             return false;
         }
         st_.run = "running";
+        chain_err_ = false;
         out = tid;
         return true;
     }
@@ -202,7 +251,7 @@ public:
     bool stop() override {
         if (!handle_) return false;
         bool ok = fn_.AsstStop(handle_) != 0;
-        if (ok) st_.run = "idle";
+        if (ok) { st_.run = "idle"; chain_err_ = false; }
         return ok;
     }
 
@@ -336,11 +385,14 @@ private:
         }
         // 运行状态维护
         std::lock_guard<std::mutex> lk(st_mtx_);
-        if (ev.what == "TaskChainCompleted" || ev.what == "AllTasksCompleted") st_.run = "idle";
+        if (ev.what == "TaskChainStart") st_.run = "running";
         if (ev.what == "TaskChainError") {
+            chain_err_ = true;
             st_.run = "failed";
             st_.last_error = raw.substr(0, 400);
         }
+        if (ev.what == "TaskChainCompleted") st_.run = chain_err_ ? "failed" : "idle";
+        if (ev.what == "AllTasksCompleted") st_.run = chain_err_ ? "failed" : "idle";
         emit(std::move(ev));
     }
 
@@ -375,7 +427,7 @@ private:
         add("StartUp", "开始唤醒（启动/切换账号/进入游戏）", {
             p("client_type", "string", true, mj::Value("Official"), "客户端版本",
               { "Official", "Bilibili", "txwy", "YoStarEN", "YoStarJP", "YoStarKR" }),
-            p("start_game_enabled", "bool", false, mj::Value(false), "是否自动启动客户端"),
+            p("start_game_enabled", "bool", false, mj::Value(true), "是否自动启动客户端（MAA 默认开启）"),
             p("account_name", "string", false, mj::Value(""), "切换账号（登录名片段）"),
         });
         add("CloseDown", "关闭游戏客户端", {
@@ -438,6 +490,8 @@ private:
 
     mj::Value cfg_;
     AppStatus st_;
+    // MAA 报错链后紧跟 AllTasksCompleted，不锁住失败就会被冲成 idle，整串误报 done
+    bool chain_err_ = false;
     mutable std::mutex st_mtx_;
     HMODULE lib_ = nullptr;
     DLL_DIRECTORY_COOKIE cookie_ = nullptr;

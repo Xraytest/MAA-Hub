@@ -16,9 +16,12 @@ import time
 from pathlib import Path
 
 BUILD = Path(r"D:\WorkSpace\maa-hub-cpp\build")
-EXE = str(BUILD / "MaaHub.exe")
-STATE = BUILD / "state"
-CORES = BUILD / "cores"
+# 运行状态目录跟着 exe 走（exe_dir\state、exe_dir\cores），所以把 exe 复制进沙箱跑，
+# 否则这套测试会把开发机上正在用的 state/cores 连根删掉。
+SANDBOX = BUILD / "_headless"
+EXE = str(SANDBOX / "MaaHub.exe")
+STATE = SANDBOX / "state"
+CORES = SANDBOX / "cores"
 
 results = []
 
@@ -37,15 +40,23 @@ def check(name, ok, extra=""):
 
 
 def kill_stale():
-    for exe in ("MaaHub.exe", "go-service.exe", "cpp-algo.exe"):
-        subprocess.run(["taskkill", "/F", "/IM", exe], capture_output=True)
+    # 只杀本沙箱里起的进程：按映像名 taskkill 会连带杀掉开发者正在用的正式实例，
+    # 而 worker 与核心附属 exe 都落在 SANDBOX 下，路径过滤足够覆盖。
+    ps = ("Get-Process MaaHub,go-service,cpp-algo -ErrorAction SilentlyContinue"
+          "| Where-Object { $_.Path -like '%s*' } | ForEach-Object { Stop-Process -Id $_.Id -Force }"
+          % str(SANDBOX))
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True)
     time.sleep(0.8)
 
 
 def reset_state():
     kill_stale()
-    shutil.rmtree(STATE, ignore_errors=True)
-    shutil.rmtree(CORES, ignore_errors=True)
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+    SANDBOX.mkdir(parents=True)
+    shutil.copy2(BUILD / "MaaHub.exe", EXE)
+    src_cfg = BUILD / "config.json"
+    if src_cfg.exists():
+        shutil.copy2(src_cfg, SANDBOX / "config.json")
 
 
 def main() -> int:
@@ -108,10 +119,9 @@ def main() -> int:
     core_dirs = sorted(p.name for p in CORES.iterdir() if p.is_dir())
     check("磁盘仍只有 2 份核心", len(core_dirs) == 2, str(core_dirs))
 
-    # 清理：恢复默认执行器
+    # 清理：整个沙箱一次性删除，正式 build\state 从头到尾没被碰过
     kill_stale()
-    shutil.rmtree(STATE, ignore_errors=True)
-    run(["--check"], timeout=600)
+    shutil.rmtree(SANDBOX, ignore_errors=True)
 
     print("\n" + "=" * 50)
     passed = sum(1 for _, ok in results if ok)

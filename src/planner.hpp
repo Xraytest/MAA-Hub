@@ -46,6 +46,7 @@ struct Plan {
     std::vector<PlanStep> steps;
     std::vector<std::string> warnings;
     std::string status = "proposed";
+    std::string error;
 
     mj::Value to_json() const {
         mj::Value v = mj::Value::object();
@@ -61,6 +62,7 @@ struct Plan {
         for (auto& s : warnings) w.push(s);
         v.set("warnings", std::move(w));
         v.set("status", status);
+        if (!error.empty()) v.set("error", error);
         return v;
     }
 };
