@@ -101,19 +101,35 @@ public:
     const std::string& last_error() const { return last_error_; }
 
     void shutdown() {
+        if (shutting_down_.exchange(true)) return;
+        util::trace("shutdown begin " + kind_ + " " + id_);
         if (reader_.joinable()) {
             // 尝试优雅退出（短超时；worker 无响应也不阻塞太久）
             mj::Value dummy;
-            call("exit", mj::Value::object(), 2000, dummy);
-            proc_.close();     // 关管道 → reader 线程的 ReadFile 立即返回
-            if (WaitForSingleObject(reader_.native_handle(), 2000) != WAIT_OBJECT_0) {
-                reader_.detach();   // 绝不让 shutdown 无限期挂住
-            } else {
-                reader_.join();
+            bool ok = call("exit", mj::Value::object(), 2000, dummy);
+            util::trace("exit rpc ok=" + std::to_string(ok ? 1 : 0));
+            bool exited = proc_.wait_exit(1500);
+            util::trace("wait_exit=" + std::to_string(exited ? 1 : 0));
+            if (!exited) {
+                util::trace("kill begin");
+                proc_.kill();
+                exited = proc_.wait_exit(1500);
+                util::trace("kill done exited=" + std::to_string(exited ? 1 : 0));
+            }
+            // 先收 reader 线程，再关句柄：反序会让线程阻塞在已回收的句柄上
+            bool reader_done = WaitForSingleObject(reader_.native_handle(), 1500) == WAIT_OBJECT_0;
+            util::trace(std::string("reader ") + (reader_done ? "join" : "detach"));
+            if (reader_done) reader_.join();
+            else reader_.detach();   // 绝不让 shutdown 无限期挂住
+            if (exited && reader_done) {
+                proc_.close();
+                util::trace("proc closed");
             }
         } else {
-            proc_.close();
+            if (!proc_.wait_exit(1500)) proc_.kill();
+            if (proc_.wait_exit(1500)) proc_.close();
         }
+        util::trace("shutdown end " + kind_);
     }
 
 private:
@@ -175,6 +191,7 @@ private:
     util::ProcHandle proc_;
     std::thread reader_;
     std::atomic<bool> ready_{ false };
+    std::atomic<bool> shutting_down_{ false };
     std::mutex mtx_;
     std::condition_variable cv_;
     std::mutex wmtx_;                // 保护 stdin 写

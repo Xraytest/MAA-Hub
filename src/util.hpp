@@ -171,6 +171,20 @@ inline bool find_window(const std::string& class_regex, const std::string& title
 }
 
 // ---------------- 进程启动 ----------------
+// 所有子进程挂进同一个 Job：父进程一退出（正常退出或崩溃）系统连带结束它们。
+// 之前 worker 会变成孤儿：既继续占着设备/ADB，也牵着父进程的 stdout 管道不放。
+inline HANDLE child_job() {
+    static HANDLE job = [] {
+        HANDLE j = CreateJobObjectW(nullptr, nullptr);
+        if (!j) return j;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
+        lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(j, JobObjectExtendedLimitInformation, &lim, sizeof(lim));
+        return j;
+    }();
+    return job;
+}
+
 struct ProcHandle {
     HANDLE process = nullptr;
     HANDLE stdin_write = nullptr;   // 主进程写 -> worker 读
@@ -180,17 +194,30 @@ struct ProcHandle {
         if (!process) return false;
         return WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
     }
+    void kill() {
+        if (process) TerminateProcess(process, 1);
+    }
+    // 父进程不再需要 worker 时用它兜底：优雅退出等不到就结束，
+    // 否则 MaaCore 会变成孤儿继续占着 ADB / 设备控制
+    bool wait_exit(DWORD ms) {
+        if (!process) return true;
+        return WaitForSingleObject(process, ms) != WAIT_TIMEOUT;
+    }
+    // 只关管道、留着进程句柄：让 worker 读到 EOF，之后再等它退出
+    void close_pipes() {
+        if (stdin_write) { CloseHandle(stdin_write); stdin_write = nullptr; }
+        if (stdout_read) { CloseHandle(stdout_read); stdout_read = nullptr; }
+    }
     void close() {
-        for (HANDLE h : { stdin_write, stdout_read, process }) {
-            if (h) { CloseHandle(h); }
-        }
-        stdin_write = nullptr;
-        stdout_read = nullptr;
-        process = nullptr;
+        close_pipes();
+        if (process) { CloseHandle(process); process = nullptr; }
+        pid = 0;
     }
 };
 
-// 启动子进程，stdin/stdout 重定向到管道（stderr 继承）
+// 启动子进程，stdin/stdout 重定向到管道，stderr 指向 NUL。
+// 不能直接继承父进程的 stderr：孩子会牵着父进程的输出句柄不放（SSH / 管道调用方
+// 等不到 EOF），而 worker 的诊断本来就写进 asst.log / maahub-crash.log。
 inline bool spawn_process(const std::wstring& cmdline, const std::wstring& workdir,
                           const std::wstring& env_block, ProcHandle& out) {
     SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
@@ -203,13 +230,40 @@ inline bool spawn_process(const std::wstring& cmdline, const std::wstring& workd
     SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.hStdInput = in_read;
-    si.hStdOutput = out_write;
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    si.wShowWindow = SW_HIDE;
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE use_err = (nul != nullptr && nul != INVALID_HANDLE_VALUE) ? nul : out_write;
+
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.StartupInfo.hStdInput = in_read;
+    si.StartupInfo.hStdOutput = out_write;
+    si.StartupInfo.hStdError = use_err;
+    si.StartupInfo.wShowWindow = SW_HIDE;
+
+    // 句柄白名单：只有这三个进得去子进程，父进程其余可继承句柄（包括它自己的
+    // stdout 管道）一律不带过去
+    DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+    LPPROC_THREAD_ATTRIBUTE_LIST attr = nullptr;
+    std::vector<HANDLE> keep = { in_read, out_write };
+    std::vector<char> attr_buf;
+    if (use_err != out_write) keep.push_back(use_err);
+    SIZE_T asize = 0;
+    if (InitializeProcThreadAttributeList(nullptr, 1, 0, &asize)
+        || GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        attr_buf.assign(asize, 0);
+        attr = (LPPROC_THREAD_ATTRIBUTE_LIST)attr_buf.data();
+        if (InitializeProcThreadAttributeList(attr, 1, 0, &asize)
+            && UpdateProcThreadAttribute(attr, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                         keep.data(), keep.size() * sizeof(HANDLE),
+                                         nullptr, nullptr)) {
+            si.lpAttributeList = attr;
+            flags |= EXTENDED_STARTUPINFO_PRESENT;
+        } else {
+            attr = nullptr;
+        }
+    }
 
     std::vector<wchar_t> cmd(cmdline.begin(), cmdline.end());
     cmd.push_back(L'\0');
@@ -222,9 +276,11 @@ inline bool spawn_process(const std::wstring& cmdline, const std::wstring& workd
         env_copy.push_back(L'\0');
         env_ptr = env_copy.data();
     }
-    BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                             CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-                             env_ptr, workdir.empty() ? nullptr : workdir.c_str(), &si, &pi);
+    BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, flags,
+                             env_ptr, workdir.empty() ? nullptr : workdir.c_str(),
+                             &si.StartupInfo, &pi);
+    if (attr) DeleteProcThreadAttributeList(attr);
+    if (nul) CloseHandle(nul);
     CloseHandle(in_read);
     CloseHandle(out_write);
     if (!ok) {
@@ -233,6 +289,7 @@ inline bool spawn_process(const std::wstring& cmdline, const std::wstring& workd
         return false;
     }
     CloseHandle(pi.hThread);
+    if (HANDLE job = child_job()) AssignProcessToJobObject(job, pi.hProcess);
     out.process = pi.hProcess;
     out.pid = pi.dwProcessId;
     out.stdin_write = in_write;
@@ -335,6 +392,23 @@ inline void ensure_dir(const std::string& path) {
     }
 }
 
+// 收尾排查用：--cli 跑完任务后卡死时，只有日志能指出卡在 shutdown 的哪一步
+inline void trace(const std::string& what) {
+    static CRITICAL_SECTION cs = [] {
+        CRITICAL_SECTION c;
+        InitializeCriticalSection(&c);
+        return c;
+    }();
+    ensure_dir(exe_dir() + "\\state");
+    EnterCriticalSection(&cs);
+    if (FILE* f = fopen((exe_dir() + "\\state\\trace.log").c_str(), "a")) {
+        fprintf(f, "%.1f pid=%lu tid=%lu %s\n", now_sec(), GetCurrentProcessId(),
+                GetCurrentThreadId(), what.c_str());
+        fclose(f);
+    }
+    LeaveCriticalSection(&cs);
+}
+
 inline bool read_file(const std::string& path, std::string& out) {
     HANDLE h = CreateFileW(utf8_to_wide(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -347,15 +421,46 @@ inline bool read_file(const std::string& path, std::string& out) {
     return true;
 }
 
+// 原子写：先写同目录 .tmp，FlushFileBuffers 落盘后 MoveFileExW 原子替换目标。
+// 旧行为 CREATE_ALWAYS 直接截断目标，进程被杀/断电会留下半截文件（settings.json 损坏根因）。
 inline bool write_file(const std::string& path, const std::string& content) {
     ensure_dir(parent_dir(path));
-    HANDLE h = CreateFileW(utf8_to_wide(path).c_str(), GENERIC_WRITE, 0, nullptr,
+    auto write_full = [&content](HANDLE h) {
+        BOOL ok = TRUE;
+        const char* p = content.data();
+        size_t left = content.size();
+        while (ok && left > 0) {
+            DWORD chunk = left > 0x40000000u ? 0x40000000u : (DWORD)left;
+            DWORD n = 0;
+            ok = WriteFile(h, p, chunk, &n, nullptr);
+            if (!ok || n != chunk) { ok = FALSE; break; }
+            p += chunk;
+            left -= chunk;
+        }
+        if (ok) ok = FlushFileBuffers(h);
+        CloseHandle(h);
+        return ok != FALSE;
+    };
+    std::string tmp = path + ".tmp";
+    HANDLE h = CreateFileW(utf8_to_wide(tmp).c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    DWORD n = 0;
-    BOOL ok = WriteFile(h, content.data(), (DWORD)content.size(), &n, nullptr);
-    CloseHandle(h);
-    return ok && n == content.size();
+    if (h == INVALID_HANDLE_VALUE) {
+        // 临时文件建不了（目录只读/杀软拦截）时退回原地直写，至少不比旧行为差
+        h = CreateFileW(utf8_to_wide(path).c_str(), GENERIC_WRITE, 0, nullptr,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        return write_full(h);
+    }
+    if (!write_full(h)) {
+        DeleteFileW(utf8_to_wide(tmp).c_str());
+        return false;
+    }
+    if (!MoveFileExW(utf8_to_wide(tmp).c_str(), utf8_to_wide(path).c_str(),
+                     MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(utf8_to_wide(tmp).c_str());
+        return false;
+    }
+    return true;
 }
 
 inline std::string read_file_tail(const std::string& path, size_t max_bytes = 65536) {
@@ -374,6 +479,121 @@ inline std::string read_file_tail(const std::string& path, size_t max_bytes = 65
     while (ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0) out.append(buf, n);
     CloseHandle(h);
     return out;
+}
+
+inline std::string trim_ascii(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return std::string();
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// 运行命令并捕获 stdout（无窗口；超时即杀）
+inline bool run_capture(const std::wstring& cmdline, std::string& out, DWORD max_wait_ms = 6000) {
+    ProcHandle p;
+    if (!spawn_process(cmdline, L"", L"", p)) return false;
+    if (p.stdin_write) { CloseHandle(p.stdin_write); p.stdin_write = nullptr; }
+    char buf[1024];
+    DWORD t0 = GetTickCount();
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(p.stdout_read, nullptr, 0, nullptr, &avail, nullptr)) break;
+        if (avail == 0) {
+            if (GetTickCount() - t0 > max_wait_ms) break;
+            Sleep(20);
+            continue;
+        }
+        DWORD n = 0;
+        if (!ReadFile(p.stdout_read, buf, sizeof(buf), &n, nullptr) || n == 0) break;
+        out.append(buf, n);
+    }
+    if (p.alive()) TerminateProcess(p.process, 0);
+    p.close();
+    return !out.empty();
+}
+
+struct AdbDevice {
+    std::string adb_path;
+    std::string address;   // 设备序列号，如 127.0.0.1:16384
+    std::string config;    // MAA 连接配置名，如 MuMuEmulator12 / General
+};
+
+// 探测本机 adb 与在线设备（模拟器优先），供 MAA 的 ADB 连接做默认值
+inline bool detect_adb(AdbDevice& out) {
+    static const char* kAdbPaths[] = {
+        "C:\\Program Files\\Netease\\MuMuPlayer\\nx_main\\adb.exe",
+        "C:\\Program Files\\Netease\\MuMu Player 12\\nx_main\\adb.exe",
+        "D:\\Program Files\\Netease\\MuMuPlayer\\nx_main\\adb.exe",
+        "D:\\Program Files\\Netease\\MuMu Player 12\\nx_main\\adb.exe",
+        "D:\\MuMuPlayer\\nx_main\\adb.exe",
+        "C:\\leidian\\LDPlayer9\\adb.exe",
+        "D:\\leidian\\LDPlayer9\\adb.exe",
+        "C:\\LDPlayer\\LDPlayer9\\adb.exe",
+        "C:\\Program Files\\LDPlayer9\\adb.exe",
+        "C:\\Program Files\\BlueStacks_nxt\\hd-adb.exe",
+        "C:\\Program Files (x86)\\Nox\\bin\\nox_adb.exe",
+        "D:\\Nox\\bin\\nox_adb.exe",
+    };
+    std::string path;
+    for (auto* c : kAdbPaths) {
+        if (file_exists(c)) { path = c; break; }
+    }
+    if (path.empty()) {
+        // PATH 里逐个目录找 adb.exe（避免起子进程，输出不被污染）
+        wchar_t buf[32768];
+        DWORD n = GetEnvironmentVariableW(L"PATH", buf, 32768);
+        if (n > 0 && n < 32768) {
+            std::wstring p(buf, n);
+            size_t pos = 0;
+            while (pos <= p.size()) {
+                size_t semi = p.find(L';', pos);
+                std::wstring dir = p.substr(pos, semi == std::wstring::npos
+                                               ? std::wstring::npos : semi - pos);
+                pos = (semi == std::wstring::npos) ? p.size() + 1 : semi + 1;
+                if (dir.empty()) continue;
+                if (dir.back() != L'\\') dir += L'\\';
+                std::string cand = wide_to_utf8(dir + L"adb.exe");
+                if (file_exists(cand)) { path = cand; break; }
+            }
+        }
+    }
+    if (path.empty()) return false;
+
+    std::string o;
+    std::string first;
+    if (run_capture(L"\"" + utf8_to_wide(path) + L"\" devices", o, 8000)) {
+        size_t pos = 0;
+        while (pos < o.size()) {
+            size_t nl = o.find('\n', pos);
+            std::string line = trim_ascii(o.substr(pos, nl == std::string::npos ?
+                                                      std::string::npos : nl - pos));
+            pos = (nl == std::string::npos) ? o.size() : nl + 1;
+            if (line.empty() || line.rfind("List of devices", 0) == 0) continue;
+            size_t tab = line.find('\t');
+            if (tab == std::string::npos) continue;
+            std::string serial = line.substr(0, tab);
+            std::string state = line.substr(tab + 1);
+            if (state != "device") continue;
+            if (first.empty()) first = serial;
+            // 模拟器本地端口优先（127.0.0.1 / emulator-）
+            if (serial.rfind("127.0.0.1:", 0) == 0 || serial.rfind("emulator-", 0) == 0) {
+                first = serial;
+                break;
+            }
+        }
+    }
+    if (first.empty()) return false;
+
+    out.adb_path = path;
+    out.address = first;
+    std::string lower = path;
+    for (auto& ch : lower) ch = (char)tolower((unsigned char)ch);
+    if (lower.find("mumu") != std::string::npos) out.config = "MuMuEmulator12";
+    else if (lower.find("ldplayer") != std::string::npos) out.config = "LDPlayer";
+    else if (lower.find("bluestacks") != std::string::npos) out.config = "BlueStacks";
+    else if (lower.find("nox") != std::string::npos) out.config = "Nox";
+    else out.config = "General";
+    return true;
 }
 
 } // namespace util

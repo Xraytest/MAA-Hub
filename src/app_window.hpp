@@ -18,6 +18,7 @@
 #include "hub.hpp"
 #include "json.hpp"
 #include "util.hpp"
+#include "config_import.hpp"
 
 namespace hub {
 
@@ -45,8 +46,12 @@ public:
     }
     void debug_refresh_snapshot() { refresh_snapshot(); }
     void debug_select_task(const std::string& task);
+    void debug_show_advanced() { advanced_view_ = true; }
     void debug_open_add_task();
     void debug_open_ctx_menu(const std::string& task);
+    void debug_open_new_exec();
+    // 离屏画布尺寸（真实窗口客户区为 800x600；不设置就按这个值建）
+    void debug_set_client_size(int w, int h) { dump_w_ = w; dump_h_ = h; }
     int run();
 
 private:
@@ -56,8 +61,9 @@ private:
     void render(RECT client);
 
     // 页面
-    // 自定义标题栏（官方 NonClientAreaContent）
-    void draw_title_bar(RECT r);
+    // 原生标题栏：窗口标题对齐官方 UpdateWindowTitle（实例名 + 连接地址）
+    void sync_window_title();
+    std::wstring win_title_;      // 上次写入的标题，避免每帧 SetWindowTextW
     bool topmost_ = false;
     bool auto_reload_ = false;   // 官方 EnableAutoReload（自动重载资源）
     // 任务切换过渡动画（官方 TransitioningContentControl 简化实现）
@@ -67,6 +73,9 @@ private:
     int panel_anim_dir_ = 1;           // 1=向下进入, -1=向上进入
     static constexpr double PANEL_ANIM_MS = 140.0;
     void draw_top_tabs(RECT r);
+    // 左侧栏：执行器列表 + 所有非执行器页面入口（账号/核心/规划/日志/设置）
+    void draw_left_rail(RECT r);
+    static constexpr int RAIL_W = 190;
     // 右下角 GIF 挂件（官方 GifImage：100x100、可拖拽、右键切换）
     void draw_gif_widget(RECT client);
     int gif_x_ = -1, gif_y_ = -1;          // -1 = 默认右下角
@@ -74,15 +83,17 @@ private:
     int gif_drag_dx_ = 0, gif_drag_dy_ = 0;
     size_t gif_index_ = 0;
     bool gif_hidden_ = true;   // 默认隐藏（无内置 GIF 资源，避免遮挡内容）
-    void draw_executor_strip(RECT r);
+    // 执行器列表：一个执行器 = 一个独立的 MAA/MaaEnd 实例，常驻左侧栏
+    void draw_executor_list(RECT r);
+    static constexpr int EXEC_ROW_H = 26;
     // 右列日志区（官方 TaskQueueView Column=2）
     void draw_log_column(RECT area, const std::string& id);
-    void draw_topbar(RECT r);
     void page_executor(RECT content);
     void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);
     void draw_post_action(RECT area, const std::string& id);
     void draw_task_ctx_menu();
     void draw_rename_box(RECT area, const std::string& id);
+    void draw_new_exec_overlay();
     void save_task_alias();
     void load_task_alias();
     std::string kind_of(const std::string& id) const;
@@ -91,7 +102,10 @@ private:
     void load_post_action();
     void save_task_list();
     void load_task_list();       // MAA 1:1 实例页
-    void page_welcome(RECT content);
+    void save_task_checks();     // 左列勾选状态（官方队列状态会持久化）
+    void load_task_checks();
+    void sync_task_checks(const std::string& id,
+                              const std::vector<mj::Value>& tasks);
     // 官方 CopilotView（自动战斗）
     void page_copilot(RECT content);
     // 官方 ToolboxView（小工具）
@@ -105,7 +119,12 @@ private:
     void page_settings(RECT content);
 
     // MAA 官方任务显示名（取自 MaaWpfGui Res/Localizations/zh-cn.xaml）
-    static std::wstring display_name(const std::string& kind, const std::string& task);
+    std::wstring display_name(const std::string& kind, const std::string& task);
+    // MaaEnd 任务名→官方 label（取自 interface 的 locales），随快照变化重建
+
+    const std::map<std::string, std::wstring>& end_labels();
+    std::map<std::string, std::wstring> end_label_;
+    std::string end_label_sig_;
 
     // 后台
     void backend_loop();
@@ -133,6 +152,7 @@ private:
     void action_pull_latest(const std::string& kind);
     void action_adopt(const std::string& kind);
     void action_save_settings();
+    void action_import_config();
 
     // 数据辅助（返回拷贝：快照会被后台线程整体替换，指针会悬空）
     bool find_executor(const std::string& id, mj::Value& out) const;
@@ -144,6 +164,7 @@ private:
     std::unique_ptr<Hub> hub_;
     mj::Value config_;
     bool offscreen_ = false;   // 离屏模式：窗口永不显示（仅测试/渲染用）
+    int dump_w_ = 0, dump_h_ = 0;   // 离屏客户区尺寸，0 = 用真实窗口的 800x600
 
     int sidebar_w_ = 250;
     int topbar_h_ = 36;   // 官方 TabItem 高度约 30，加内边距
@@ -156,10 +177,14 @@ private:
     SIZE mem_size_{ 0, 0 };
 
     // UI 状态
-    std::string page_ = "welcome";       // welcome | executor | accounts | cores | planner | events
+    std::string page_ = "executor";        // executor | accounts | cores | planner | events
     std::string selected_exec_;
     std::map<std::string, std::map<std::string, TaskUiState>> task_ui_;
+    // 首次打开某执行器时按官方预设初始化勾选
+    std::map<std::string, bool> task_ui_seeded_;
     std::map<std::string, float> scroll_;
+    // 滚动区内容高度（上一帧实测；scroll_ 的键一一对应）
+    std::map<std::string, int> content_h_;
     // 左列拖拽排序（对应 MAA 的 dd:DragDrop）
     std::map<std::string, std::vector<std::string>> task_order_;  // 执行器 -> 任务顺序
     std::string drag_task_;      // 正在拖拽的任务名
@@ -186,6 +211,9 @@ private:
     std::string add_task_filter_;
     // exec_id -> 左列显示的任务集（空 = 显示全部）
     std::map<std::string, std::set<std::string>> task_list_;
+    // 执行器 -> 已勾选任务；没有记录 = 首次使用，默认全部勾选
+    std::map<std::string, std::set<std::string>> task_checks_;
+    std::map<std::string, std::set<std::string>> task_ui_init_;
     bool show_new_exec_ = false;
     int new_kind_ = 0;
     int new_acc_idx_ = 0;                 // 0 = 不绑定
@@ -239,7 +267,15 @@ private:
     std::string dl_stage_;
 
     static const UINT WM_APP_SNAP = WM_APP + 1;
+    static const UINT WM_APP_IMPORT = WM_APP + 2;   // backend 线程完成导入 -> UI 线程合并任务列表
     static const UINT_PTR TIMER_REFRESH = 1;
+
+    // 导入动作的跨线程交接：backend 线程写入（import_mtx_ 保护），
+    // UI 线程在 WM_APP_IMPORT 里取走并合并进 task_list_
+    std::mutex import_mtx_;
+    mj::Value import_task_lists_;   // { exec_id: [任务名...] }
+    // 上次导入选过的安装目录（记住位置，下次直接停在那）
+    std::string import_path_ = "C:\\Program Files";
 };
 
 } // namespace hub

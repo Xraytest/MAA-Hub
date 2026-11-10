@@ -1,10 +1,12 @@
 // MaaHub 原生窗口应用实现
 #pragma comment(lib, "comdlg32.lib")   // GetOpenFileNameA（作业文件选择）
+#pragma comment(lib, "ole32.lib")      // CoCreateInstance/CoTaskMemFree（导入路径选择）
 #include "app_window.hpp"
 #include "task_panels.hpp"
 
 #include <windowsx.h>
 #include <commdlg.h>
+#include <shobjidl.h>   // IFileDialog（导入安装路径选择）
 
 namespace hub {
 
@@ -32,6 +34,7 @@ MaaHubWindow::MaaHubWindow(HINSTANCE hInst, mj::Value config, bool offscreen)
     : hInst_(hInst), config_(std::move(config)), offscreen_(offscreen) {
     hub_ = std::make_unique<Hub>(config_);
     load_task_list();
+    load_task_checks();
     load_post_action();
     load_task_alias();
     // MAA 启动直接进入任务队列页（无欢迎页）。MaaHub 有执行器时同样
@@ -69,11 +72,19 @@ bool MaaHubWindow::create() {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    int w = 800, h = 600;       // 官方 RootView Width=800 Height=600（最小值同）
+    // 官方 RootView Width=800 Height=600：执行器区保持 800 不变，左侧栏额外占 RAIL_W
+    int w = 800 + RAIL_W, h = 600;
     int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
     RECT rc{ 0, 0, w, h };
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     DWORD style = offscreen_ ? (WS_POPUP & ~WS_VISIBLE) : WS_OVERLAPPEDWINDOW;
+    if (offscreen_) {
+        // WS_POPUP 没有非客户区，外框即客户区。若这里也 AdjustWindowRect，
+        // 离屏画布会比真实窗口的 800x600 客户区多出标题栏那 16x39，
+        // 底部对齐的元素在真窗口里挤成重叠、在渲染图上却看不出来。
+        if (dump_w_ > 0 && dump_h_ > 0) { w = dump_w_; h = dump_h_; rc.right = w; rc.bottom = h; }
+    } else {
+        AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    }
     hwnd_ = CreateWindowExW(
         0, L"MaaHubMainWindow", L"MaaHub — MAA / MaaEnd 统一管理器",
         style,
@@ -233,35 +244,6 @@ LRESULT CALLBACK MaaHubWindow::wnd_proc(HWND hwnd, UINT m, WPARAM wp, LPARAM lp)
 
 LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
-    case WM_NCCALCSIZE:
-        // 自定义标题栏：客户区覆盖整个窗口（保留边框由 NCHITTEST 处理缩放）
-        if (wp) {
-            NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
-            RECT& r = p->rgrc[0];
-            // 保留 1px 边框用于边缘缩放命中
-            r.left += 1; r.right -= 1; r.bottom -= 1; r.top += 1;
-            return 0;
-        }
-        return DefWindowProcW(hwnd, m, wp, lp);
-    case WM_NCHITTEST: {
-        // 自定义标题栏命中测试：边缘 4px 缩放、标题栏拖拽
-        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        ScreenToClient(hwnd, &pt);
-        RECT rc; GetClientRect(hwnd, &rc);
-        const int B = 4;
-        bool left = pt.x < B, right = pt.x >= rc.right - B;
-        bool top = pt.y < B, bottom = pt.y >= rc.bottom - B;
-        if (top && left) return HTTOPLEFT;
-        if (top && right) return HTTOPRIGHT;
-        if (bottom && left) return HTBOTTOMLEFT;
-        if (bottom && right) return HTBOTTOMRIGHT;
-        if (left) return HTLEFT;
-        if (right) return HTRIGHT;
-        if (top) return HTTOP;
-        if (bottom) return HTBOTTOM;
-        if (pt.y < 32) return HTCAPTION;      // 标题栏区域可拖动
-        return HTCLIENT;
-    }
     case WM_MOUSEMOVE:
         input_.mouse.x = GET_X_LPARAM(lp);
         input_.mouse.y = GET_Y_LPARAM(lp);
@@ -324,6 +306,35 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     case WM_APP_SNAP:
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    case WM_APP_IMPORT: {
+        // backend 线程完成配置导入：取走 task_lists 并合并进内存权威 task_list_，
+        // 然后统一落盘（不直写 state/task-lists.json，避免与内存态互相覆盖）
+        mj::Value lists;
+        {
+            std::lock_guard<std::mutex> lk(import_mtx_);
+            lists = std::move(import_task_lists_);
+            import_task_lists_ = mj::Value::object();
+        }
+        bool changed = false;
+        if (lists.is_object()) {
+            for (auto& kv : lists.members()) {
+                if (!kv.second.is_array()) continue;
+                auto& dst = task_list_[kv.first];
+                for (auto& t : kv.second.items()) {
+                    if (t.is_string() && !t.as_string().empty()) {
+                        dst.insert(t.as_string());
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (changed) {
+            save_task_list();
+            refresh_snapshot();
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     case WM_SIZE:
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -386,19 +397,19 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
     gui_.set_dc(dc, client);
     gui_.begin(input_);
     gui_.fill(client, gui_.theme.bg);
+    sync_window_title();
 
-    // 自定义标题栏（官方 HandyControl ShowTitle=False + NonClientAreaContent）
-    const int TITLE_H = 32;
-    RECT titlebar{ client.left, client.top, client.right, client.top + TITLE_H };
-    draw_title_bar(titlebar);
-
-    // 官方外壳：顶部 Tab 栏（TabControlInLine）+ 全宽内容区
-    RECT tabbar{ client.left, client.top + TITLE_H, client.right,
-                 client.top + TITLE_H + topbar_h_ };
+    // 外壳：原生标题栏（窗口标题 = 动态实例信息）+ 左侧栏 + 右侧执行器区
+    // 执行器 = 一个独立的 MAA/MaaEnd 实例；非执行器内容全部收进左侧栏，
+    // 右侧整块留给官方 TaskQueueView 的三列布局
+    RECT rail{ client.left, client.top, client.left + RAIL_W, client.bottom };
+    RECT body{ rail.right, client.top, client.right, client.bottom };
+    RECT tabbar{ body.left, body.top, body.right, body.top + topbar_h_ };
     // 官方窗口 800x600，内容区边距收窄到 10（TaskQueueView 内部仍是 Margin 20 的比例）
-    RECT content{ client.left + 10, client.top + TITLE_H + topbar_h_ + 12,
-                  client.right - 10, client.bottom - 8 };
+    RECT content{ body.left + 10, body.top + topbar_h_ + 12,
+                  body.right - 10, body.bottom - 8 };
 
+    draw_left_rail(rail);
     draw_top_tabs(tabbar);
     draw_gif_widget(client);
 
@@ -411,12 +422,14 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
         else if (page_ == "planner") page_planner(content);
         else if (page_ == "events") page_events(content);
         else if (page_ == "settings") page_settings(content);
-        else page_welcome(content);
+        else page_executor(content);
     } catch (const std::exception& e) {
         fprintf(stderr, "[paint] EXCEPTION in page %s: %s\n", page_.c_str(), e.what());
     } catch (...) {
         fprintf(stderr, "[paint] UNKNOWN EXCEPTION in page %s\n", page_.c_str());
     }
+
+    draw_new_exec_overlay();   // 左栏「+ 新建」的弹窗，盖在所有页面之上
 
     gui_.end();
     input_.pressed = false;
@@ -488,15 +501,9 @@ void MaaHubWindow::draw_gif_widget(RECT client) {
 // ================================================================ 顶部 Tab 导航
 // 官方 RootView 用 TabControlInLine：标签在顶部，四个页签
 // （一键长草 / 自动战斗 / 小工具 / 设置）。MaaHub 用同样形态的顶部标签，
-// 页签为：任务队列 / 账号管理 / 核心管理 / 智能规划 / 事件日志 / 设置。
-// 自定义标题栏（官方 NonClientAreaContent）：
-//   居中显示动态窗口标题（官方 UpdateWindowTitle：模拟器 + IP:端口）
-//   右侧：📌 置顶切换 + 最小化 / 最大化 / 关闭
-void MaaHubWindow::draw_title_bar(RECT r) {
-    gui_.fill(r, gui_.theme.card_bg);
-    gui_.fill({ r.left, r.bottom - 1, r.right, r.bottom }, gui_.theme.border);
-
-    // 动态窗口标题（对齐官方 UpdateWindowTitle 的信息）
+// 右侧再挂全局管理入口（账号 / 核心 / 规划 / 日志）。
+// 窗口标题对齐官方 UpdateWindowTitle（模拟器 + IP:端口），由原生标题栏显示。
+void MaaHubWindow::sync_window_title() {
     std::wstring title = L"MaaHub";
     if (page_ == "executor") {
         mj::Value cur;
@@ -510,42 +517,9 @@ void MaaHubWindow::draw_title_bar(RECT r) {
             }
         }
     }
-    SIZE ts = gui_.text_size(title, gui_.font);
-    int tx = (r.left + r.right - ts.cx) / 2;
-    gui_.text(tx, r.top + (r.bottom - r.top - 18) / 2, title, gui_.theme.text, gui_.font);
-
-    // 右侧按钮：📌 置顶 + 最小化/最大化/关闭（官方 NonClientAreaContent）
-    int bw = 40, bh = r.bottom - r.top - 2;
-    int bx = r.right - 1;
-    const wchar_t* labels[4] = { L"\u00d7", L"\u25a1", L"\u2014", L"\U0001f4cc" };
-    const char* ids[4] = { "tb-close", "tb-max", "tb-min", "tb-pin" };
-    for (int k = 0; k < 4; ++k) {
-        bx -= bw;
-        RECT br{ bx, r.top + 1, bx + bw, r.top + 1 + bh };
-        bool hov = gui_.input().mouse.x >= br.left && gui_.input().mouse.x < br.right
-                && gui_.input().mouse.y >= br.top && gui_.input().mouse.y < br.bottom;
-        COLORREF txt = gui_.theme.dim;
-        if (hov) {
-            gui_.round_rect(br, gui_.theme.hover, gui_.theme.hover, 3);
-            txt = gui_.theme.text;
-        }
-        if (k == 3 && topmost_) txt = gui_.theme.primary;
-        gui_.text(br.left + (bw - gui_.text_size(labels[k], gui_.font).cx) / 2,
-                  br.top + (bh - 18) / 2, labels[k], txt, gui_.font);
-        if (hov && gui_.input().pressed) {
-            if (k == 0) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
-            else if (k == 1) {
-                if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
-                else ShowWindow(hwnd_, SW_MAXIMIZE);
-            } else if (k == 2) ShowWindow(hwnd_, SW_MINIMIZE);
-            else {
-                topmost_ = !topmost_;
-                SetWindowPos(hwnd_, topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST,
-                             0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-        }
-        bx -= 2;
-    }
+    if (title == win_title_) return;   // SetWindowTextW 会重绘非客户区，仅变化时调用
+    win_title_ = title;
+    if (hwnd_) SetWindowTextW(hwnd_, title.c_str());
 }
 
 void MaaHubWindow::draw_top_tabs(RECT r) {
@@ -560,18 +534,23 @@ void MaaHubWindow::draw_top_tabs(RECT r) {
         //   ToolboxViewModel=小工具 / SettingsViewModel=设置
         // MaaHub 的账号/核心/智能规划/事件日志是全局管理页，不占实例页 Tab
         { "executor",  L"\u4e00\u952e\u957f\u8349" },
-        { "copilot",   L"\u81ea\u52a8\u6218\u6597" },
-        { "toolbox",   L"\u5c0f\u5de5\u5177" },
-        { "settings",  L"\u8bbe\u7f6e" },
+        // 以下两页尚未做完，暂时隐藏入口（页面实现与路由保留，做完再放开）：
+        //   copilot = 自动战斗：作业列表为空，未接入 Copilot 适配器
+        //   toolbox = 小工具：5 个工具里 3 个（牛杂系列）未实现
+        // { "copilot",   L"\u81ea\u52a8\u6218\u6597" },
+        // { "toolbox",   L"\u5c0f\u5de5\u5177" },
     };
-    int x = r.left + 8;
     int y = r.top + 6;
     const int h = r.bottom - r.top - 12;
+    // 官方 TabControlInLine 的 headerPanel 是 UniformGrid Rows=1：等分整行，标签居中
+    const int ntab = (int)(sizeof(tabs) / sizeof(tabs[0]));
+    const int PIN_W = 56;   // 右侧只留给「置顶」
+    int slot = ((r.right - PIN_W) - r.left) / (ntab > 0 ? ntab : 1);
+    int x = r.left;
     for (auto& t : tabs) {
-        int w = gui_.text_size(t.label, gui_.font).cx + 28;
+        int w = slot;
         RECT tr{ x, y, x + w, y + h };
-        bool sel = (page_ == t.page)
-                   || (t.page == "executor" && page_ == "welcome");
+        bool sel = (page_ == t.page);
         bool hov = gui_.input().mouse.x >= tr.left && gui_.input().mouse.x < tr.right
                 && gui_.input().mouse.y >= tr.top && gui_.input().mouse.y < tr.bottom;
         // 官方 TabItemStyle：Padding=DefaultControlPadding(10,5)、MinHeight=28；
@@ -581,139 +560,203 @@ void MaaHubWindow::draw_top_tabs(RECT r) {
         if (hov && !sel) {
             gui_.round_rect(tr, gui_.theme.hover, gui_.theme.hover, 3);
         }
-        gui_.text(tr.left + 10, tr.top + (h - 18) / 2, t.label, txt, gui_.font);
+        int lw = gui_.text_size(t.label, gui_.font).cx;
+        gui_.text(tr.left + (w - lw) / 2, tr.top + (h - 18) / 2, t.label, txt, gui_.font);
         if (sel) {
-            // 底部 2px 下划线（官方选中态标识）
-            gui_.fill({ tr.left + 4, tr.bottom - 2, tr.right - 4, tr.bottom },
+            // 底部 2px 下划线（官方选中态标识），宽度随标签
+            int ux0 = tr.left + (w - lw) / 2;
+            gui_.fill({ ux0, tr.bottom - 2, ux0 + lw, tr.bottom },
                       gui_.theme.primary);
         }
         if (hov && gui_.input().pressed) {
             page_ = t.page;
-            if (t.page == "executor" && selected_exec_.empty()) page_ = "welcome";
         }
-        x += w + 4;
-
-        // MaaHub 全局管理入口（官方 Tab 仅 4 个功能页，这些是 MaaHub 扩展能力，
-        // 放在 Tab 栏右侧以小号文字按钮呈现，不干扰官方 Tab 视觉）
-        {
-            struct G { const char* page; const wchar_t* label; };
-            const G gs[] = {
-                { "accounts", L"\u8d26\u53f7" },
-                { "cores",    L"\u6838\u5fc3" },
-                { "planner",  L"\u89c4\u5212" },
-                { "events",   L"\u65e5\u5fd7" },
-            };
-            int gx = r.right - 8;
-            for (int gi = 3; gi >= 0; --gi) {
-                int gw = gui_.text_size(gs[gi].label, gui_.font_small).cx + 16;
-                gx -= gw;
-                RECT gr{ gx, y, gx + gw, y + h };
-                bool gh = gui_.input().mouse.x >= gr.left && gui_.input().mouse.x < gr.right
-                        && gui_.input().mouse.y >= gr.top && gui_.input().mouse.y < gr.bottom;
-                if (gh) gui_.round_rect(gr, gui_.theme.hover, gui_.theme.hover, 3);
-                gui_.text(gr.left + 8, gr.top + (h - 15) / 2, gs[gi].label,
-                          page_ == gs[gi].page ? gui_.theme.primary : gui_.theme.dim,
-                          gui_.font_small);
-                if (gh && gui_.input().pressed) page_ = gs[gi].page;
-                gx -= 6;
-            }
-        }
+        x += w;
     }
 
-    // 右侧：连接状态 + Link Start!/停止（官方底栏按钮组上移到顶栏右侧太挤，
-    // 这里只放最简状态；主操作仍在实例页底栏）
-    (void)0;
+    // 置顶切换：原来挂在自绘标题栏的 📌 上，标题栏去掉后挪到标签栏最右侧
+    {
+        const wchar_t* pin = L"置顶";
+        int pw = gui_.text_size(pin, gui_.font_small).cx + 16;
+        RECT pr{ r.right - 8 - pw, y, r.right - 8, y + h };
+        bool ph = gui_.hovered(pr);
+        if (ph) gui_.round_rect(pr, gui_.theme.hover, gui_.theme.hover, 3);
+        gui_.text(pr.left + 8, pr.top + (h - 15) / 2, pin,
+                  topmost_ ? gui_.theme.primary : gui_.theme.dim, gui_.font_small);
+        if (ph && gui_.input().pressed) {
+            topmost_ = !topmost_;
+            SetWindowPos(hwnd_, topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST,
+                         0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
 }
 
-// 执行器切换条：横向排列所有执行器（官方 MAA 单实例只有一个，
-// MaaHub 多执行器需要横向切换；选中项高亮）
-void MaaHubWindow::draw_executor_strip(RECT r) {
+// ================================================================ 左侧栏
+// 执行器 = 一个独立的 MAA/MaaEnd 实例。账号/核心/规划/日志/设置这些不属于执行器
+// 的内容全部收在这里，右侧整块留给官方 TaskQueueView 的三列布局。
+void MaaHubWindow::draw_left_rail(RECT r) {
+    gui_.fill(r, gui_.theme.row_alt);
+    gui_.fill({ r.right - 1, r.top, r.right, r.bottom }, gui_.theme.border);
+
+    int x0 = r.left + 8, x1 = r.right - 8;
+    int y = r.top + 10;
+    gui_.text(x0 + 4, y, L"执行器", gui_.theme.dim, gui_.font_small);
+    y += 20;
+
     std::vector<ExecutorEntry> execs = hub_->executors();
-    if (execs.empty()) return;
-    int x = r.left;
-    const int h = r.bottom - r.top;
-    for (auto& e : execs) {
-        std::wstring label = gui::widen(e.label);
-        int w = gui_.text_size(label, gui_.font_small).cx + 34;
-        if (x + w > r.right) break;              // 放不下就不画（多执行器时可滚动/折叠）
-        RECT ir{ x, r.top, x + w, r.bottom };
+    if (!execs.empty()) {
+        draw_executor_list({ x0, y, x1, y + (int)execs.size() * EXEC_ROW_H });
+        y += (int)execs.size() * EXEC_ROW_H + 2;
+    }
+    RECT nb{ x0, y, x1, y + EXEC_ROW_H };
+    bool nh = gui_.hovered(nb);
+    if (nh) gui_.round_rect(nb, gui_.theme.hover, gui_.theme.hover, 4);
+    gui_.text(nb.left + 10, nb.top + 5, L"＋ 新建执行器",
+              nh ? gui_.theme.primary : gui_.theme.dim, gui_.font_small);
+    if (nh && gui_.input().pressed) {
+        show_new_exec_ = true;
+        new_label_.clear();
+    }
+    y += EXEC_ROW_H + 8;
+
+    gui_.fill({ x0 + 4, y, x1 - 4, y + 1 }, gui_.theme.border);
+    y += 12;
+
+    struct G { const char* page; const wchar_t* label; };
+    const G gs[] = {
+        { "accounts", L"账号管理" },
+        { "cores",    L"核心管理" },
+        { "planner",  L"智能规划" },
+        { "events",   L"事件日志" },
+        { "settings", L"设置"     },
+    };
+    for (auto& g : gs) {
+        RECT gr{ x0, y, x1, y + EXEC_ROW_H };
+        bool sel = page_ == g.page;
+        bool hov = gui_.hovered(gr);
+        if (sel) gui_.round_rect(gr, gui_.theme.primary_light, gui_.theme.primary, 4);
+        else if (hov) gui_.round_rect(gr, gui_.theme.hover, gui_.theme.hover, 4);
+        gui_.text(gr.left + 10, gr.top + 5, g.label,
+                  sel ? gui_.theme.primary_dark : gui_.theme.text, gui_.font_small);
+        if (hov && gui_.input().pressed) page_ = g.page;
+        y += EXEC_ROW_H + 2;
+    }
+}
+
+// 执行器列表：常驻左侧栏，点选即切换当前实例。
+void MaaHubWindow::draw_executor_list(RECT r) {
+    std::vector<ExecutorEntry> execs = hub_->executors();
+    const int RH = EXEC_ROW_H;               // 行高（与官方任务项 24.5 同量级）
+    for (size_t k = 0; k < execs.size(); ++k) {
+        const ExecutorEntry& e = execs[k];
+        int top = r.top + (int)k * RH;
+        if (top + RH - 3 > r.bottom) break;  // 放不下即止（单列实例数远小于可视高度）
+        RECT ir{ r.left, top, r.right, top + RH - 3 };
         bool sel = selected_exec_ == e.id;
-        bool hov = gui_.input().mouse.x >= ir.left && gui_.input().mouse.x < ir.right
-                && gui_.input().mouse.y >= ir.top && gui_.input().mouse.y < ir.bottom;
-        COLORREF fill_c = sel ? gui_.theme.primary_light : gui_.theme.panel;
-        COLORREF line_c = sel ? gui_.theme.primary : gui_.theme.border;
-        if (hov && !sel) fill_c = gui_.theme.hover;
-        gui_.round_rect(ir, fill_c, line_c, 4);
+        bool hov = gui_.hovered(ir);
+        // 侧栏里靠底色区分选中，未选中不描边，否则一列方框很碎
+        gui_.round_rect(ir, sel ? gui_.theme.primary_light : (hov ? gui_.theme.hover : CLR_INVALID),
+                        sel ? gui_.theme.primary : CLR_INVALID, 4);
         mj::Value st = hub_->executor_status(e.id, 0.4);
         std::string conn = st.get_str("conn", "unknown");
         std::string run = st.get_str("run", "");
         COLORREF dot = conn == "connected" ? gui_.theme.ok :
                        conn == "failed" ? gui_.theme.err :
                        run == "running" ? gui_.theme.primary : gui_.theme.dim;
-        gui_.round_rect({ ir.left + 8, ir.top + (h - 8) / 2, ir.left + 16, ir.top + (h + 8) / 2 },
+    int dh = 8;
+        gui_.round_rect({ ir.left + 9, ir.top + (ir.bottom - ir.top - dh) / 2,
+                          ir.left + 9 + dh, ir.top + (ir.bottom - ir.top + dh) / 2 },
                         dot, dot, 5);
-        gui_.text_clipped({ ir.left + 22, ir.top + 2, ir.right - 4, ir.bottom },
-                          label, sel ? gui_.theme.primary_dark : gui_.theme.text,
-                          gui_.font_small);
+        gui_.text_clipped({ ir.left + 24, ir.top + 2, ir.right - 8, ir.bottom },
+                          gui::widen(e.label),
+                          sel ? gui_.theme.primary_dark : gui_.theme.text, gui_.font_small);
         if (hov && gui_.input().pressed) {
             selected_exec_ = e.id;
             page_ = "executor";
         }
-        x += w + 6;
     }
 }
 
-// ================================================================ 顶栏
-void MaaHubWindow::draw_topbar(RECT r) {
-    // 官方 TabControlInLine：headerPanel 背景透明（继承 RegionBrushOpacity25）
-    gui_.fill(r, gui_.theme.card_bg);
-    gui_.fill({ r.left, r.bottom - 1, r.right, r.bottom }, gui_.theme.border);
+// 新建执行器：一个执行器 = 一份独立的核心 + 账号 + 任务配置
+void MaaHubWindow::draw_new_exec_overlay() {
+    if (!show_new_exec_) return;
+    RECT cl;
+    GetClientRect(hwnd_, &cl);
+    gui_.fill(cl, RGB(0x10, 0x10, 0x10));
 
-    std::wstring title = L"MaaHub";
-    mj::Value cur;
-    bool has_cur = false;
-    if (page_ == "executor") {
-        has_cur = find_executor(selected_exec_, cur);
-        title = has_cur ? gui::widen(cur.get_str("label", "")) : L"执行器";
-    } else if (page_ == "accounts") title = L"👥 账号管理";
-    else if (page_ == "cores") title = L"📦 核心管理";
-    else if (page_ == "planner") title = L"🧠 智能规划";
-    else if (page_ == "events") title = L"📡 事件日志";
-    else if (page_ == "settings") title = L"⚙️ 设置";
-    gui_.text(r.left + 4, r.top + 18, title, gui_.theme.text, gui_.font_title);
+    const int W = 320, H = 196;
+    RECT card{ (cl.right - W) / 2, (cl.bottom - H) / 2, (cl.right + W) / 2, (cl.bottom + H) / 2 };
+    gui_.round_rect(card, gui_.theme.panel, gui_.theme.border, 6);
+    gui_.text(card.left + 16, card.top + 14, L"新建执行器", gui_.theme.text, gui_.font_title);
 
-    // 连接 / Link Start! 只在实例页显示（与 MAA 官方一致：按钮是任务页上下文相关的）
-    bool on_instance = (page_ == "executor");
-    bool connected = has_cur && cur.get_str("conn", "") == "connected";
-    if (on_instance) {
-        RECT br{ r.right - 320, r.top + 10, r.right - 240, r.bottom - 10 };
-        if (gui_.button("btn-connect", br, connected ? L"断开" : L"连接", 0, has_cur)) {
-            if (connected) action_disconnect(selected_exec_);
-            else action_connect(selected_exec_);
-        }
-        RECT lr{ r.right - 228, r.top + 10, r.right - 20, r.bottom - 10 };
-        bool running = has_cur && cur.get_bool("busy", false);
-        if (running) {
-            // 运行中：按钮变为「停止」（官方 Common.Stop）
-            if (gui_.button("btn-stop", lr, L"\u23f9 \u505c\u6b62", 2, has_cur)) {
-                std::string id = selected_exec_;
-                post_action([this, id] { hub_->stop_executor(id); },
-                            "\u505c\u6b62");
+    int y = card.top + 44;
+    gui_.text(card.left + 16, y + 4, L"类型", gui_.theme.dim, gui_.font_small);
+    RECT kind_r{ card.left + 64, y, card.right - 16, y + 24 };
+    int k = gui_.option_strip("newexec-kind", kind_r,
+                              { L"MAA 官服", L"MaaEnd 终末地" }, new_kind_);
+    if (k >= 0) new_kind_ = k;
+    y += 32;
+
+    gui_.text(card.left + 16, y + 4, L"名称", gui_.theme.dim, gui_.font_small);
+    RECT name{ card.left + 64, y, card.right - 16, y + 24 };
+    gui_.text_input("newexec-label", name, new_label_, L"留空自动命名");
+    y += 32;
+
+    // 账号按类型过滤；0 = 不绑定
+    std::string kind_key = new_kind_ == 0 ? "maa" : "maaend";
+    std::vector<std::wstring> accs{ L"不绑定" };
+    {
+        std::lock_guard<std::mutex> lk(snap_mtx_);
+        if (auto* a = snap_.find("accounts"); a && a->is_array()) {
+            for (auto& x : a->items()) {
+                if (x.get_str("game", "") != kind_key) continue;
+                accs.push_back(gui::widen(x.get_str("label", "")));
             }
-        } else if (gui_.button("btn-linkstart", lr, L"\U0001f517 Link Start!", 1, has_cur)) {
-            std::string id = selected_exec_;
-            post_action([this, id] {
-                mj::Value st = hub_->executor_status(id);
-                if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
-                action_run_checked(id);
-            }, "\u94fe\u63a5\u5f00\u59cb");
         }
     }
-    int dl = dl_progress_.load();
-    if (dl >= 0) {
-        std::wstring t = L"\u23f3 " + gui::widen(dl_stage_) + L" " + std::to_wstring(dl) + L"%";
-        gui_.text(r.right - 560, r.top + 20, t, gui_.theme.warn, gui_.font_small);
+    if (new_acc_idx_ >= (int)accs.size()) new_acc_idx_ = 0;
+    gui_.text(card.left + 16, y + 4, L"账号", gui_.theme.dim, gui_.font_small);
+    RECT acc{ card.left + 64, y, card.right - 16, y + 24 };
+    int pick = gui_.combo("newexec-acc", acc, accs, new_acc_idx_);
+    if (pick >= 0) new_acc_idx_ = pick;
+
+    RECT ok_b{ card.right - 96, card.bottom - 40, card.right - 16, card.bottom - 14 };
+    RECT cancel_b{ card.right - 184, card.bottom - 40, card.right - 104, card.bottom - 14 };
+    gui_.flush_combo_popup();
+    if (gui_.button("newexec-cancel", cancel_b, L"取消", 0)) show_new_exec_ = false;
+    if (gui_.button("newexec-ok", ok_b, L"创建", 1)) action_create_executor();
+}
+
+
+// MaaEnd 任务名 -> 官方界面文案：直接取 interface 里 $task.X.label 解析出的 label。
+// 硬编码表覆盖不全（SellProduct 的文案挂在 task.OutpostTrading.label 上），
+// 所以以核心自带的 locales 为准，表只作兜底。
+const std::map<std::string, std::wstring>& MaaHubWindow::end_labels() {
+    std::map<std::string, std::wstring> fresh;
+    std::string sig;
+    {
+        std::lock_guard<std::mutex> lk(snap_mtx_);
+        if (auto* e = snap_.find("executors"); e && e->is_array()) {
+            for (auto& x : e->items()) {
+                if (x.get_str("kind", "") != "maaend") continue;
+                auto* c = x.find("catalog");
+                if (!c || !c->is_array()) break;
+                for (auto& t : c->items()) {
+                    std::string nm = t.get_str("name", "");
+                    if (nm.empty()) continue;
+                    sig += nm; sig += '|';
+                    std::string lbl = t.get_str("label", "");
+                    if (!lbl.empty()) fresh[nm] = gui::widen(lbl);
+                }
+                break;
+            }
+        }
     }
+    if (!sig.empty() && sig != end_label_sig_) {
+        end_label_sig_ = sig;
+        end_label_ = std::move(fresh);
+    }
+    return end_label_;
 }
 
 // MAA 官方任务显示名（取自 MaaWpfGui/Res/Localizations/zh-cn.xaml 的 TaskQueue.Task.*）
@@ -733,7 +776,10 @@ std::wstring MaaHubWindow::display_name(const std::string& kind, const std::stri
         if (task == "Reclamation") return L"\u751f\u606f\u6f14\u7b97";
         if (task == "Custom") return L"\u81ea\u5b9a\u4efb\u52a1";
     } else {
-if (task == "AccountSwitch") return L"🔑自动切换账号";
+        auto& lm = end_labels();
+        auto li = lm.find(task);
+        if (li != lm.end()) return li->second;
+        if (task == "AccountSwitch") return L"🔑自动切换账号";
         if (task == "AdbAutoFightTest") return L"🧪战斗测试";
         if (task == "AeroSalvage") return L"🎈浮空回收";
         if (task == "AndroidOpenGame") return L"🎮打开游戏（安卓端）";
@@ -803,11 +849,6 @@ if (task == "AccountSwitch") return L"🔑自动切换账号";
     return gui::widen(task);
 }
 
-// MaaEnd 内部入口任务（官方 GUI 不展示，无 label）
-inline bool maaend_hidden_task(const std::string& t) {
-    return t == "SellProduct" || t == "SimpleProductionBatchStart";
-}
-
 // 「添加新任务」浮层：勾选要显示在左列的任务（官方左列仅显示用户添加的任务）
 void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
                                          const std::string& kind) {
@@ -843,7 +884,6 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
     int y = list_r.top + 4 - (int)scroll_["addtask-list"];
     for (int i = 0; i < total; ++i) {
         std::string nm = all[i].get_str("name", "");
-        if (kind == "maaend" && maaend_hidden_task(nm)) continue;
         // 过滤
         if (!add_task_filter_.empty()) {
             std::wstring dn = display_name(kind, nm);
@@ -867,7 +907,6 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
                 if (task_list_.find(id) == task_list_.end()) {
                     for (auto& t : all) {
                         std::string s = t.get_str("name", "");
-                        if (kind == "maaend" && maaend_hidden_task(s)) continue;
                         task_list_[id].insert(s);
                     }
                 }
@@ -876,7 +915,6 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
                 if (task_list_.find(id) == task_list_.end()) {
                     for (auto& t : all) {
                         std::string s = t.get_str("name", "");
-                        if (kind == "maaend" && maaend_hidden_task(s)) continue;
                         task_list_[id].insert(s);
                     }
                 }
@@ -896,7 +934,6 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
         task_list_[id].clear();
         for (auto& t : all) {
             std::string s = t.get_str("name", "");
-            if (kind == "maaend" && maaend_hidden_task(s)) continue;
             task_list_[id].insert(s);
         }
         save_task_list();
@@ -906,13 +943,11 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
         if (task_list_.find(id) == task_list_.end()) {
             for (auto& t : all) {
                 std::string s = t.get_str("name", "");
-                if (kind == "maaend" && maaend_hidden_task(s)) continue;
                 task_list_[id].insert(s);
             }
         }
         for (auto& t : all) {
             std::string s = t.get_str("name", "");
-            if (kind == "maaend" && maaend_hidden_task(s)) continue;
             if (task_list_[id].count(s)) task_list_[id].erase(s);
             else task_list_[id].insert(s);
         }
@@ -1039,6 +1074,46 @@ void MaaHubWindow::load_task_list() {
         if (!kv.second.is_array()) continue;
         for (auto& nm : kv.second.items()) {
             if (nm.is_string()) task_list_[kv.first].insert(nm.as_string());
+        }
+    }
+}
+
+// 左列勾选状态：官方 MAA 会记住队列勾选，重启后恢复上次的运行组合
+void MaaHubWindow::save_task_checks() {
+    mj::Value v = mj::Value::object();
+    for (auto& kv : task_checks_) {
+        mj::Value arr = mj::Value::array();
+        for (auto& nm : kv.second) arr.push(nm);
+        v.set(kv.first, std::move(arr));
+    }
+    util::write_file(util::exe_dir() + "\\state\\task-checks.json",
+                     mj::Value::dump_pretty(v));
+}
+
+// 依据当前可见任务重建勾选记录并落盘
+void MaaHubWindow::sync_task_checks(const std::string& id,
+                                    const std::vector<mj::Value>& tasks) {
+    auto& cs = task_checks_[id];
+    cs.clear();
+    auto it = task_ui_.find(id);
+    if (it == task_ui_.end()) { save_task_checks(); return; }
+    for (auto& t : tasks) {
+        std::string nm = t.get_str("name", "");
+        auto jt = it->second.find(nm);
+        if (jt != it->second.end() && jt->second.checked) cs.insert(nm);
+    }
+    save_task_checks();
+}
+
+void MaaHubWindow::load_task_checks() {
+    std::string content;
+    if (!util::read_file(util::exe_dir() + "\\state\\task-checks.json", content)) return;
+    mj::Value v;
+    if (!mj::try_parse(content, v)) return;
+    for (auto& kv : v.members()) {
+        if (!kv.second.is_array()) continue;
+        for (auto& nm : kv.second.items()) {
+            if (nm.is_string()) task_checks_[kv.first].insert(nm.as_string());
         }
     }
 }
@@ -1196,206 +1271,96 @@ static std::wstring connected_text(const std::string& conn) {
 // 官方结构：顶部下载卡片（有下载任务时显示）+ 信息流日志列表。
 // MaaHub 用 Hub 的事件日志作为数据源，按时间倒序展示。
 void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
-    // 右列（官方 Column=2）：日志区。
-    // 官方此处是下载卡片 + 信息流日志；MaaHub 改为常驻展示
-    // 「实例状态 / 任务进度 / 最近事件」，避免右列大片空白。
-    gui_.fill({ area.left, area.top, area.left + 1, area.bottom }, gui_.theme.border);
+    // 官方右列（Grid.Column="2"，Margin="10,10,0,10"）= 纯日志流：
+    //   每条日志一个卡片 Border Margin="0,0,0,2.5" Padding="5,0,1,5"
+    //     Background=MouseOverRegionBrushOpacity10 BorderBrush=BorderBrush
+    //     BorderThickness=1 CornerRadius=4
+    //   卡片内两列：时间 Width=60 / Foreground=TraceLogBrush，内容 TextWrapping=Wrap
+    // 官方按时间正序追加并自动滚到底，这里同样从底部向上排最近若干条。
+    int x = area.left;
+    int right = area.right - 1;
+    int content_x = x + 65;                 // 5（左边距）+ 60（时间列）
+    int maxw = right - content_x - 3;
+    if (maxw < 40) maxw = 40;
 
-    int x = area.left + 12;
-    int y = area.top + 4;
-    int right = area.right - 8;
-
-    gui_.text(x, y, L"\u72b6\u6001\u4e0e\u65e5\u5fd7", gui_.theme.dim, gui_.font_small);
-    y += 22;
-
-    mj::Value st = hub_->executor_status(id, 0.4);
-    std::string conn = st.get_str("conn", "unknown");
-    std::string run = st.get_str("run", "");
-    bool busy = st.get_bool("busy", false);
-    std::string last = st.get_str("last_error", "");
-    int task_count = (int)st.get_int("task_count", 0);
-
-    // ---- 状态卡 ----
-    {
-        RECT card{ x, y, right, y + 58 };
-        COLORREF fill = busy ? gui_.theme.primary_light : gui_.theme.card_bg;
-        COLORREF line = busy ? gui_.theme.primary : gui_.theme.border;
-        gui_.round_rect(card, fill, line, 4);
-        COLORREF dot = conn == "connected" ? gui_.theme.ok :
-                       conn == "failed" ? gui_.theme.err :
-                       conn == "connecting" ? gui_.theme.warn : gui_.theme.faint;
-        gui_.round_rect({ card.left + 10, card.top + 12, card.left + 20, card.top + 22 },
-                        dot, dot, 5);
-        std::wstring st_txt = connected_text(conn);
-        gui_.text(card.left + 26, card.top + 10, st_txt, gui_.theme.text, gui_.font_bold);
-        std::wstring sub = busy ? L"\u4efb\u52a1\u8fd0\u884c\u4e2d" :
-                          (run == "running" ? L"\u5df2\u8fde\u63a5\uff0c\u7a7a\u95f2" : L"\u7b49\u5f85\u64cd\u4f5c");
-        RECT save = gui_.clip();
-        gui_.text_clipped({ card.left + 26, card.top + 30, card.right - 10, card.bottom - 4 },
-                          sub, gui_.theme.dim, gui_.font_small);
-        (void)save;
-        y = card.bottom + 10;
-    }
-
-    // ---- 任务进度卡（一个数字概览，避免与下方列表标题重复）----
-    {
-        RECT card{ x, y, right, y + 38 };
-        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
-        int enabled = 0;
-        auto it = task_ui_.find(id);
-        if (it != task_ui_.end()) {
-            for (auto& kv : it->second) {
-                if (kv.second.checked || kv.second.once) ++enabled;
+    // 逐字按可用宽度折行（官方面对窄列时 Wrap 而不是裁切），超过 3 行加省略号
+    auto wrap = [&](const std::wstring& s, int max_rows) {
+        std::vector<std::wstring> rows;
+        std::wstring cur;
+        int used = 0;
+        for (wchar_t ch : s) {
+            int cw = gui_.text_size(std::wstring(1, ch), gui_.font_small).cx;
+            if (used + cw > maxw && !cur.empty()) {
+                rows.push_back(cur);
+                cur.clear();
+                used = 0;
+                if ((int)rows.size() >= max_rows) { rows.back() += L"\u2026"; return rows; }
             }
+            cur += ch;
+            used += cw;
         }
-        gui_.text(card.left + 10, card.top + 5, L"\u4efb\u52a1\u8fdb\u5ea6",
-                  gui_.theme.dim, gui_.font_small);
-        gui_.text(card.left + 10, card.top + 18,
-                  std::to_wstring(enabled) + L" / " + std::to_wstring(task_count)
-                      + L" \u5df2\u542f\u7528",
-                  gui_.theme.primary, gui_.font_bold);
-        y = card.bottom + 8;
-    }
+        if (!cur.empty()) rows.push_back(cur);
+        if ((int)rows.size() > max_rows) { rows.resize(max_rows); rows.back() += L"\u2026"; }
+        return rows;
+    };
 
-    // ---- 最近事件（最多 3 条，避免挤压下方区块）----
-    gui_.text(x, y, L"\u6700\u8fd1\u4e8b\u4ef6", gui_.theme.dim, gui_.font_small);
-    y += 18;
-    std::vector<std::string> lines;
+    struct Row { std::wstring time, text; COLORREF col; };
+    std::vector<Row> src;
     {
         std::lock_guard<std::mutex> lk(snap_mtx_);
         if (auto* ev = snap_.find("events"); ev && ev->is_array()) {
-            for (auto& e : ev->items()) lines.push_back(e.as_string());
-        }
-    }
-    if (lines.empty()) {
-        gui_.text(x, y, L"\u6682\u65e0\u4e8b\u4ef6\u8bb0\u5f55", gui_.theme.faint,
-                  gui_.font_small);
-        y += 18;
-    } else {
-        int row_h = 18;
-        int shown = (int)lines.size() > 3 ? 3 : (int)lines.size();
-        for (int i2 = (int)lines.size() - shown; i2 < (int)lines.size(); ++i2) {
-            RECT save = gui_.clip();
-            gui_.text_clipped({ x, y, right, y + row_h },
-                              gui::widen(lines[i2]), gui_.theme.dim, gui_.font_small);
-            (void)save;
-            y += row_h;
-        }
-    }
-    y += 6;
-
-    // ---- 最近错误（有则高亮）----
-    if (!last.empty()) {
-        y += 8;
-        RECT card{ x, y, right, y + 44 };
-        gui_.round_rect(card, gui_.theme.err_light, gui_.theme.err, 4);
-        gui_.text(card.left + 10, card.top + 6, L"\u6700\u8fd1\u9519\u8bef",
-                  gui_.theme.err, gui_.font_small);
-        RECT save = gui_.clip();
-        gui_.text_clipped({ card.left + 10, card.top + 20, card.right - 10, card.bottom - 4 },
-                          gui::widen(last), gui_.theme.err, gui_.font_small);
-        (void)save;
-        y = card.bottom + 10;
-    }
-
-    // ---- 已启用任务列表（官方信息流的常驻替代，让右列有实质内容）----
-    {
-        std::string kind;
-        for (auto& e : hub_->executors()) {
-            if (e.id == id) { kind = e.kind; break; }
-        }
-        std::vector<std::string> enabled_names;
-        auto it = task_ui_.find(id);
-        if (it != task_ui_.end()) {
-            for (auto& kv : it->second) {
-                if (kv.second.checked || kv.second.once) enabled_names.push_back(kv.first);
-            }
-        }
-        // 按左列显示顺序排序
-        std::vector<mj::Value> all = catalog_of(kind);
-        auto oit = task_order_.find(id);
-        if (oit != task_order_.end() && !oit->second.empty()) {
-            std::vector<std::string> ordered;
-            for (auto& nm : oit->second) {
-                for (auto& e : enabled_names) if (e == nm) { ordered.push_back(nm); break; }
-            }
-            for (auto& e : enabled_names) {
-                bool f = false;
-                for (auto& s : ordered) if (s == e) { f = true; break; }
-                if (!f) ordered.push_back(e);
-            }
-            enabled_names.swap(ordered);
-        }
-
-        gui_.text(x, y, L"\u5df2\u542f\u7528\u4efb\u52a1", gui_.theme.dim, gui_.font_small);
-        y += 20;
-        if (!enabled_names.empty()) {
-            int row_h = 22;
-            int avail = area.bottom - y - 4;
-            int visible = avail / row_h;
-            if (visible < 1) visible = 1;
-            int start = (int)enabled_names.size() > visible
-                        ? (int)enabled_names.size() - visible : 0;
-            for (int i2 = (int)enabled_names.size() - 1; i2 >= start; --i2) {
-                std::wstring nm = display_name(kind, enabled_names[i2]);
-                auto al = task_alias_.find(id + "|" + enabled_names[i2]);
-                if (al != task_alias_.end() && !al->second.empty()) {
-                    nm = gui::widen(al->second);
+            for (auto& e : ev->items()) {
+                if (e.get_str("exec_id", "") != id) continue;
+                Row r;
+                int64_t ts = e.get_int("ts", 0);
+                r.time = L"--:--:--";
+                if (ts > 0) {
+                    time_t tt = (time_t)ts;
+                    struct tm tmv;
+                    if (localtime_s(&tmv, &tt) == 0) {
+                        wchar_t buf[16];
+                        swprintf(buf, 16, L"%02d:%02d:%02d",
+                                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+                        r.time = buf;
+                    }
                 }
-                bool is_running = hub_->running_task_of(id) == enabled_names[i2];
-                RECT row{ x, y, right, y + row_h - 2 };
-                if (is_running) {
-                    gui_.round_rect(row, gui_.theme.primary_light,
-                                    gui_.theme.primary, 3);
-                }
-                gui_.round_rect({ x + 2, y + 6, x + 8, y + 12 },
-                                is_running ? gui_.theme.primary : gui_.theme.ok,
-                                is_running ? gui_.theme.primary : gui_.theme.ok, 3);
-                RECT save = gui_.clip();
-                gui_.text_clipped({ x + 14, y + 2, right, y + row_h },
-                                  nm, gui_.theme.text, gui_.font_small);
-                (void)save;
-                y += row_h;
+                std::string what = e.get_str("what", "");
+                std::string raw = e.get_str("raw", "");
+                std::string task = e.get_str("task", "");
+                std::string body = raw.empty()
+                    ? (what + (task.empty() ? "" : (" / " + task))) : raw;
+                r.text = gui::widen(body.empty() ? what : body);
+                std::string cat = e.get_str("category", "");
+                r.col = cat == "error" ? gui_.theme.err
+                      : (cat == "warning" || cat == "connection") ? gui_.theme.warn
+                                                                  : gui_.theme.text;
+                src.push_back(std::move(r));
             }
         }
     }
+    if (src.empty()) {
+        gui_.text(x + 4, area.top + 4, L"\u6682\u65e0\u65e5\u5fd7",
+                  gui_.theme.faint, gui_.font_small);
+        return;
+    }
 
-    // ---- 实例档案（核心/路径/创建时间/账号）：右列常驻信息，避免大片空白 ----
-    {
-        y += 10;
-        ExecutorEntry ex;
-        if (hub_->get_executor(id, ex)) {
-            RECT card{ x, y, right, y + 96 };
-            gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
-            int cy = card.top + 8;
-            auto row = [&](const std::wstring& k, const std::wstring& v) {
-                gui_.text(card.left + 10, cy, k, gui_.theme.dim, gui_.font_small);
-                RECT save = gui_.clip();
-                gui_.text_clipped({ card.left + 76, cy, card.right - 10, cy + 16 },
-                                  v, gui_.theme.text, gui_.font_small);
-                (void)save;
-                cy += 18;
-            };
-            row(L"\u7c7b\u578b", ex.kind == "maa" ? L"MAA\uff08\u660e\u65e5\u65b9\u821e\uff09"
-                                                    : L"MaaEnd\uff08\u7ec8\u672b\u5730\uff09");
-            row(L"\u6838\u5fc3", gui::widen(ex.core_id));
-            std::wstring ct = L"-";
-            if (ex.created_at > 0) {
-                time_t tt = (time_t)ex.created_at;
-                struct tm tmv;
-                if (localtime_s(&tmv, &tt) == 0) {
-                    wchar_t buf[32];
-                    swprintf(buf, 32, L"%04d-%02d-%02d %02d:%02d",
-                             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-                             tmv.tm_hour, tmv.tm_min);
-                    ct = buf;
-                }
-            }
-            row(L"\u521b\u5efa", ct);
-            row(L"\u8d26\u53f7", ex.account_id.empty() ? L"\u672a\u7ed1\u5b9a"
-                                                        : gui::widen(ex.account_id));
-            row(L"\u72b6\u6001", ex.enabled ? L"\u5df2\u542f\u7528" : L"\u5df2\u7981\u7528");
+    int y = area.bottom;
+    for (int i = (int)src.size() - 1; i >= 0; --i) {
+        std::vector<std::wstring> lines = wrap(src[i].text, 3);
+        int h = 10 + 16 * (int)lines.size();
+        if (h < 26) h = 26;
+        int top = y - h - 3;                // 官方 Margin="0,0,0,2.5"
+        if (top < area.top) break;
+        RECT card{ x, top, right, y - 3 };
+        gui_.round_rect(card, gui_.theme.card_bg_soft, gui_.theme.border, 4);
+        gui_.text(card.left + 5, card.top + 5, src[i].time,
+                  gui_.theme.trace_text, gui_.font_small);
+        int ty = card.top + 5;
+        for (auto& s : lines) {
+            gui_.text(content_x, ty, s, src[i].col, gui_.font_small);
+            ty += 16;
         }
+        y = top;
     }
 }
 
@@ -1406,7 +1371,12 @@ void MaaHubWindow::draw_log_column(RECT area, const std::string& id) {
 // 配色/圆角(4)/控件高(28)/外边距(20) 对齐 HandyControl Light 主题。
 void MaaHubWindow::page_executor(RECT content) {
     mj::Value ex;
-    if (!find_executor(selected_exec_, ex)) { page_welcome(content); return; }
+    if (!find_executor(selected_exec_, ex)) {
+        gui_.text(content.left + 24, content.top + 40,
+                  L"左侧「执行器」里选择一个实例，或点「＋ 新建执行器」创建。",
+                  gui_.theme.dim, gui_.font);
+        return;
+    }
     std::string id = ex.get_str("id", "");
     std::string kind = ex.get_str("kind", "");
     std::string conn = ex.get_str("conn", "unknown");
@@ -1417,12 +1387,34 @@ void MaaHubWindow::page_executor(RECT content) {
     std::string core_version = ex.get_str("core_version", "");
 
     std::vector<mj::Value> all_tasks = catalog_of(kind);
+    // 首次打开 MaaEnd 实例：默认任务列表取官方核心预设「全套日常」(DailyFull)。
+    // 只在 state/task-lists.json 里该实例还没有记录时初始化一次，之后完全交给用户。
+    if (kind == "maaend" && !task_ui_seeded_[id]) {
+        task_ui_seeded_[id] = true;
+        if (task_list_.find(id) == task_list_.end()) {
+            std::set<std::string> picked;
+            for (auto& t : all_tasks) {
+                std::string nm = t.get_str("name", "");
+                auto* ps = t.find("presets");
+                if (!ps || !ps->is_array()) continue;
+                for (auto& p : ps->items()) {
+                    if (p.is_string() && p.as_string() == "DailyFull") {
+                        picked.insert(nm);
+                        break;
+                    }
+                }
+            }
+            if (!picked.empty()) {
+                task_list_[id] = picked;
+                save_task_list();
+            }
+        }
+    }
     std::vector<mj::Value> tasks;   // 过滤内部入口任务 + 用户未添加的任务
     auto tl_it = task_list_.find(id);
     bool filtering = (tl_it != task_list_.end() && !tl_it->second.empty());
     for (auto& t : all_tasks) {
         std::string nm = t.get_str("name", "");
-        if (kind == "maaend" && maaend_hidden_task(nm)) continue;
         if (filtering && tl_it->second.count(nm) == 0) continue;
         tasks.push_back(t);
     }
@@ -1446,69 +1438,38 @@ void MaaHubWindow::page_executor(RECT content) {
         tasks.swap(sorted);
     }
 
-    // 官方结构：页面 Margin 20 无背景；左列是独立卡片
-    //   <Border Width="210" MaxWidth="210" Background="RegionBrushOpacity25"
-    //            BorderBrush="BorderBrush" BorderThickness="1" CornerRadius="4">
-    //     <Grid Width="190"> … 任务列表 + 40px 添加任务行 …
-    // 右栏（任务设置）没有独立卡片背景，直接放在页面背景上。
-    RECT frame{ content.left, content.top, content.right, content.bottom };
-    const int LEFT_CARD_W = 210;            // 官方 Border Width=210
-    const int LEFT_W = 190;                 // 官方 Grid Width=190
-    const int MID_W = 300;                  // 官方 220 + MaaHub 额外留白（窄列竖排需要）
-    const int BAR_H = 56;                    // 容纳官方 50px 高按钮组
-    // 左列独立卡片（含圆角与 1px 边框）
-    RECT left_card{ frame.left, frame.top, frame.left + LEFT_CARD_W, frame.bottom - BAR_H };
+    // 官方 TaskQueueView：<Grid Margin="20"> + 三列 Width="*"（各占 1/3）
+    //   col0 = 210 宽任务列表卡片 +「完成后」+ LinkStart/停止/等待并停止
+    //   col1 = 任务设置面板（控件列 220 宽、居中）→ 常规/高级 → 今日关卡提示
+    //   col2 = 纯日志流（下载卡片 + 信息流）
+    // 只有左列卡片有独立背景（RegionBrushOpacity25 + 1px BorderBrush + CornerRadius 4），
+    // 中/右列直接放在页面背景上。
+    RECT frame{ content.left + 10, content.top + 8, content.right - 10, content.bottom - 12 };
+    const int COL_W = (frame.right - frame.left) / 3;
+    RECT col0{ frame.left, frame.top, frame.left + COL_W, frame.bottom };
+    RECT col1{ col0.right, frame.top, col0.right + COL_W, frame.bottom };
+    RECT col2{ col1.right, frame.top, frame.right, frame.bottom };
+    const bool connected = conn == "connected";
+
+    // col0 的 Grid Margin="10"，行 = *（列表卡片）/ Auto（完成后）/ Auto（按钮组）
+    int LEFT_CARD_W = COL_W - 20 < 210 ? COL_W - 20 : 210;   // 官方 Border Width=210
+    int LEFT_W = LEFT_CARD_W - 20 < 190 ? LEFT_CARD_W - 20 : 190;  // 官方内部 Grid Width=190
+    const int ADD_ROW_H = 40;               // 卡片底部固定行：菜单 + 全选 + 反选/清空
+    const int POST_H = 78;                  // 「完成后」标题 + Divider + 说明
+    const int START_H = 60;                 // 官方按钮 Width=100 Height=50 Margin=5
+    const int RELOAD_H = 22;                // 自动重载资源勾选行
+    int c0x = col0.left + 10 + (COL_W - 20 - LEFT_CARD_W) / 2;
+    if (c0x < col0.left + 10) c0x = col0.left + 10;
+    // 执行器切换在左侧栏，这里回到官方单实例布局
+    RECT left_card{ c0x, col0.top + 10, c0x + LEFT_CARD_W,
+                    col0.bottom - 10 - POST_H - START_H - (connected ? RELOAD_H : 0) };
+    if (left_card.bottom - left_card.top < 160) left_card.bottom = left_card.top + 160;
     gui_.round_rect(left_card, gui_.theme.card_bg, gui_.theme.border, 4);
 
-    // 执行器切换条：左列卡片内部顶部，显示当前执行器 + 上/下一个切换按钮
-    // （MaaHub 多执行器扩展；官方单实例无此条）
-    {
-        RECT strip{ left_card.left + 1, left_card.top + 1,
-                    left_card.right - 1, left_card.top + 27 };
-        gui_.fill(strip, gui_.theme.row_alt);
-        std::vector<ExecutorEntry> execs = hub_->executors();
-        int cur = -1;
-        for (size_t k = 0; k < execs.size(); ++k) {
-            if (execs[k].id == selected_exec_) { cur = (int)k; break; }
-        }
-        // 左箭头
-        RECT prev_b{ strip.left + 2, strip.top + 2, strip.left + 22, strip.bottom - 2 };
-        if (gui_.button("exec-prev", prev_b, L"\u25c0", 0)) {
-            if (!execs.empty()) {
-                int n = (cur <= 0) ? (int)execs.size() - 1 : cur - 1;
-                selected_exec_ = execs[n].id;
-                page_ = "executor";
-            }
-        }
-        // 右箭头
-        RECT next_b{ strip.right - 22, strip.top + 2, strip.right - 2, strip.bottom - 2 };
-        if (gui_.button("exec-next", next_b, L"\u25b6", 0)) {
-            if (!execs.empty()) {
-                int n = (cur < 0 || cur + 1 >= (int)execs.size()) ? 0 : cur + 1;
-                selected_exec_ = execs[n].id;
-                page_ = "executor";
-            }
-        }
-        // 中间：当前执行器名（点击可在多个之间循环）
-        RECT name_b{ strip.left + 24, strip.top + 2, strip.right - 24, strip.bottom - 2 };
-        std::wstring cur_name;
-        if (cur >= 0 && cur < (int)execs.size()) cur_name = gui::widen(execs[cur].label);
-        else cur_name = L"\u65b0\u5efa\u6267\u884c\u5668";
-        bool hov = gui_.input().mouse.x >= name_b.left && gui_.input().mouse.x < name_b.right
-                && gui_.input().mouse.y >= name_b.top && gui_.input().mouse.y < name_b.bottom;
-        if (hov) gui_.round_rect(name_b, gui_.theme.hover, gui_.theme.hover, 3);
-        gui_.text_clipped({ name_b.left + 6, name_b.top + 3, name_b.right - 2, name_b.bottom },
-                          cur_name, gui_.theme.text, gui_.font_small);
-        if (hov && gui_.input().pressed && !execs.empty()) {
-            int n = (cur < 0 || cur + 1 >= (int)execs.size()) ? 0 : cur + 1;
-            selected_exec_ = execs[n].id;
-            page_ = "executor";
-        }
-    }
-
-    // 左列内容区（卡片内 190px，左右各留 10px；顶部为执行器切换条让位 27px）
-    RECT left_col{ left_card.left + 10, left_card.top + 27, left_card.left + 10 + LEFT_W,
+    // 左列内容区（卡片内 190px，左右各留 10px）
+    RECT left_col{ left_card.left + 10, left_card.top, left_card.left + 10 + LEFT_W,
                    left_card.bottom };
+    if (left_col.right > left_card.right - 10) left_col.right = left_card.right - 10;
     // ---------------- 右侧：任务设置 ----------------
     // 右侧展示的任务：优先用户选中项；未选中时按官方默认（理智作战 Fight）
     std::string sel_task;
@@ -1553,13 +1514,21 @@ void MaaHubWindow::page_executor(RECT content) {
     }
 
 
-    // 中列：任务设置（官方 220px 窄列，标签在上控件在下竖排）
-    RECT right_col{ left_card.right + 6, frame.top,
-                    left_card.right + 6 + MID_W, frame.bottom - BAR_H };
-    // 未偏移的中列边界：信息条与底部「常规/高级设置」标签固定在列底部，
-    // 不随动画偏移（否则动画期间会与面板内容重叠）
+    // col1：任务设置。官方 220 控件列（+10 右边距）在列内居中，
+    // 行 = *（面板，MinHeight 360）/ Auto（常规·高级 ButtonGroup 220x28）/ Auto（今日提示 200）
+    const int PANEL_W = COL_W - 10 < 220 ? COL_W - 10 : 220;
+    const int TG_H = 28;                    // 官方 DefaultControlHeight
+    const int TIP_H = 46;                   // 今日关卡提示（Width=200，最多两行）
+    int c1x = col1.left + (COL_W - (PANEL_W + 10)) / 2;
+    if (c1x < col1.left + 2) c1x = col1.left + 2;
+    if (c1x + PANEL_W > col1.right - 2) c1x = col1.right - 2 - PANEL_W;
+    const int TG_TOP = col1.bottom - 10 - TIP_H - TG_H - 6;
+    const int TIP_TOP = col1.bottom - 10 - TIP_H;
+    RECT right_col{ c1x, col1.top + 10, c1x + PANEL_W, TG_TOP - 8 };
+    // 未偏移的中列边界：底部按钮组与提示固定在列底部，不随动画偏移
     const int RC_LEFT = right_col.left, RC_RIGHT = right_col.right;
     const int RC_BOTTOM = right_col.bottom;
+    if (right_col.bottom - right_col.top < 160) right_col.bottom = right_col.top + 160;
     if (anim_active) {
         // ease-out：1-(1-t)^2，模拟官方滑入
         double e = 1.0 - (1.0 - anim_frac) * (1.0 - anim_frac);
@@ -1567,28 +1536,35 @@ void MaaHubWindow::page_executor(RECT content) {
         right_col.top += off;
         right_col.bottom += off;
     }
-    // 右列：日志区（官方 Column=2，占剩余宽度）
-    RECT log_col{ right_col.right + 6, frame.top, frame.right, frame.bottom - BAR_H };
+    // col2：日志流（官方 Grid.Column="2" Margin="10,10,0,10"）
+    RECT log_col{ col2.left + 10, col2.top + 10, col2.right, col2.bottom - 10 };
 
     // ---------------- 左列：任务列表 ----------------
     // 官方左列无「任务列表」标题文字，直接是 ListBox（MinHeight=220）
-    int list_top = left_col.top + 4;
-    int item_h = 32;
+    int list_top = left_card.top + 10;
     int n = (int)tasks.size();
+    // 官方：ItemContainer MinHeight=24.5；Items.Count>9 时
+    //   MaxHeight = ActualHeight/(Items.Count+1.5)（上限 24.5）
+    int list_h = (left_card.bottom - ADD_ROW_H) - list_top;
+    int item_h = 25;
+    if (n > 9) {
+        int fit = (int)((double)list_h / (n + 1.5));
+        if (fit < item_h) item_h = fit < 18 ? 18 : fit;
+    }
 
     // ---- 拖拽排序状态机（官方左列可拖动调整顺序）----
     // 记录本帧每项的 y 供放置判定
     std::vector<int> item_ys;
     item_ys.reserve(n);
     {
-        int yy = list_top + 4 - (int)scroll_["tasks-" + id];
+        int yy = list_top - (int)scroll_["tasks-" + id];
         for (int k = 0; k < n; ++k) { item_ys.push_back(yy); yy += item_h; }
     }
     // 按下左键且在执行器列内 -> 开始拖拽
     if (gui_.input().pressed
         && gui_.input().mouse.x >= left_col.left && gui_.input().mouse.x < left_col.right
         && gui_.input().mouse.y >= list_top) {
-        int idx = (gui_.input().mouse.y - (list_top + 4 - (int)scroll_["tasks-" + id])) / item_h;
+        int idx = (gui_.input().mouse.y - (list_top - (int)scroll_["tasks-" + id])) / item_h;
         if (idx >= 0 && idx < n) {
             drag_task_ = tasks[idx].get_str("name", "");
             drag_y_ = gui_.input().mouse.y;
@@ -1597,7 +1573,7 @@ void MaaHubWindow::page_executor(RECT content) {
     if (!drag_task_.empty()) {
         drag_y_ = gui_.input().mouse.y;
         // 计算插入位置
-        int base = list_top + 4 - (int)scroll_["tasks-" + id];
+        int base = list_top - (int)scroll_["tasks-" + id];
         int idx = (drag_y_ - base) / item_h;
         if (idx < 0) idx = 0;
         if (idx > n) idx = n;
@@ -1630,43 +1606,42 @@ void MaaHubWindow::page_executor(RECT content) {
     }
 
     gui_.begin_scroll(("tasks-" + id).c_str(),
-                      { left_col.left, list_top, left_col.right, left_card.bottom - 76 },
+                      { left_col.left, list_top, left_col.right, left_card.bottom - ADD_ROW_H },
                       n * item_h + 8, scroll_["tasks-" + id]);
-    int y = list_top + 4 - (int)scroll_["tasks-" + id];
+    int y = list_top - (int)scroll_["tasks-" + id];
     for (int ti = 0; ti < n; ++ti) {
         auto& t = tasks[ti];
         std::string name = t.get_str("name", "");
         TaskUiState& ui = task_ui_[id][name];
+        if (task_ui_init_[id].insert(name).second) {
+            // 没有勾选记录 = 首次使用该执行器，官方行为是新任务默认勾选
+            auto cit = task_checks_.find(id);
+            ui.checked = cit == task_checks_.end() || cit->second.count(name) > 0;
+        }
         if (y + item_h < list_top) { y += item_h; continue; }
-        if (y > left_card.bottom - 76) break;
-        RECT item{ left_col.left + 8, y, left_col.right - 8, y + item_h - 4 };
+        if (y > left_card.bottom - ADD_ROW_H) break;
+        RECT item{ left_col.left, y, left_col.right, y + item_h - 1 };
         bool hov = gui_.input().mouse.x >= item.left && gui_.input().mouse.x < item.right
                 && gui_.input().mouse.y >= item.top && gui_.input().mouse.y < item.bottom;
-        // 官方：任务项背景随状态变化（InProgress 蓝 / Completed 绿 / Error 红），
-        // Alpha #20(12.5%) 叠加在白底上；勾选态用 Primary 浅底
+        // 官方 NoSelectedHighlightListBoxItemStyle：
+        //   默认与选中背景都是 RegionBrushOpacity25（选中不高亮，只文字变深），
+        //   hover = MouseOverRegionBrushOpacity75，且没有边框线（BorderThickness=0）；
+        //   状态色仅在本/上次运行有结果时叠加（InProgress 蓝 / Completed 绿 / Error 红，
+        //   均为 #20 Alpha 叠在白底上）。当前显示设置的任务只由齿轮变 Primary 表示。
         std::string running = hub_->running_task_of(id);
         std::string last_res = hub_->last_task_result(id, name);
-        // 官方 NoSelectedHighlightListBoxItemStyle：
-        //   默认/选中背景都是 RegionBrushOpacity25（选中不高亮，只文字变深）；
-        //   hover = MouseOverRegionBrushOpacity75；状态色仅在有运行结果时叠加
-        COLORREF fill_c, line_c;
-        if (running == name) {
-            fill_c = gui_.theme.status_running;  line_c = gui_.theme.primary;
-        } else if (last_res == "error") {
-            fill_c = gui_.theme.status_error;    line_c = gui_.theme.err;
-        } else if (last_res == "ok") {
-            fill_c = gui_.theme.status_done;     line_c = gui_.theme.ok;
-        } else if (hov) {
-            fill_c = gui_.theme.item_hover;      line_c = gui_.theme.border;
-        } else {
-            fill_c = gui_.theme.item_bg;         line_c = gui_.theme.border;
-        }
+        COLORREF fill_c;
+        if (running == name) fill_c = gui_.theme.status_running;
+        else if (last_res == "error") fill_c = gui_.theme.status_error;
+        else if (last_res == "ok") fill_c = gui_.theme.status_done;
+        else if (hov) fill_c = gui_.theme.item_hover;
+        else fill_c = gui_.theme.item_bg;
         if (drag_task_ == name) fill_c = gui_.theme.primary_light;
-        gui_.round_rect(item, fill_c, line_c, 4);
+        gui_.round_rect(item, fill_c, fill_c, 4);
         // 官方 CheckBox MaxWidth=140
         // 官方 ItemContainer Padding=10,0,0,0
         // 复选框矩形 = 整个任务项（内部自行垂直居中）
-        RECT cbr{ item.left + 10, item.top, item.left + 10 + 140, item.bottom };
+        RECT cbr{ item.left + 2, item.top, item.left + 2 + 164, item.bottom };
         std::wstring label = display_name(kind, name);
         auto al = task_alias_.find(id + "|" + name);
         if (al != task_alias_.end() && !al->second.empty()) {
@@ -1675,8 +1650,10 @@ void MaaHubWindow::page_executor(RECT content) {
         CheckState st = ui.once ? CheckState::Once
                                 : (ui.checked ? CheckState::On : CheckState::Off);
         gui_.checkbox3(("cb-" + id + "-" + name).c_str(), cbr, label, st);
+        bool prev_checked = ui.checked;
         ui.checked = (st == CheckState::On);
         ui.once = (st == CheckState::Once);
+        if (ui.checked != prev_checked) sync_task_checks(id, tasks);
         // 官方任务项右侧：ConfigGeometry 齿轮图标（常态 SecondaryText 色，
         // 选中/hover 时 Primary 色）；hover 时再显示 复制/重命名/删除 三个
         // 22x22 图标按钮（官方 TaskActionButtonStyle）
@@ -1685,8 +1662,7 @@ void MaaHubWindow::page_executor(RECT content) {
             int ix = item.right - isz - 6;
             int iy = item.top + ((item.bottom - item.top) - isz) / 2;
             RECT gear_r{ ix, iy, ix + isz, iy + isz };
-            COLORREF gear_c = (ui.checked || ui.once) ? gui_.theme.primary
-                                                      : gui_.theme.dim;
+            COLORREF gear_c = (name == sel_task) ? gui_.theme.primary : gui_.theme.dim;
             gui_.icon_gear(gear_r, gear_c);
             if (hov) {
                 // hover 操作按钮（从右往左：删除、重命名、复制）
@@ -1761,41 +1737,36 @@ void MaaHubWindow::page_executor(RECT content) {
     }
     gui_.end_scroll();
 
-    // 官方 Grid.Row=1：「全选 | 反选」按钮组（并排各半宽、高 30），位于列表下方
+    // 官方左列底部 40px 行（Grid.Row=1，RowDefinition Height="40"）：
+    //   MenuButton 30x30（TaskQueueAddTaskIcon）| 全选 | 反选/清空，三段同高相邻
     {
-        int hy = left_card.bottom - 40 - 32;
-        int half = (left_col.right - left_col.left) / 2;
-        RECT sel_all{ left_col.left, hy, left_col.left + half, hy + 30 };
-        RECT sel_inv{ left_col.left + half, hy, left_col.right, hy + 30 };
-        if (gui_.button("tb-all", sel_all, L"\u5168\u9009", 0)) {
+        int ry = left_card.bottom - ADD_ROW_H + (ADD_ROW_H - 30) / 2;
+        int lx = left_col.left;
+        int rw = left_col.right - left_col.left;
+        std::vector<RECT> cells;
+        int hit = gui_.button_group(
+            ("taskgrp-" + id).c_str(), { lx, ry, lx + rw, ry + 30 },
+            { L"", L"\u5168\u9009", L"\u53cd\u9009" }, { 30, 0, 0 }, 0, &cells);
+        if (hit == 0) {
+            show_add_task_ = !show_add_task_;
+        } else if (hit == 1) {
             for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = true;
-        }
-        if (gui_.button("tb-inverse", sel_inv, L"\u53cd\u9009", 0)) {
+        } else if (hit == 2) {
             for (auto& t : tasks) {
                 TaskUiState& s = task_ui_[id][t.get_str("name", "")];
                 s.checked = !s.checked;
             }
         }
-    }
-
-    // 左列底部 40px 行：「+ 添加新任务」（官方 RowDefinition Height="40"）
-    // 贴左列卡片底部（left_card.bottom），与任务列表滚动区不重叠
-    {
-        RECT add_row{ left_col.left, left_card.bottom - 40, left_col.right, left_card.bottom };
-        gui_.fill({ add_row.left, add_row.top, add_row.right, add_row.top + 1 },
-                  gui_.theme.border);
-        RECT add_tasks_btn{ add_row.left + 8, add_row.top + 6,
-                            add_row.right - 8, add_row.bottom - 6 };
-        // 官方 TaskQueueAddTaskIcon（Carbon 加号圆圈）替代纯文字"+"
-        int icon_sz = add_row.bottom - add_row.top - 12;
-        RECT icon_r{ add_tasks_btn.left + 8, add_row.top + 6,
-                     add_tasks_btn.left + 8 + icon_sz, add_row.bottom - 6 };
-        gui_.icon_add_task(icon_r, gui_.theme.primary);
-        if (gui_.button(("addtask-" + id).c_str(),
-                        { add_tasks_btn.left + icon_sz + 12, add_tasks_btn.top,
-                          add_tasks_btn.right, add_tasks_btn.bottom },
-                        L"\u6dfb\u52a0\u65b0\u4efb\u52a1", 0)) {
-            show_add_task_ = !show_add_task_;
+        if (hit == 1 || hit == 2) sync_task_checks(id, tasks);
+        if (!cells.empty())
+            gui_.icon_add_task({ cells[0].left + 8, cells[0].top + 8,
+                                 cells[0].left + 22, cells[0].bottom - 8 },
+                               gui_.theme.primary);
+        // 官方末格是 SplitButton：右侧再给一个下拉箭头（切换 反选/清空）
+        if (cells.size() == 3) {
+            RECT& last = cells[2];
+            gui_.icon_chevron_down({ last.right - 16, last.top, last.right - 4, last.bottom },
+                                    gui_.theme.dim);
         }
     }
 
@@ -1820,28 +1791,10 @@ void MaaHubWindow::page_executor(RECT content) {
         }
     }
 
-    int rx = right_col.left + 16;
-    int ry = right_col.top + 12;
+    int rx = right_col.left;
     if (!sel_task.empty() && sel_valid) {
-        // 官方层次：左侧大标题（任务名），右上角小字（任务设置 · 来源）
-        std::wstring sel_title = display_name(kind, sel_task);
-        auto al2 = task_alias_.find(id + "|" + sel_task);
-        if (al2 != task_alias_.end() && !al2->second.empty()) sel_title = gui::widen(al2->second);
-        gui_.text(rx, ry, sel_title, gui_.theme.text, gui_.font_title);
-        std::wstring desc;
-        for (auto& t : tasks) {
-            if (t.get_str("name", "") == sel_task) desc = gui::widen(t.get_str("description", ""));
-        }
-        // 窄列（300px）：右上角只放来源描述，避免与标题抢空间
-        if (!desc.empty()) {
-            RECT save = gui_.clip();
-            gui_.text_clipped({ rx + 130, ry + 22, right_col.right - 16, ry + 42 },
-                              desc, gui_.theme.dim, gui_.font_small);
-            (void)save;
-        }
-        ry += 34;
-
         TaskUiState& ui = task_ui_[id][sel_task];
+        ui.open = true;     // 官方没有「收起参数」开关：选中任务即展示其设置面板
         // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
         {
             mj::Value saved = hub_->task_params(id, sel_task);
@@ -1851,104 +1804,43 @@ void MaaHubWindow::page_executor(RECT content) {
                 ui.params[kv.first] = kv.second;
             }
         }
-        RECT run_btn{ rx, ry, rx + 120, ry + 28 };
-        if (gui_.button(("run-" + id + "-" + sel_task).c_str(), run_btn,
-                        L"\u25b6 \u5355\u6b21\u8fd0\u884c", 1)) {
-            mj::Value params = mj::Value::object();
-            for (auto& kv : ui.params) params.set(kv.first, kv.second);
-            action_run(id, sel_task, params);
+        // 官方：ScrollViewer Grid.Row=0 → SimpleStackPanel Width=220，
+        // 面板直接坐在页面背景上——无大标题、无独立卡片、无左侧竖线
+        const mj::Value* spec = nullptr;
+        for (auto& t : tasks) {
+            if (t.get_str("name", "") == sel_task) { spec = &t; break; }
         }
-        RECT gear_btn{ rx + 130, ry, rx + 230, ry + 28 };
-        if (gui_.button(("gear-" + id + "-" + sel_task).c_str(), gear_btn,
-                        ui.open ? L"\u6536\u8d77\u53c2\u6570" : L"\u5c55\u5f00\u53c2\u6570", 0)) {
-            ui.open = !ui.open;
+        std::vector<mj::Value> specs;
+        if (spec) {
+            if (auto* ps = spec->find("params"); ps && ps->is_array()) specs = ps->items();
         }
-        ry += 40;
-
-        if (ui.open) {
-            // 官方任务面板（1:1 复刻 MaaWpfGui TaskQueue/*.xaml）
-            // 先用滚动区域承载，避免长面板超出可视区
-            // 选中任务的 catalog 声明（供通用面板按类型渲染 + 估算滚动高度）
-            const mj::Value* spec = nullptr;
-            for (auto& t : tasks) {
-                if (t.get_str("name", "") == sel_task) { spec = &t; break; }
-            }
-            std::vector<mj::Value> specs;
-            if (spec) {
-                if (auto* ps = spec->find("params"); ps && ps->is_array()) specs = ps->items();
-            }
-            int panel_top = ry;
-            int panel_h = (right_col.bottom - 12) - panel_top;
-            if (panel_h < 80) panel_h = 80;
-            // 内容高度按参数个数估算（每项约 36-40px，含分组标题），
-            // 不再用固定 2000——避免内容更高时被裁剪、或过短时出现空滚动
-            // 内容高度估算：官方面板每项约 40px，但分组标题(+20)、提示行(+16)、
-            // 单选条(+30) 都额外占位；按 specs 数的 2.2 倍估行，确保底部内容可滚动到
-            int est_rows = (int)specs.size() * 22 / 10 + 12;
-            int content_h = est_rows * 40 + 80;
-            if (content_h < panel_h) content_h = panel_h;
-            // 滚动区底部止于信息条上方，保证信息条始终可见
-            int scroll_bottom = RC_BOTTOM - 92;   // 避开信息条 + 底部常规/高级切换标签
-            if (scroll_bottom < panel_top + 80) scroll_bottom = panel_top + 80;
-            gui_.begin_scroll(("panel-" + id + "-" + sel_task).c_str(),
-                              { rx, panel_top, right_col.right - 16, scroll_bottom },
-                              content_h, scroll_["panel-" + id + "-" + sel_task]);
-            int saved_y = ry;
-            PanelCtx pctx{ gui_, rx, ry, right_col.right - 16, ui.params, id, sel_task };
-            bool custom = draw_task_panel(pctx, &specs);
-            ry = pctx.y;
-            // 面板修改写回持久层（一次性标记除外）
-            for (auto& kv : ui.params) {
-                if (kv.first.rfind("__once_", 0) == 0) continue;
-                hub_->set_task_param(id, sel_task, kv.first, kv.second);
-            }
-            int used = ry - saved_y;
-            gui_.end_scroll();
-            // 面板边框（按实际内容高度）
-            RECT pbody{ rx, panel_top, right_col.right - 16,
-                        panel_top + (used > 0 ? used + 8 : 40) };
-            // 先画边框会盖住内容，这里只画左侧竖线作视觉分隔
-            gui_.fill({ rx - 8, panel_top, rx - 7, scroll_bottom }, gui_.theme.border);
-            ry = right_col.bottom - 40;   // 信息条固定位
-            (void)custom;
+        int panel_h = RC_BOTTOM - right_col.top;
+        if (panel_h < 80) panel_h = 80;
+        // 内容高度：用上一帧实测值（首帧先按视口高，画完立刻校正）。
+        // 原来按 specs 条数×40 估，估多了会把滚动条拉出一屏空白，估少了够不到底部。
+        std::string skey = "panel-" + id + "-" + sel_task;
+        float& psy = scroll_[skey];
+        int& measured = content_h_[skey];
+        int content_h = measured > 0 ? measured : panel_h;
+        gui_.begin_scroll(skey.c_str(),
+                          { rx, right_col.top, right_col.right, RC_BOTTOM },
+                          content_h, psy);
+        // 滚动偏移必须真的减进内容起点，否则滚轮只动滚动条、内容不动
+        PanelCtx pctx{ gui_, rx, right_col.top - (int)psy, right_col.right,
+                       ui.params, id, sel_task, advanced_view_ };
+        draw_task_panel(pctx, &specs);
+        measured = pctx.y - right_col.top + 16;
+        if (measured < panel_h) measured = panel_h;
+        // 面板修改写回持久层（一次性标记除外）
+        for (auto& kv : ui.params) {
+            if (kv.first.rfind("__once_", 0) == 0) continue;
+            hub_->set_task_param(id, sel_task, kv.first, kv.second);
         }
-
-        // 实例信息条：窄列单行紧凑（中列仅 300px，两行会被裁切）
-        RECT info{ rx, RC_BOTTOM - 62, RC_RIGHT - 16, RC_BOTTOM - 36 };
-        gui_.round_rect(info, gui_.theme.row_alt, gui_.theme.border, 4);
-        int ix = info.left + 8;
-        COLORREF def_col = gui_.theme.text;
-        auto field = [&](const std::wstring& k, const std::wstring& v, COLORREF col) {
-            int kw = gui_.text_size(k, gui_.font_small).cx;
-            gui_.text(ix, info.top + 10, k, gui_.theme.dim, gui_.font_small);
-            RECT save = gui_.clip();
-            gui_.text_clipped({ ix + kw + 4, info.top + 10, ix + kw + 4 + 96,
-                                info.top + 26 }, v, col, gui_.font_small);
-            (void)save;
-            ix += kw + 4 + 96 + 6;
-        };
-        field(L"\u7248\u672c", gui::widen(version.empty() ? "-" : version), def_col);
-        field(L"\u4efb\u52a1", std::to_wstring(task_count), def_col);
-        field(L"\u8d26\u53f7",
-              acc_label.empty() ? L"\u672a\u7ed1" : gui::widen(acc_label), def_col);
-        field(L"\u65e5\u5e38", daily_done ? L"\u5df2\u5b8c\u6210" : L"\u672a\u5b8c\u6210",
-              daily_done ? gui_.theme.ok : gui_.theme.warn);
+        gui_.end_scroll();
     }
 
-    // 官方底部控制区第二行：「自动重载资源」复选框
-    // （EnableAutoReload，可见性由 CanShowAutoReload 控制；MaaHub 连接后可用）
-    {
-        bool can_show = (conn == "connected");
-        if (can_show) {
-            CheckState st = auto_reload_ ? CheckState::On : CheckState::Off;
-            RECT ar{ right_col.left + 4, frame.bottom - BAR_H + 8,
-                     right_col.left + 4 + 160, frame.bottom - BAR_H + 8 + 22 };
-            gui_.checkbox3("auto-reload", ar, L"\u81ea\u52a8\u91cd\u8f7d\u8d44\u6e90", st);
-            auto_reload_ = (st == CheckState::On);
-        }
-    }
-
-    // 中列底部：常规设置 / 高级设置 切换标签（官方 Grid.Row=1 ButtonGroup Width=220）
+    // 中列 Grid.Row=1：常规设置 / 高级设置
+    // （官方 ButtonGroup Width=220、控件高 28，在列内居中；列底之上）
     {
         bool has_params = false;
         for (auto& t : tasks) {
@@ -1959,173 +1851,134 @@ void MaaHubWindow::page_executor(RECT content) {
             break;
         }
         if (has_params && !sel_task.empty()) {
-            const int TG_W = 200;
-            int tg_x = right_col.left + 4;
-            int tg_y = RC_BOTTOM - 36;
             int gh = gui_.option_strip(("tg-" + id + "-" + sel_task).c_str(),
-                                       { tg_x, tg_y, tg_x + TG_W, tg_y + 26 },
+                                       { RC_LEFT, TG_TOP, RC_LEFT + PANEL_W, TG_TOP + TG_H },
                                        { L"\u5e38\u89c4\u8bbe\u7f6e", L"\u9ad8\u7ea7\u8bbe\u7f6e" },
-                                       advanced_view_ ? 1 : 0);
+                                       advanced_view_ ? 1 : 0, false, true);
             if (gh == 0) advanced_view_ = false;
             if (gh == 1) advanced_view_ = true;
         }
     }
 
-    // 官方中列 Grid.Row=2（底部，位于「常规/高级设置」按钮组下方）：
-    //   今日开放关卡提示（StagesOfTodayInlines，Width=200）
+    // 中列 Grid.Row=2（列底，VerticalAlignment=Bottom）：
+    //   今日开放关卡提示 ScrollViewer Width=200 Margin="0,10,10,10"
     {
-        int ty = RC_BOTTOM - 14;
-        RECT stage_box{ right_col.left + 4, ty - 16, right_col.left + 4 + 220, ty + 2 };
-        RECT save = gui_.clip();
+        (void)RC_RIGHT;
+        int tx = col1.left + (COL_W - 200) / 2;
+        if (tx < col1.left + 2) tx = col1.left + 2;
+        // 官方首行是加粗的「今日关卡小提示:」，右侧挂 TooltipBlock（? 图标，半透明）
+        gui_.text(tx, TIP_TOP + 4, L"\u4eca\u65e5\u5173\u5361\u5c0f\u63d0\u793a:",
+                  gui_.theme.text, gui_.font_bold);
+        RECT hint_r{ tx + 186, TIP_TOP + 4, tx + 200, TIP_TOP + 18 };
+        gui_.round_rect(hint_r, gui_.theme.card_bg, gui_.theme.faint, 7);
+        gui_.text(hint_r.left + 4, hint_r.top + 1, L"?", gui_.theme.faint, gui_.font_small);
+        RECT stage_box{ tx + 12, TIP_TOP + 24, tx + 200, TIP_TOP + TIP_H - 4 };
         gui_.text_clipped(stage_box,
                           L"\u4eca\u65e5\u5f00\u653e\u5173\u5361\uff1a\u5173\u95ed\u4e2d",
-                          gui_.theme.faint, gui_.font_small);
-        (void)save;
+                          gui_.theme.trace_text, gui_.font_small);
     }
 
-    // ---------------- 右列：日志区（官方 Column=2）----------------
-    draw_log_column(log_col, id);
-
-    // ---------------- 底部控制栏（官方结构）----------------
-    // 官方：Link Start!/停止/等待&停止 是居中的 100x50 大按钮组；
-    // 左下角是完成后动作描述文本 + 齿轮图标按钮（PostActionSetting.ActionDescription）。
-    RECT bottom_bar{ frame.left, frame.bottom - BAR_H, frame.right, frame.bottom };
-    gui_.fill({ bottom_bar.left, bottom_bar.top, bottom_bar.right, bottom_bar.top + 1 },
-              gui_.theme.border);
-
-    bool connected = conn == "connected";
+    // ---------------- col0 底部（官方 Grid.Row=1 / Row=2）----------------
+    //   Row1 = 「完成后」：ActionTitle + Divider + ActionDescription，右侧齿轮 RadioButton
+    //   Row2 = Link Start! / 停止（官方同一时刻只可见一个，Width=100 Height=50 Margin=5，居中）
+    //          其下 = 自动重载资源（CanShowAutoReload 时可见）
     bool busy = connected && hub_->executor_status(id, 0).get_bool("busy", false);
 
-    // 左下角：完成后动作（齿轮图标 + 简短摘要；800x600 下只放图标，避免挤占按钮组）
+    // Grid.Row=1：完成后（官方 StackPanel Width=210 = 内层 185 文本 + 右侧齿轮）
     {
-        mj::Value pa;
-        auto pa_it = post_action_.find(id);
-        if (pa_it != post_action_.end()) pa = pa_it->second;
-        int n = 0;
-        if (pa.is_object()) {
-            for (auto& kv : pa.members()) if (kv.second.as_bool()) ++n;
-        }
-        std::wstring brief = n > 0 ? (std::to_wstring(n) + L" \u9879\u52a8\u4f5c")
-                                   : L"\u672a\u8bbe\u7f6e";
-        // 图标 + 计数（窄）
-        RECT gear{ bottom_bar.left + 14, bottom_bar.top + (BAR_H - 28) / 2,
-                   bottom_bar.left + 44, bottom_bar.top + (BAR_H + 28) / 2 };
-        if (gui_.button("btn-postaction-gear", gear, L"\u2699", 0)) {
-            show_post_action_ = !show_post_action_;
-        }
-        gui_.text(bottom_bar.left + 50, bottom_bar.top + (BAR_H - 16) / 2,
-                  brief, gui_.theme.dim, gui_.font_small);
+        int py = left_card.bottom;
+        int txt_w = 185;                    // 官方内层 StackPanel Width=185
+        if (txt_w > LEFT_CARD_W - 25) txt_w = LEFT_CARD_W - 25;
+        std::wstring post_title = L"\u5b8c\u6210\u540e";
+        int tw = gui_.text_size(post_title, gui_.font).cx;
+        gui_.text(c0x + 20 + (txt_w - 20 - tw) / 2, py + 15, post_title,
+                  gui_.theme.text, gui_.font);
+        gui_.divider({ c0x + 10, py + 39, c0x + txt_w - 10, py + 40 });
+        gui_.text_clipped({ c0x + (txt_w - 160) / 2, py + 47,
+                            c0x + (txt_w + 160) / 2, py + POST_H },
+                          post_action_desc(id), gui_.theme.dim, gui_.font_small);
+        // 齿轮 RadioButton：Background=Transparent、BorderThickness=0、
+        // Foreground=SecondaryTextBrush，高亮色 = Primary（打开完成后设置浮层）
+        RECT gear{ c0x + txt_w + 4, py + (POST_H - 20) / 2,
+                   c0x + txt_w + 24, py + (POST_H + 20) / 2 };
+        bool gear_hov = gui_.hovered(gear);
+        gui_.icon_gear(gear, (show_post_action_ || gear_hov) ? gui_.theme.primary
+                                                             : gui_.theme.dim);
+        if (gear_hov && gui_.input().pressed) show_post_action_ = !show_post_action_;
     }
 
-    // 居中按钮组（官方基准 100x50；宽度按文字实测，避免裁切）
-    const int BH = (BAR_H - 8 < 50) ? (BAR_H - 8) : 50, GAP = 5;
-    const std::wstring kLink = L"\U0001f517 Link Start!";
-    const std::wstring kStop = L"\u505c\u6b62";
-    const std::wstring kWait = L"\u7b49\u5f85 & \u505c\u6b62";
-    int bw_link = gui_.text_size(kLink, gui_.font_bold).cx + 28;
-    int bw_stop = gui_.text_size(kStop, gui_.font_bold).cx + 28;
-    int bw_wait = gui_.text_size(kWait, gui_.font_bold).cx + 28;
-    if (bw_link < 100) bw_link = 100;
-    if (bw_stop < 100) bw_stop = 100;
-    if (bw_wait < 100) bw_wait = 100;
-    bool show_wait = busy;
-    int group_w = show_wait ? bw_link + bw_stop + bw_wait + GAP * 2
-                            : bw_link + bw_stop + GAP;
-    int gx = (bottom_bar.left + bottom_bar.right - group_w) / 2;
-    int gy = bottom_bar.top + (bottom_bar.bottom - bottom_bar.top - BH) / 2;
-
-    if (busy) {
-        RECT stop_btn{ gx, gy, gx + bw_stop, gy + BH };
-        if (gui_.button("btn-stop-exec", stop_btn, kStop, 2)) {
-            post_action([this, id] { hub_->stop_executor(id); }, "\u505c\u6b62");
-        }
-        if (show_wait) {
-            RECT wait_btn{ gx + bw_stop + GAP, gy, gx + bw_stop + GAP + bw_wait, gy + BH };
-            if (gui_.button("btn-waitstop-exec", wait_btn, kWait, 0)) {
-                post_action([this, id] { hub_->stop_executor(id); },
-                            "\u7b49\u5f85\u505c\u6b62");
+    // Grid.Row=2：Link Start! / 停止 —— 官方可见性互斥，同一时刻只画一个 100x50
+    {
+        const int BW = 100, BH = 50;
+        int by = left_card.bottom + POST_H;
+        int bx = c0x + (LEFT_CARD_W - BW) / 2;
+        RECT main_btn{ bx, by + 5, bx + BW, by + 5 + BH };
+        if (busy) {
+            if (gui_.button("btn-stop-exec", main_btn, L"\u505c\u6b62", 0)) {
+                post_action([this, id] { hub_->stop_executor(id); }, "\u505c\u6b62");
+            }
+        } else {
+            // 官方 LinkStart = MaaButtonDefaultStyle（RegionBrushOpacity25 白底 +
+            // PrimaryTextBrush 前景）、IconElement.Geometry=x:Null —— 不是蓝色按钮
+            if (gui_.button("btn-linkstart-exec", main_btn, L"Link Start!", 0)) {
+                post_action([this, id] {
+                    mj::Value st = hub_->executor_status(id);
+                    if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
+                    action_run_checked(id);
+                }, "\u94fe\u63a5\u5f00\u59cb");
             }
         }
-    } else {
-        // 官方 Link Start 按钮：CarbonLink 图标 + 文字（替代 emoji 🔗）
-        RECT link_btn{ gx, gy, gx + bw_link, gy + BH };
-        int lsz = BH - 22;
-        RECT link_icon{ link_btn.left + 12, gy + 11, link_btn.left + 12 + lsz, gy + 11 + lsz };
-        // 先画按钮底与文字（文字左移给图标让位）
-        if (gui_.button("btn-linkstart-exec",
-                        { link_btn.left, link_btn.top, link_btn.right, link_btn.bottom },
-                        L"   Link Start!", 1)) {
-            post_action([this, id] {
-                mj::Value st = hub_->executor_status(id);
-                if (st.get_str("conn", "") != "connected") hub_->connect_executor(id);
-                action_run_checked(id);
-            }, "\u94fe\u63a5\u5f00\u59cb");
+        // 自动重载资源（该行 row=1，仅在 CanShowAutoReload 时出现）
+        if (connected) {
+            std::wstring ar_label = L"\u81ea\u52a8\u91cd\u8f7d\u8d44\u6e90";
+            int ar_w = 24 + gui_.text_size(ar_label, gui_.font).cx;
+            int ar_x = c0x + (LEFT_CARD_W - ar_w) / 2;
+            CheckState st = auto_reload_ ? CheckState::On : CheckState::Off;
+            gui_.checkbox3("auto-reload",
+                           { ar_x, by + START_H, ar_x + ar_w, by + START_H + RELOAD_H },
+                           ar_label, st);
+            auto_reload_ = (st == CheckState::On);
         }
-        gui_.icon_link(link_icon, RGB(255, 255, 255));
     }
 
-    // 右下角：连接状态 + 连接/断开（MaaHub 扩展能力）
+    // ---------------- col2：日志流（官方 Grid.Column="2"）----------------
+    // 顶部两行压缩实例信息（连接/核心 · 任务数/账号）+ 连接或断开（MaaHub 多实例扩展）
     {
+        RECT head{ log_col.left, log_col.top, log_col.right, log_col.top + 36 };
         COLORREF dot = connected ? gui_.theme.ok :
                        conn == "failed" ? gui_.theme.err :
                        conn == "connecting" ? gui_.theme.warn : gui_.theme.faint;
-        gui_.round_rect({ bottom_bar.right - 150, bottom_bar.top + 19,
-                          bottom_bar.right - 140, bottom_bar.top + 29 }, dot, dot, 5);
-        std::wstring st = connected ? L"\u5df2\u8fde\u63a5" :
-                          conn == "failed" ? L"\u8fde\u63a5\u5931\u8d25" :
-                          conn == "connecting" ? L"\u8fde\u63a5\u4e2d\u2026" : L"\u672a\u8fde\u63a5";
-        gui_.text(bottom_bar.right - 132, bottom_bar.top + 17, st,
-                  connected ? gui_.theme.ok : gui_.theme.dim, gui_.font_small);
-        RECT conn_btn{ bottom_bar.right - 96, bottom_bar.top + 10,
-                       bottom_bar.right - 16, bottom_bar.bottom - 10 };
+        gui_.round_rect({ head.left + 1, head.top + 10, head.left + 11, head.top + 20 },
+                        dot, dot, 5);
+        std::wstring acc_txt = acc_label.empty() ? std::wstring(L"\u672a\u7ed1")
+                                                 : gui::widen(acc_label);
+        std::wstring l1 = connected_text(conn) + L" \xb7 \u6838\u5fc3 "
+            + gui::widen(core_version.empty() ? "-" : core_version);
+        std::wstring l2 = L"\u4efb\u52a1 " + std::to_wstring(task_count)
+            + L" \xb7 \u8d26\u53f7 " + acc_txt;
+        RECT conn_btn{ head.right - 60, head.top + 7, head.right - 4, head.top + 27 };
         if (gui_.button("btn-connect-exec", conn_btn,
                         connected ? L"\u65ad\u5f00" : L"\u8fde\u63a5", 0)) {
             if (connected) action_disconnect(id);
             else action_connect(id);
         }
+        int tw = conn_btn.left - 8 - (head.left + 18);
+        gui_.text(head.left + 18, head.top + 2, gui_.ellipsize(l1, tw, gui_.font_small),
+                  gui_.theme.trace_text, gui_.font_small);
+        gui_.text(head.left + 18, head.top + 19, gui_.ellipsize(l2, tw, gui_.font_small),
+                  gui_.theme.trace_text, gui_.font_small);
+        RECT feed{ log_col.left, head.bottom + 2, log_col.right, log_col.bottom };
+        draw_log_column(feed, id);
     }
 
     // ---------------- 浮层（最上层）----------------
-    if (show_add_task_) draw_add_task_overlay(right_col, id, kind);
-    if (show_post_action_) draw_post_action(right_col, id);
+    gui_.flush_combo_popup();   // 下拉层要盖住本帧后续控件，但仍在模态浮层之下
+    if (show_add_task_) draw_add_task_overlay(frame, id, kind);
+    if (show_post_action_) draw_post_action(frame, id);
     draw_task_ctx_menu();
-    draw_rename_box(right_col, id);
+    draw_rename_box(frame, id);
 }
 
-
-// ================================================================ 欢迎页
-void MaaHubWindow::page_welcome(RECT content) {
-    RECT panel{ content.left + 60, content.top + 40, content.right - 60, content.bottom - 40 };
-    gui_.panel(panel, L"\u6b22\u8fce\u4f7f\u7528 MaaHub");
-    int y = panel.top + 56;
-    const wchar_t* lines[] = {
-        L"MaaHub 统一管理 MAA（明日方舟）与 MaaEnd（终末地）实例。",
-        L"· 左侧「＋ 新建」创建执行器：一个执行器 = 一个独立的原版软件实例",
-        L"· 每个执行器可绑定不同账号，多个执行器可同时运行，实现多账号并行",
-        L"· 「核心管理」可拉取 / 更新 MAA 与 MaaEnd 核心（内置多源下载）",
-        L"· 「智能规划」由 LLM 依据各实例状态规划自动化行为",
-    };
-    for (auto* line : lines) {
-        gui_.text(panel.left + 24, y, line, gui_.theme.text, gui_.font);
-        y += 24;
-    }
-    y += 16;
-    std::vector<mj::Value> execs, cores;
-    {
-        std::lock_guard<std::mutex> lk(snap_mtx_);
-        if (auto* e = snap_.find("executors"); e && e->is_array()) execs = e->items();
-        if (auto* c = snap_.find("cores"); c && c->is_array()) cores = c->items();
-    }
-    int maa_n = 0, end_n = 0;
-    for (auto& e : execs) {
-        if (e.get_str("kind", "") == "maa") ++maa_n; else ++end_n;
-    }
-    gui_.text(panel.left + 24, y,
-              L"当前执行器：" + std::to_wstring(maa_n) + L" 个 MAA，"
-              + std::to_wstring(end_n) + L" 个 MaaEnd；已登记核心 "
-              + std::to_wstring(cores.size()) + L" 个",
-              gui_.theme.text, gui_.font);
-}
 
 // ================================================================ 账号管理
 void MaaHubWindow::page_accounts(RECT content) {
@@ -2134,24 +1987,24 @@ void MaaHubWindow::page_accounts(RECT content) {
         std::lock_guard<std::mutex> lk(snap_mtx_);
         snap = snap_;
     }
-    RECT form{ content.left, content.top, content.right, content.top + 46 };
+    // 表单两行：窄窗口下「＋ 添加账号」不能被挤出右缘
+    RECT form{ content.left, content.top, content.right, content.top + 80 };
     gui_.panel(form);
     int fx = form.left + 16;
     gui_.text_input("acc-label", { fx, form.top + 10, fx + 190, form.top + 36 },
                     form_label_, L"备注名，如：官服大号");
-    fx += 200;
-    int gi = gui_.option_strip("acc-form-game", { fx, form.top + 10, fx + 180, form.top + 36 },
+    gui_.text_input("acc-ident", { fx + 200, form.top + 10, form.right - 16, form.top + 36 },
+                    form_ident_, L"账号标识：MAA 登录名片段 / MaaEnd 邮箱或后四位");
+    int fy = form.top + 44;
+    int gi = gui_.option_strip("acc-form-game", { fx, fy, fx + 180, fy + 26 },
                                { L"明日方舟 (MAA)", L"终末地 (MaaEnd)" }, acc_form_game_);
     if (gi >= 0) acc_form_game_ = gi;
     fx += 190;
-    gui_.text_input("acc-ident", { fx, form.top + 10, fx + 290, form.top + 36 }, form_ident_,
-                    L"账号标识：MAA 登录名片段 / MaaEnd 邮箱或后四位");
-    fx += 300;
-    int mi = gui_.option_strip("acc-form-match", { fx, form.top + 10, fx + 190, form.top + 36 },
+    int mi = gui_.option_strip("acc-form-match", { fx, fy, fx + 190, fy + 26 },
                                { L"后四位匹配", L"邮箱匹配" }, acc_form_match_);
     if (mi >= 0) acc_form_match_ = mi;
     fx += 200;
-    RECT ab{ fx, form.top + 10, fx + 110, form.top + 36 };
+    RECT ab{ fx, fy, fx + 110, fy + 26 };
     if (gui_.button("acc-add", ab, L"＋ 添加账号", 1, !form_label_.empty())) {
         std::string label = form_label_, ident = form_ident_;
         std::string game = acc_form_game_ == 0 ? "maa" : "maaend";
@@ -2164,11 +2017,14 @@ void MaaHubWindow::page_accounts(RECT content) {
         form_ident_.clear();
     }
 
-    RECT panel{ content.left, content.top + 58, content.right, content.bottom };
+    RECT panel{ content.left, content.top + 92, content.right, content.bottom };
     gui_.panel(panel, L"👥 账号列表");
     int ty = panel.top + 38;
-    int cols[] = { panel.left + 16, panel.left + 190, panel.left + 300, panel.left + 470,
-                   panel.left + 590, panel.left + 670, panel.left + 790, panel.left + 900 };
+    int pw = panel.right - panel.left;
+    int cols[] = { panel.left + pw * 2 / 100,  panel.left + pw * 12 / 100,
+                   panel.left + pw * 19 / 100, panel.left + pw * 38 / 100,
+                   panel.left + pw * 49 / 100, panel.left + pw * 55 / 100,
+                   panel.left + pw * 64 / 100, panel.left + pw * 73 / 100 };
     const wchar_t* heads[] = { L"备注", L"游戏", L"标识", L"匹配方式", L"状态", L"最近运行",
                                L"今日日常", L"操作" };
     for (int i = 0; i < 8; ++i) gui_.text(cols[i], ty, heads[i], gui_.theme.dim, gui_.font_small);
@@ -2647,8 +2503,10 @@ void MaaHubWindow::page_planner(RECT content) {
     RECT hpanel{ content.left, y, content.right, content.bottom };
     gui_.panel(hpanel, L"🕘 计划历史");
     int ty = hpanel.top + 36;
-    int cols[] = { hpanel.left + 16, hpanel.left + 200, hpanel.left + 300, hpanel.left + 800,
-                   hpanel.left + 880 };
+    int pw = hpanel.right - hpanel.left;
+    int cols[] = { hpanel.left + pw * 2 / 100, hpanel.left + pw * 22 / 100,
+                   hpanel.left + pw * 38 / 100, hpanel.left + pw * 62 / 100,
+                   hpanel.left + pw * 86 / 100 };
     const wchar_t* heads[] = { L"时间", L"规划器", L"目标", L"步骤", L"状态" };
     for (int i = 0; i < 5; ++i) gui_.text(cols[i], ty, heads[i], gui_.theme.dim, gui_.font_small);
     ty += 22;
@@ -2823,6 +2681,14 @@ void MaaHubWindow::debug_open_add_task() {
     fprintf(stderr, "[render] add-task overlay opened\n");
 }
 
+// 测试用：强制打开「新建执行器」浮层
+void MaaHubWindow::debug_open_new_exec() {
+    show_new_exec_ = true;
+    new_kind_ = 0;
+    new_acc_idx_ = 0;
+    fprintf(stderr, "[render] new-exec overlay opened\n");
+}
+
 void MaaHubWindow::refresh_snapshot() {
     mj::Value s = hub_->snapshot();
     std::lock_guard<std::mutex> lk(snap_mtx_);
@@ -2930,6 +2796,14 @@ void MaaHubWindow::action_create_executor() {
         }
     }
     std::string label = new_label_;
+    if (label.empty()) {
+        // 留空时按同类实例数顺延编号，避免出现两个同名执行器
+        int n = 1;
+        for (auto& e : hub_->executors()) {
+            if (e.kind == kind) ++n;
+        }
+        label = (kind == "maa" ? "MAA " : "MaaEnd ") + std::to_string(n);
+    }
     std::string id = hub_->create_executor(kind, label, account_id);
     if (id.empty()) {
         set_notice("创建失败：没有可用核心，请先在「核心管理」中登记或拉取");
@@ -2947,7 +2821,7 @@ void MaaHubWindow::action_delete_executor(const std::string& id) {
     hub_->remove_executor(id);
     if (selected_exec_ == id) {
         selected_exec_.clear();
-        page_ = "welcome";
+        page_ = "executor";
     }
     set_notice("已删除执行器");
 }
@@ -2983,7 +2857,6 @@ void MaaHubWindow::action_run_from(const std::string& id, const std::string& fro
     std::vector<mj::Value> items;
     if (cat.is_array()) {
         for (auto& t : cat.items()) {
-            if (e.kind == "maaend" && maaend_hidden_task(t.get_str("name", ""))) continue;
             items.push_back(t);
         }
     }
@@ -3047,7 +2920,6 @@ void MaaHubWindow::action_run_checked(const std::string& id) {
     std::vector<mj::Value> items;
     if (cat.is_array()) {
         for (auto& t : cat.items()) {
-            if (e.kind == "maaend" && maaend_hidden_task(t.get_str("name", ""))) continue;
             items.push_back(t);
         }
     }
@@ -3182,7 +3054,9 @@ void MaaHubWindow::action_pull_latest(const std::string& kind) {
 
 // ================================================================ 设置页
 void MaaHubWindow::page_settings(RECT content) {
-    // 首次进入从快照回填（官方 SettingsView 多组设置）
+    // 首次进入从快照回填（官方 SettingsView 多组设置）。
+    // 快照还没到（后端线程未产出第一份 snapshot）时保持 settings_loaded_=false，
+    // 下一帧重试——避免用空快照回填把默认值冲掉。
     if (!settings_loaded_) {
         mj::Value snap;
         {
@@ -3203,16 +3077,26 @@ void MaaHubWindow::page_settings(RECT content) {
             set_llm_key_ = st.llm_api_key;
             set_llm_model_ = st.llm_model;
             set_theme_ = st.theme;
+            // 启动 / 更新复选框也只在回填时赋值一次；放在每帧会覆盖用户点击
+            set_auto_start_   = st.auto_start;
+            set_start_min_    = st.start_minimized;
+            set_start_run_    = st.start_run;
+            set_upd_check_    = st.update_check_on_start;
+            set_upd_dl_       = st.update_auto_download;
+            set_upd_install_  = st.update_auto_install;
+            set_upd_gh_       = st.update_force_github;
+            settings_loaded_ = true;
         }
-        settings_loaded_ = true;
     }
 
     int y = content.top;
     auto group = [&](const wchar_t* title) {
-        RECT card{ content.left, y, content.right, y + 28 };
-        gui_.round_rect(card, gui_.theme.primary, gui_.theme.primary, 4);
-        gui_.text(card.left + 12, card.top + 5, title, RGB(255, 255, 255), gui_.font_bold);
-        y += 34;
+        // 官方设置页是 HandyControl TitleElement：小节标题为普通加粗文字 + 分隔线，
+        // 不是整块主色高亮条
+        gui_.text(content.left, y + 2, title, gui_.theme.text, gui_.font_bold);
+        y += 22;
+        gui_.divider({ content.left, y, content.right, y + 1 });
+        y += 12;
     };
     auto note = [&](const std::wstring& text) {
         RECT save = gui_.clip();
@@ -3306,10 +3190,7 @@ void MaaHubWindow::page_settings(RECT content) {
             // ---------------- 启动设置（官方 9 项，MaaHub 实现可行子集）----------------
     group(L"\u542f\u52a8\u8bbe\u7f6e");
     {
-        AppSettings s = hub_->settings().get();
-        set_auto_start_   = s.auto_start;
-        set_start_min_    = s.start_minimized;
-        set_start_run_    = s.start_run;
+        // 值已在一次性回填里赋好；这里每帧重赋会覆盖用户勾选
         struct U { const char* key; const wchar_t* label; bool* val; };
         const U us[] = {
             { "set-auto-start", L"\u5f00\u673a\u81ea\u52a8\u542f\u52a8 MaaHub", &set_auto_start_ },
@@ -3329,11 +3210,7 @@ void MaaHubWindow::page_settings(RECT content) {
     // ---------------- 更新设置（官方 9 项，MaaHub 实现核心子集）----------------
     group(L"\u66f4\u65b0\u8bbe\u7f6e");
     {
-        AppSettings s = hub_->settings().get();
-        set_upd_check_   = s.update_check_on_start;
-        set_upd_dl_      = s.update_auto_download;
-        set_upd_install_ = s.update_auto_install;
-        set_upd_gh_      = s.update_force_github;
+        // 值已在一次性回填里赋好；这里每帧重赋会覆盖用户勾选
         struct U { const char* key; const wchar_t* label; bool* val; };
         const U us[] = {
             { "set-upd-check",   L"\u542f\u52a8\u65f6\u68c0\u67e5\u66f4\u65b0", &set_upd_check_ },
@@ -3383,6 +3260,10 @@ void MaaHubWindow::page_settings(RECT content) {
         if (gui_.button("set-save", sb, L"\u4fdd\u5b58\u8bbe\u7f6e", 1)) {
             action_save_settings();
         }
+        RECT ib{ content.left + 156, y, content.left + 296, y + 30 };
+        if (gui_.button("set-import", ib, L"\u5bfc\u5165\u914d\u7f6e...", 0)) {
+            action_import_config();
+        }
         if (!core_msg_.empty()) {
             RECT save = gui_.clip();
             gui_.text_clipped({ content.left + 156, y + 6, content.right, y + 28 },
@@ -3412,7 +3293,8 @@ void MaaHubWindow::action_save_settings() {
     post_action([this, mode, host, port, user, pass, cdk, enabled, url, key, model, theme,
                  auto_start, start_min, start_run,
                  upd_check, upd_dl, upd_install, upd_gh] {
-        hub_->settings().update([&](AppSettings& s) {
+        // update 返回真实落盘结果；LLM 配置保存后立即生效
+        bool ok = hub_->settings().update([&](AppSettings& s) {
             s.proxy_mode = mode;
             s.proxy_host = host;
             s.proxy_port = port;
@@ -3432,8 +3314,81 @@ void MaaHubWindow::action_save_settings() {
             s.update_auto_install = upd_install;
             s.update_force_github = upd_gh;
         });
-        set_notice("设置已保存");
+        if (ok) {
+            hub_->reload_llm_config();
+            set_notice("设置已保存");
+        } else {
+            // 写盘失败通常因为 state 目录被占用/只读（杀软、同步盘）
+            set_notice("设置保存失败：无法写入 " + util::exe_dir() + "\\state\\settings.json");
+        }
     }, "保存设置");
+}
+
+void MaaHubWindow::action_import_config() {
+    // 安装路径选择器（Vista IFileDialog FOS_PICKFOLDERS；也允许直接选配置文件）
+    std::string path;
+    {
+        IFileDialog* dlg = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                      IID_PPV_ARGS(&dlg));
+        if (SUCCEEDED(hr)) {
+            DWORD opts = 0;
+            dlg->GetOptions(&opts);
+            // 只选文件夹；FOS_FILEMUSTEXIST 与 PICKFOLDERS 组合会禁止单选文件，去掉
+            dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST);
+            // 标题：选择 MAA / MaaEnd 安装目录（或直接选 gui.json / mxu-MaaEnd.json）
+            dlg->SetTitle(L"\u9009\u62e9 MAA / MaaEnd \u5b89\u88c5\u76ee\u5f55"
+                          L"\uff08\u6216\u76f4\u63a5\u9009 gui.json / mxu-MaaEnd.json\uff09");
+            if (!import_path_.empty()) {
+                std::wstring wpath = util::utf8_to_wide(import_path_);
+                IShellItem* si = nullptr;
+                if (SUCCEEDED(SHCreateItemFromParsingName(wpath.c_str(), nullptr,
+                                                          IID_PPV_ARGS(&si)))) {
+                    dlg->SetDefaultFolder(si);
+                    si->Release();
+                }
+            }
+            hr = dlg->Show(hwnd_);
+            if (SUCCEEDED(hr)) {
+                IShellItem* res = nullptr;
+                if (SUCCEEDED(dlg->GetResult(&res))) {
+                    PWSTR wpath = nullptr;
+                    if (SUCCEEDED(res->GetDisplayName(SIGDN_FILESYSPATH, &wpath))) {
+                        path = util::wide_to_utf8(wpath);
+                        CoTaskMemFree(wpath);
+                    }
+                    res->Release();
+                }
+            }
+            dlg->Release();
+        }
+        if (path.empty()) return;   // 用户取消或对话框失败
+        import_path_ = path;        // 记住本次位置
+    }
+
+    HWND hwnd = hwnd_;
+    post_action([this, hwnd, path] {
+        // 路径解析（安装目录 -> config\xxx.json）+ 解析/写库全在 backend 线程
+        mj::Value rep = import_config::import_from_path(path, *hub_);
+        hub_->flush_task_params();   // 批量写入绕过 800ms 节流，防退出丢尾
+
+        // 任务列表不直写盘：暂存到 import_task_lists_，由 UI 线程在
+        // WM_APP_IMPORT 里合并进内存权威 task_list_ 后统一 save_task_list()
+        {
+            std::lock_guard<std::mutex> lk(import_mtx_);
+            import_task_lists_ = rep.find("task_lists")
+                                     ? *rep.find("task_lists")
+                                     : mj::Value::object();
+        }
+        // 定时计划合并进 Hub 调度器（按 exec_id+source 去重，保留 last_run_date）
+        if (auto* sch = rep.find("schedules"); sch && sch->is_array()
+            && !sch->items().empty()) {
+            hub_->merge_schedules(*sch);
+        }
+        PostMessageW(hwnd, WM_APP_IMPORT, 0, 0);
+
+        set_notice(import_config::report_message(rep));
+    }, "\u5bfc\u5165\u914d\u7f6e");
 }
 
 } // namespace hub

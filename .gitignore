@@ -38,3 +38,9 @@ __pycache__/
 
 # 最终审计截图（本地产物）
 docs/final-*.png
+
+# local temp compare dir (probe scripts/screenshots, do not commit)
+_cmp/
+
+# docs top-level loose screenshots (local artifacts; doc images live in docs/assets/)
+docs/*.png

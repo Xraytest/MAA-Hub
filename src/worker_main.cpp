@@ -26,7 +26,7 @@ static std::unique_ptr<IAdapter> make_adapter(const std::string& kind, const mj:
     return nullptr;
 }
 
-static mj::Value status_to_json(const AppStatus& s) {
+static mj::Value status_to_json(const AppStatus& s, const mj::Value& cfg) {
     mj::Value v = mj::Value::object();
     v.set("kind", s.kind);
     v.set("name", s.name);
@@ -39,14 +39,19 @@ static mj::Value status_to_json(const AppStatus& s) {
     v.set("run", s.run);
     v.set("last_error", s.last_error);
     mj::Value ctrl = mj::Value::object();
-    ctrl.set("mode", s.ctrl_mode.empty() ? "win32" : s.ctrl_mode);
+    std::string mode = cfg.get_path_str("connect.mode", "win32");
+    ctrl.set("mode", s.ctrl_mode.empty() ? mode : s.ctrl_mode);
     ctrl.set("hwnd", s.ctrl_hwnd ? mj::Value(s.ctrl_hwnd) : mj::Value(nullptr));
-    ctrl.set("screencap_method", 32);
-    ctrl.set("mouse_method", 1);
-    ctrl.set("keyboard_method", 1);
-    ctrl.set("adb_path", "");
-    ctrl.set("address", "");
-    ctrl.set("config", "General");
+    auto eff = [](int64_t resolved, const mj::Value& c, const char* path, int64_t def) {
+        return resolved >= 0 ? resolved : c.get_path_int(path, def);
+    };
+    ctrl.set("screencap_method", eff(s.screencap_method, cfg, "connect.screencap_method", 32));
+    ctrl.set("mouse_method", eff(s.mouse_method, cfg, "connect.mouse_method", 1));
+    ctrl.set("keyboard_method", eff(s.keyboard_method, cfg, "connect.keyboard_method", 1));
+    ctrl.set("touch_mode", cfg.get_path_str("connect.touch_mode", ""));
+    ctrl.set("adb_path", cfg.get_path_str("adb.adb_path", ""));
+    ctrl.set("address", cfg.get_path_str("adb.address", ""));
+    ctrl.set("config", cfg.get_path_str("adb.config", "General"));
     mj::Value res = mj::Value::array();
     res.push(mj::Value(s.res_w));
     res.push(mj::Value(s.res_h));
@@ -55,10 +60,12 @@ static mj::Value status_to_json(const AppStatus& s) {
     v.set("controller", std::move(ctrl));
     v.set("resource_hash", s.resource_hash);
     v.set("task_count", s.task_count);
+    if (!s.log_state.empty()) v.set("fw_log", s.log_state);
     return v;
 }
 
 int worker_main(const std::string& kind, const mj::Value& cfg) {
+    util::trace("worker start kind=" + kind);
     auto adapter = make_adapter(kind, cfg);
     if (!adapter) {
         printf("{\"error\":\"unknown kind %s\"}\n", kind.c_str());
@@ -99,35 +106,41 @@ int worker_main(const std::string& kind, const mj::Value& cfg) {
         try {
             if (cmd == "discover") {
                 adapter->discover(cfg);
-                reply(true, status_to_json(adapter->status()));
+                reply(true, status_to_json(adapter->status(), cfg));
             } else if (cmd == "load") {
                 bool ok = adapter->load();
-                reply(ok, status_to_json(adapter->status()));
+                reply(ok, status_to_json(adapter->status(), cfg));
             } else if (cmd == "connect") {
                 bool ok = adapter->connect();
-                reply(ok, status_to_json(adapter->status()));
+                reply(ok, status_to_json(adapter->status(), cfg));
             } else if (cmd == "disconnect") {
                 adapter->disconnect();
-                reply(true, status_to_json(adapter->status()));
+                reply(true, status_to_json(adapter->status(), cfg));
             } else if (cmd == "run") {
                 int64_t tid = 0;
                 bool ok = adapter->run_task(req.get_str("task", ""), req["params"], tid);
                 mj::Value r = mj::Value::object();
                 r.set("task_id", tid);
-                r.set("app", status_to_json(adapter->status()));
+                r.set("app", status_to_json(adapter->status(), cfg));
                 reply(ok, std::move(r));
             } else if (cmd == "stop") {
-                reply(adapter->stop(), status_to_json(adapter->status()));
+                reply(adapter->stop(), status_to_json(adapter->status(), cfg));
             } else if (cmd == "status") {
-                reply(true, status_to_json(adapter->status()));
+                reply(true, status_to_json(adapter->status(), cfg));
             } else if (cmd == "is_connected") {
                 reply(adapter->is_connected(), mj::Value::object());
             } else if (cmd == "tasks") {
                 mj::Value arr = mj::Value::array();
                 for (auto& t : adapter->task_catalog()) arr.push(t);
                 reply(true, std::move(arr));
+            } else if (cmd == "override") {
+                mj::Value out = mj::Value::object();
+                bool ok = adapter->build_override(req.get_str("task", ""), req["params"], out);
+                reply(ok, std::move(out));
             } else if (cmd == "unload" || cmd == "exit") {
+                util::trace("worker unload begin cmd=" + cmd);
                 adapter->unload();
+                util::trace("worker unload end");
                 reply(true, mj::Value::object());
                 if (cmd == "exit") return 0;
             } else {

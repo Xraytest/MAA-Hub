@@ -21,6 +21,7 @@ struct PanelCtx {
     ParamMap& params;     // 任务参数（读/写）
     const std::string& exec_id;
     const std::string& task;
+    bool advanced = false;   // 官方「常规设置 / 高级设置」两页：同一面板只画其中一页
 
     // 便捷读取
     bool get_bool(const std::string& k, bool def = false) const {
@@ -80,12 +81,16 @@ inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& la
                                     : (c.get_bool(key) ? CheckState::On : CheckState::Off);
     // 官方 CheckBox 规格：Height=30 Margin=6
     RECT r{ c.x, c.y + 3, c.right, c.y + 3 + 24 };
-    c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st);
+    int lines = 1;
+    c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st, &lines);
     c.set_bool(key, st == CheckState::On);
     c.set_once(key, st == CheckState::Once);
     // 官方 CheckBox Margin="0,10"：控件 20px 高 + 上下各 10px = 40px 节奏，
-    // 但有 tip 时官方把 tip 压在控件下方同一节奏内，故整体按 26px 步进
-    c.y += 26;
+    // 但有 tip 时官方把 tip 压在控件下方同一节奏内，故整体按 26px 步进；
+    // 窄列下长标签换行时再加一行高度，避免压住下一项
+    // 官方 MAA 面板行距 42（控件 30 + Margin 12）；这里控件 24 高，
+    // 取 36 步进让项与项之间留出同样的 12px 呼吸感
+    c.y += 36 + (lines > 1 ? 16 : 0);
     if (!tip.empty()) {
         c.g.tip_line(c.x + 24, c.y, c.right, tip);
         c.y += 15;
@@ -95,74 +100,27 @@ inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& la
 inline void pc_number(PanelCtx& c, const std::string& key, const std::wstring& label,
                       int def = 0, int step = 1, int lo = 0, int hi = 9999) {
     int v = c.get_int(key, def);
-    // 窄列：标签单独一行，控件下一行（官方 220px 列宽就是这样竖排）
-    c.g.text(c.x, c.y, label, c.g.theme.dim, c.g.font_small);
-    c.y += 18;
-    RECT r{ c.x, c.y, c.right, c.y + 24 };
+    // 官方中列：标签在左、输入框在右，同一行（非竖排）
+    const int LBL = 108;
+    c.g.text_clipped({ c.x, c.y, c.x + LBL - 8, c.y + 24 }, label, c.g.theme.dim, c.g.font_small);
+    RECT r{ c.x + LBL, c.y, c.right, c.y + 24 };
     c.g.number_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, L"", v, step, lo, hi);
     c.set_int(key, v);
-    c.y += 28;
+    c.y += 36;
 }
 
 inline void pc_text(PanelCtx& c, const std::string& key, const std::wstring& label,
                     const std::wstring& hint = L"") {
     std::string v = c.get_str(key);
-    c.g.text(c.x, c.y, label, c.g.theme.dim, c.g.font_small);
-    c.y += 18;
-    RECT r{ c.x, c.y, c.right, c.y + 24 };
+    // 官方中列：标签在左、输入框在右，同一行
+    const int LBL = 108;
+    c.g.text_clipped({ c.x, c.y, c.x + LBL - 8, c.y + 24 }, label, c.g.theme.dim, c.g.font_small);
+    RECT r{ c.x + LBL, c.y, c.right, c.y + 24 };
     c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, v,
                    hint.empty() ? nullptr : hint.c_str());
     c.set_str(key, v);
-    c.y += 28;
+    c.y += 36;
 }
-
-// 作战次数：-1 = 无限（MAA 官方语义），显示"无限"
-inline void pc_times(PanelCtx& c, const std::string& key, const std::wstring& label) {
-    int v = c.get_int(key, -1);
-    if (v >= 2147483647) { v = -1; c.set_int(key, -1); }   // 兼容历史脏值
-    bool inf = (v < 0);
-    // 窄列竖排：标签 / 输入框+± / 无限勾选，各占一行
-    c.g.text(c.x, c.y, label, c.g.theme.dim, c.g.font_small);
-    c.y += 20;
-    int avail = c.right - c.x;
-    std::string edit = inf ? std::string() : std::to_string(v);
-    if (avail >= 150) {
-        // 有足够宽度：输入框 + ± 按钮同行
-        RECT ir{ c.x, c.y, c.right - 84, c.y + 26 };
-        c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), ir, edit,
-                       inf ? L"\u65e0\u9650" : nullptr);
-        RECT minus_b{ c.right - 80, c.y, c.right - 46, c.y + 26 };
-        RECT plus_b{ c.right - 42, c.y, c.right - 8, c.y + 26 };
-        if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-m").c_str(),
-                       minus_b, L"-", 0)) {
-            if (!inf) v = (v - 1 < 0) ? 0 : v - 1;
-        }
-        if (c.g.button((c.exec_id + ":" + c.task + ":" + key + "-p").c_str(),
-                       plus_b, L"+", 0)) {
-            if (!inf) v += 1;
-        }
-        c.y += 30;
-    } else {
-        // 极窄：只放输入框
-        RECT ir{ c.x, c.y, c.right, c.y + 26 };
-        c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), ir, edit,
-                       inf ? L"\u65e0\u9650" : nullptr);
-        c.y += 30;
-    }
-    if (!inf) {
-        int nv = v;
-        try { nv = std::stoi(edit); } catch (...) { nv = v; }
-        if (nv < 0) nv = 0;
-        v = nv;
-    }
-    CheckState inf_st = inf ? CheckState::On : CheckState::Off;
-    RECT inf_r{ c.x, c.y, c.x + 90, c.y + 22 };
-    c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key + "-inf").c_str(),
-                  inf_r, L"\u65e0\u9650", inf_st);
-    c.set_int(key, inf_st == CheckState::On ? -1 : v);
-    c.y += 30;
-}
-
 
 // 横向单选（选项条）
 inline void pc_radio(PanelCtx& c, const std::string& key,
@@ -172,7 +130,27 @@ inline void pc_radio(PanelCtx& c, const std::string& key,
     int hit = c.g.option_strip((c.exec_id + ":" + c.task + ":" + key).c_str(), r, opts, cur);
     if (hit >= 0) cur = hit;
     c.set_int(key, cur);
-    c.y += 30;
+    c.y += 36;
+}
+
+// 选项多到一格只剩两三个字时，按官方退化成 ComboBox；否则 MaaEnd 那些两三十字符的 case 名会被压成「A… U… 」。
+// 返回当前下标，params[key] 随后被写回 cases 的字符串值
+inline int pc_select(PanelCtx& c, const std::string& key,
+                   const std::vector<std::wstring>& opts, int def = 0) {
+    int cur = c.get_int(key, def);
+    RECT r{ c.x, c.y, c.right, c.y + 24 };
+    std::string id = c.exec_id + ":" + c.task + ":" + key;
+    int cell = (r.right - r.left) / (int)opts.size();
+    bool tight = false;
+    for (auto& o : opts) {
+        if (c.g.text_size(o, c.g.font_small).cx + 10 > cell) tight = true;
+    }
+    int hit = tight ? c.g.combo(id.c_str(), r, opts, cur)
+                    : c.g.option_strip(id.c_str(), r, opts, cur);
+    if (hit >= 0) cur = hit;
+    c.set_int(key, cur);
+    c.y += 36;
+    return cur;
 }
 
 // ================================================================ 各任务面板
@@ -219,71 +197,196 @@ inline bool panel_startup(PanelCtx& c) {
 
 
 // ---- Fight：理智作战 ----
+// 官方 FightTaskUserControl 是「常规 / 高级」两页互斥的 StackPanel：
+//   常规 = 2 列 Grid（左列 MinWidth=100 放标签/复选框，右列 * 放输入控件，
+//          控件 Height=30 + Margin=6 → 行距 42）
+//   高级 = 单列复选框流（CheckBox Margin="0,10"）
 inline bool panel_fight(PanelCtx& c) {
-    // 官方 FightTaskUserControl：19 个控件，按官方顺序与分组复刻
-    c.g.group_title(c.x, c.y, L"\u7406\u667a\u4e0e\u7269\u6599");
-    c.y += 16;
-    // 官方 Grid 双列：C0 复选框、C1 NumericUpDown(Width=70) 同行
-    {
-        const int C1_W = 84;
-        int split = c.right - C1_W;
-        auto row_cb_num = [&](const std::string& key, const std::wstring& label,
-                              const std::string& numkey, int lo, int hi) {
-            bool v = c.get_bool(key);
-            CheckState st = c.get_once(key) ? CheckState::Once
-                                            : (v ? CheckState::On : CheckState::Off);
-            c.g.checkbox3((c.exec_id + ":Fight:" + key).c_str(),
-                          { c.x, c.y, split - 8, c.y + 22 }, label, st);
-            c.set_bool(key, st == CheckState::On);
-            c.set_once(key, st == CheckState::Once);
-            int nv = c.get_int(numkey, 0);
-            c.g.number_input((c.exec_id + ":Fight:" + numkey).c_str(),
-                             { split, c.y - 2, c.right, c.y + 24 }, L"", nv, 1, lo, hi);
-            c.set_int(numkey, nv);
-            c.y += 28;
-        };
-        row_cb_num("use_medicine", L"\u4f7f\u7528\u836f\u5242", "medicine", 0, 999);
-        row_cb_num("use_stone", L"\u4f7f\u7528\u6e90\u77f3", "stone", 0, 999);
-    }
-    c.y += 2;
+    const int RH = 42, M = 6;
+    // 官方左列 Width="Auto" MinWidth="100"：最长的标签（候选关卡 / 使用源石*）也在 100
+    // 之内，所以实测恒为 100 —— 右列所有控件因此对齐成同一条竖线。
+    const int LC = 100;
+    auto cell_l = [&]() { return RECT{ c.x + M, c.y + M, c.x + LC, c.y + RH - M }; };
+    auto cell_r = [&]() { return RECT{ c.x + LC + M, c.y + M, c.right - M, c.y + RH - M }; };
+    // 官方左列标签：controls:TextBlock 居中，格右端再压一个 TooltipBlock「?」
+    auto label_cell = [&](const std::wstring& s) {
+        int w = c.g.text_size(s, c.g.font).cx;
+        c.g.text(c.x + (LC - w) / 2, c.y + (RH - c.g.text_size(L"Ag", c.g.font).cy) / 2, s,
+                 c.g.theme.text, c.g.font);
+        c.g.icon_tip({ c.x + LC - 18, c.y + 4, c.x + LC - 6, c.y + 16 }, c.g.theme.faint);
+    };
+    // 官方 hc:NumericUpDown：Width=70、Margin=6、HorizontalAlignment=Left —— 不撑满右列
+    auto num_box = [&](const std::string& key, int& v, int lo, int hi, int top) {
+        c.g.number_input((c.exec_id + ":Fight:" + key).c_str(),
+                         { c.x + LC + M, top, c.x + LC + M + 70, top + 30 }, L"", v, 1, lo, hi);
+    };
+    auto cb_num = [&](const std::string& key, const std::wstring& label,
+                      const std::string& nkey, int def, int lo, int hi) {
+        CheckState st = c.get_once(key) ? CheckState::Once
+                        : (c.get_bool(key) ? CheckState::On : CheckState::Off);
+        int lines = 1;
+        c.g.checkbox3((c.exec_id + ":Fight:" + key).c_str(), cell_l(), label, st, &lines);
+        c.set_bool(key, st == CheckState::On);
+        c.set_once(key, st == CheckState::Once);
+        int nv = c.get_int(nkey, def);
+        if (nv < lo) nv = def;          // 历史脏值（旧的「-1=无限」）回到官方默认
+        num_box(nkey, nv, lo, hi, c.y + M);
+        c.set_int(nkey, nv);
+        c.y += RH + (lines > 1 ? 16 : 0);
+    };
 
-    c.g.group_title(c.x, c.y, L"\u5173\u5361\u4e0e\u6b21\u6570");
-    c.y += 16;
-    pc_text(c, "stage", L"\u5173\u5361", L"\u5982 1-7\uff1b\u7559\u7a7a\u4e3a \u5f53\u524d/\u4e0a\u6b21");
+    if (!c.advanced) {
+        // Grid.Row=0：使用药剂 / 使用源石 / 指定次数
+        cb_num("use_medicine", L"使用药剂", "medicine", 0, 0, 999);
+        // 官方：未允许源石保存状态时，「使用源石」标签尾部带一个 *
+        cb_num("use_stone",
+               c.get_bool("allow_stone_save") ? L"使用源石" : L"使用源石*",
+               "stone", 0, 0, 999);
+        cb_num("perform_battles", L"指定次数", "times", 999, 1, 999);
+
+        // Grid.Row=1 row0：指定材料复选框 + 右列可搜索的材料下拉框
+        CheckState mat_st = c.get_once("assigned_material") ? CheckState::Once
+                            : (c.get_bool("assigned_material") ? CheckState::On : CheckState::Off);
+        {
+            c.g.checkbox3((c.exec_id + ":Fight:assigned_material").c_str(), cell_l(),
+                          L"指定材料", mat_st);
+            c.set_bool("assigned_material", mat_st == CheckState::On);
+            c.set_once("assigned_material", mat_st == CheckState::Once);
+            c.g.icon_tip({ c.x + LC - 18, c.y + 4, c.x + LC - 6, c.y + 16 }, c.g.theme.faint);
+            static const char* kMats[] = { "固源岩", "研磨石", "聚酸组", "轻金组", "破片", "装置",
+                                           "醇", "糖", "酯", "数据增补条" };
+            std::vector<std::wstring> mats;
+            mats.push_back(L"不选择");                 // 官方第一项：空值项，显示「不选择」
+            for (auto* m : kMats) mats.push_back(gui::widen(m));
+            std::string mat = c.get_str("drop_item");
+            int cur = mat.empty() ? 0 : -1;
+            for (int i = 1; i < (int)mats.size(); ++i)
+                if (mats[i] == gui::widen(mat)) { cur = i; break; }
+            int pick = c.g.combo((c.exec_id + ":Fight:drop_item").c_str(), cell_r(), mats, cur,
+                                 L"选择材料", true);
+            if (pick >= 0) c.set_str("drop_item", pick == 0 ? std::string() : kMats[pick - 1]);
+            c.y += RH;
+        }
+        // Grid.Row=1 row1：官方绑 IsSpecifiedDrops —— 未勾选「指定材料」时整行不出现。
+        // 左列是竖排 hc:ButtonGroup（MaxWidth=88），右列是垂直居中的数量 NumericUpDown。
+        if (mat_st == CheckState::On) {
+            const int GH = 60, SUB = GH + 2 * M;
+            int cur = c.get_int("drop_mode", 0);
+            int hit = c.g.option_strip((c.exec_id + ":Fight:drop_mode").c_str(),
+                                       { c.x + M, c.y + M, c.x + M + 88, c.y + M + GH },
+                                       { L"刷取数量", L"目标库存" }, cur, true, true);
+            if (hit >= 0) c.set_int("drop_mode", hit);
+            int q = c.get_int("drop_quantity", 1);
+            if (q < 1) q = 1;
+            num_box("drop_quantity", q, 1, 999999, c.y + (SUB - 30) / 2);
+            c.set_int("drop_quantity", q);
+            c.y += SUB;
+        }
+
+        // Grid.Row=2：代理倍率（官方 Visibility = !HideSeries）
+        if (!c.get_bool("hide_series")) {
+            label_cell(L"代理倍率");
+            std::vector<std::wstring> opts = { L"AUTO", L"×1", L"×2", L"×3",
+                                               L"×4", L"×5", L"×6" };
+            int sv = c.get_int("series", -1);
+            int cur = (sv < 0 || sv > 6) ? 0 : sv;
+            int got = c.g.combo((c.exec_id + ":Fight:series").c_str(), cell_r(), opts, cur);
+            if (got >= 0) c.set_int("series", got == 0 ? -1 : got);
+            c.y += RH;
+        }
+
+        // Grid.Row=3：StagePlan。左列标签随「使用备选关卡」在 关卡 / 候选关卡 之间切换，
+        // 「添加候选」只有开启备选时才出现、且贴左列底部；右列是一个可增删行的列表框
+        // （关闭备选时 BorderThickness=0、只有一行）。
+        bool alt = c.get_bool("use_alternate_stage");
+        std::vector<std::string> cands;
+        {
+            std::string csv = c.get_str("candidate_stages");
+            size_t p = 0;
+            while (p < csv.size()) {
+                size_t q = csv.find(',', p);
+                std::string tok = csv.substr(p, q == std::string::npos ? std::string::npos : q - p);
+                if (!tok.empty()) cands.push_back(tok);
+                if (q == std::string::npos) break;
+                p = q + 1;
+            }
+        }
+        const int ROWH = 32;
+        int n = alt ? (int)cands.size() + 1 : 1;
+        int list_h = alt ? (std::max)(75, n * ROWH + 4) : ROWH;
+        int total = (std::max)(RH, list_h + 2 * M);
+        label_cell(alt ? L"候选关卡" : L"关卡");
+        RECT lb{ c.x + LC + M, c.y + M, c.right - M, c.y + M + list_h };
+        if (alt) c.g.round_rect(lb, c.g.theme.card_bg, c.g.theme.border, 4);
+        std::vector<std::string> plan((size_t)n);
+        plan[0] = c.get_str("stage");
+        for (int i = 1; i < n; ++i) plan[i] = cands[(size_t)i - 1];
+        int del = -1;
+        for (int i = 0; i < n; ++i) {
+            RECT ir = alt ? RECT{ lb.left + 2, lb.top + 2 + i * ROWH, lb.right - 2,
+                                  lb.top + 2 + i * ROWH + 30 }
+                          : RECT{ lb.left, lb.top, lb.right, lb.top + 30 };
+            c.g.text_input((c.exec_id + ":Fight:stage" + std::to_string(i)).c_str(), ir, plan[i],
+                           i == 0 ? L"如 1-7" : nullptr);
+            if (alt && i > 0) {
+                RECT xr{ ir.right - 20, ir.top + 8, ir.right - 6, ir.bottom - 8 };
+                if (c.g.hovered(xr)) {
+                    c.g.text(xr.left + 1, ir.top + 6, L"×", c.g.theme.dim, c.g.font);
+                    if (c.g.click_in(xr)) del = i;
+                }
+            }
+        }
+        for (int i = 1; i < n; ++i) cands[(size_t)i - 1] = plan[(size_t)i];
+        if (del > 0 && del - 1 < (int)cands.size()) cands.erase(cands.begin() + (del - 1));
+        if (alt) {
+            RECT bb{ c.x + M, c.y + total - RH + M, c.x + LC - M, c.y + total - M };
+            if (c.g.button((c.exec_id + ":Fight:add_candidate").c_str(), bb, L"添加候选", 0)
+                && !plan[0].empty())
+                cands.push_back(plan[0]);
+        }
+        c.set_str("stage", plan[0]);
+        {
+            std::string csv;
+            for (size_t i = 0; i < cands.size(); ++i) { if (i) csv += ","; csv += cands[i]; }
+            c.set_str("candidate_stages", csv);
+        }
+        c.y += total + 8;
+        return true;
+    }
+
+    // ---------------- 高级设置 ----------------
     pc_check(c, "use_custom_stage", L"\u624b\u52a8\u8f93\u5165\u5173\u5361\u540d");
-    c.y += 4;
-
-    // 指定次数 / 指定材料 二选一（官方 RadioButton 组）
-    pc_radio(c, "fight_mode", { L"\u6307\u5b9a\u6b21\u6570", L"\u6307\u5b9a\u6750\u6599" }, 0);
-    if (c.get_int("fight_mode", 0) == 0) {
-        pc_times(c, "times", L"\u4f5c\u6218\u6b21\u6570");
-    } else {
-        // 指定材料：刷取数量 / 目标库存
-        pc_radio(c, "drop_mode", { L"\u5237\u53d6\u6570\u91cf", L"\u76ee\u6807\u5e93\u5b58" }, 0);
-        pc_text(c, "drop_item", L"\u6750\u6599\u540d\u79f0", L"\u5982 \u\u8d28\u6599");
-        pc_number(c, "drop_quantity", L"\u6570\u91cf", 0, 1, 0, 999999);
-    }
-    pc_radio(c, "series", { L"\u00d71", L"\u00d72", L"\u00d73", L"\u00d74", L"\u00d75", L"\u00d76" }, 3);
-    c.y += 4;
-
-    c.g.group_title(c.x, c.y, L"\u884c\u4e3a");
-    c.y += 16;
     pc_check(c, "dr_grandet", L"\u535a\u90ce\u53f0\u6a21\u5f0f",
              L"\u7406\u667a\u4e3a 0 \u65f6\u4ecd\u8bd5\u8fdb\u5165\u5173\u5361\uff0c\u5229\u7528\u5bbf\u820d\u6062\u590d");
     pc_check(c, "use_expire_medicine", L"\u65e0\u9650\u5403 N \u5929\u5185\u8fc7\u671f\u7684\u7406\u667a\u836f");
-    pc_number(c, "medicine_expire_days", L"\u8fc7\u671f\u5929\u6570\u9608\u503c", 7, 1, 1, 30);
+    if (c.get_bool("use_expire_medicine")) {
+        // 官方：子项以 └ 缩进，后面跟一个 Width=60 的 NumericUpDown
+        c.g.text(c.x + 24, c.y + 4, L"\u2514", c.g.theme.text, c.g.font);
+        int d = c.get_int("medicine_expire_days", 7);
+        c.g.number_input((c.exec_id + ":Fight:medicine_expire_days").c_str(),
+                         { c.x + 40, c.y, c.x + 114, c.y + 24 }, L"", d, 1, 1, 30);
+        c.set_int("medicine_expire_days", d);
+        c.y += 30;
+    }
     pc_check(c, "use_weekly_expire_medicine",
              L"\u6d3b\u52a8\u7ed3\u675f\u524d 48H \u5403\u5f53\u5468\u8fc7\u671f\u7406\u667a\u836f");
     pc_check(c, "hide_series", L"\u9690\u85cf\u4ee3\u7406\u500d\u7387");
     pc_check(c, "allow_stone_save", L"\u5141\u8bb8\u4f7f\u7528\u6e90\u77f3\u4fdd\u5b58\u72b6\u6001");
     pc_check(c, "hide_unavailable_stage", L"\u4e0b\u62c9\u6846\u4e2d\u9690\u85cf\u5f53\u65e5\u4e0d\u5f00\u653e\u5173\u5361");
     c.y += 4;
-    // 过期活动关卡重置为（官方 ComboBox）
-    c.g.text(c.x, c.y + 4, L"\u8fc7\u671f\u6d3b\u52a8\u5173\u5361\u91cd\u7f6e\u4e3a",
-             c.g.theme.dim, c.g.font_small);
-    c.y += 22;
-    pc_radio(c, "stage_reset_mode", { L"\u4e0d\u91cd\u7f6e", L"\u5f53\u524d/\u4e0a\u6b21", L"\u6307\u5b9a\u5173\u5361" }, 0);
-    c.y += 4;
+    // 过期活动关卡重置为（官方带 Title 的 ComboBox）
+    {
+        c.g.text(c.x, c.y + 3, L"\u8fc7\u671f\u6d3b\u52a8\u5173\u5361\u91cd\u7f6e\u4e3a",
+                 c.g.theme.dim, c.g.font_small);
+        c.y += 20;
+        int pick = c.g.combo(
+            (c.exec_id + ":Fight:stage_reset_mode").c_str(),
+            { c.x, c.y, c.right, c.y + 30 },
+            { L"\u4e0d\u91cd\u7f6e", L"\u5f53\u524d/\u4e0a\u6b21", L"\u6307\u5b9a\u5173\u5361" },
+            c.get_int("stage_reset_mode", 0));
+        if (pick >= 0) c.set_int("stage_reset_mode", pick);
+        c.y += 36;
+    }
     pc_check(c, "use_alternate_stage", L"\u4f7f\u7528\u5907\u9009\u5173\u5361");
     pc_check(c, "report_to_penguin", L"\u4e0a\u62a5\u6389\u843d\u7edf\u8ba1\u5230\u4f01\u9e45\u7269\u6d41");
     pc_check(c, "use_weekly_plan", L"\u542f\u7528\u5468\u8ba1\u5212");
@@ -685,8 +788,6 @@ inline bool panel_closedown(PanelCtx& c) {
 //   array -> 分号分隔文本框；其他 -> 文本框
 // 标签用官方 description（MAA catalog / MaaEnd locale 均已中文化）
 inline bool panel_generic(PanelCtx& c, const std::vector<mj::Value>* specs) {
-    c.g.group_title(c.x, c.y, L"\u9ad8\u7ea7\u8bbe\u7f6e");
-    c.y += 20;
     if (!specs || specs->empty()) {
         c.g.tip_line(c.x, c.y, c.right, L"\u8be5\u4efb\u52a1\u65e0\u53ef\u914d\u7f6e\u53c2\u6570");
         c.y += 20;
@@ -701,7 +802,11 @@ inline bool panel_generic(PanelCtx& c, const std::vector<mj::Value>* specs) {
         bool required = p.get_bool("required", false);
         std::wstring tip;
         if (required) tip = L"\u5fc5\u586b\u9879";
-        if (p.has("default")) {
+        // 勾选框本身就是默认态，再打一行「默认 "Yes"」只是噪音
+        // bool 与单选条会把默认态画在控件上，只有文本/数字类才需要额外提示
+        bool shown_on_widget = type == "bool"
+            || (type == "select" && p.has("cases"));
+        if (p.has("default") && !shown_on_widget) {
             std::wstring d = L"\u9ed8\u8ba4 " + gui::widen(mj::Value::dump(p["default"]));
             tip = tip.empty() ? d : (tip + L" \u00b7 " + d);
         }
@@ -721,7 +826,11 @@ inline bool panel_generic(PanelCtx& c, const std::vector<mj::Value>* specs) {
                     std::string w = util::wide_to_utf8(opts[i]);
                     if (w == cur) { sel = (int)i; break; }
                 }
-                pc_radio(c, key, opts, sel);
+                // 控件本身不带标题，先把参数名画在上方
+                c.g.text_clipped({ c.x, c.y, c.right, c.y + 16 }, label,
+                                 c.g.theme.dim, c.g.font_small);
+                c.y += 18;
+                sel = pc_select(c, key, opts, sel);
                 // 回写为选中项的中文名（与 cases 展示一致）
                 c.set_str(key, util::wide_to_utf8(opts[sel]));
                 if (!tip.empty()) { c.g.tip_line(c.x + 24, c.y, c.right, tip); c.y += 16; }

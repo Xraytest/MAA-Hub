@@ -28,7 +28,10 @@ namespace gui {
 // Success #2db84d / Warning #e9af20 / Danger #db3340 / Accent #f8491e
 // 控件高 28、圆角 4、内边距 (10,5)、左列宽 190、外框 Margin 20
 struct Theme {
-    COLORREF bg = RGB(0xEE, 0xEE, 0xEE);            // BackgroundColor
+    // 页面底色用的是 RegionBrush（Light=#FFFFFF / Dark=#1C1C1C），不是 BackgroundColor
+    // #eeeeee —— 实测官方浅色截图整页（含标题栏、标签条、列间留白）都是纯白，
+    // 卡片只靠 BorderColor #E0E0E0 的 1px 描边区分。#eeeeee 只作为 hover 等叠加层出现。
+    COLORREF bg = RGB(0xFF, 0xFF, 0xFF);            // RegionBrush（官方 Light）
     COLORREF panel = RGB(0xFF, 0xFF, 0xFF);         // RegionColor
     COLORREF border = RGB(0xE0, 0xE0, 0xE0);        // BorderColor
     COLORREF text = RGB(0x21, 0x21, 0x21);          // PrimaryTextColor
@@ -44,23 +47,25 @@ struct Theme {
     COLORREF err = RGB(0xDB, 0x33, 0x40);           // DangerColor
     COLORREF err_light = RGB(0xFF, 0xF6, 0xF7);     // LightDangerColor
     COLORREF accent = RGB(0xF8, 0x49, 0x1E);        // AccentColor
-    COLORREF hover = RGB(0xF5, 0xF5, 0xF5);         // DarkDefaultColor（悬停底）
-    // TaskQueue.TaskItemStatus.*（官方 Light.xaml，Alpha #20 = 12.5%）
-    COLORREF status_running = RGB(0x6C, 0x9C, 0xF3);  // InProgress 蓝
-    COLORREF status_done = RGB(0x60, 0xD0, 0x60);     // Completed 绿
-    COLORREF status_error = RGB(0xFF, 0x66, 0x66);    // Error 红
+    COLORREF hover = RGB(0xF3, 0xF3, 0xF3);         // MouseOverRegionBrush（官方 Light 覆盖值）
+    // TaskQueue.TaskItemStatus.*：官方为 #20 前缀（12.5% 黑底叠加），
+    // 折算为叠在白色根底（RegionBrush）上的实色
+    COLORREF status_running = RGB(0xEC, 0xF3, 0xFD);  // #206C9CF3 InProgress
+    COLORREF status_done = RGB(0xEB, 0xF9, 0xEB);     // #2060D060 Completed
+    COLORREF status_error = RGB(0xFF, 0xEC, 0xEC);    // #20FF6666 Error
     COLORREF input_bg = RGB(0xFF, 0xFF, 0xFF);      // DefaultColor
-    COLORREF row_alt = RGB(0xEE, 0xEE, 0xEE);       // SecondaryRegionColor
-    // 官方背景层级：窗口/左列卡片 = RegionBrushOpacity25(#40FFFFFF)
-    // 叠加在系统白底上约等于 #FBFBFB；内容区沿用该色而非纯白
-    COLORREF card_bg = RGB(0xFB, 0xFB, 0xFB);      // RegionBrushOpacity25 混合结果
-    COLORREF card_bg_soft = RGB(0xF6, 0xF6, 0xF6); // 次级卡片（略深一档）
-    // 官方 MaaCheckBoxDefaultStyle：RegionBrushOpacity50（比按钮深一档）
-    COLORREF checkbox_bg = RGB(0xF6, 0xF6, 0xF6);
-    // 官方 NoSelectedHighlightListBoxItemStyle：
-    //   Background=RegionBrushOpacity25(#FBFBFB)，选中态背景不变（无高亮），
-    //   IsMouseOver=MouseOverRegionBrushOpacity75(约#FAFAFA)
-    COLORREF item_bg = RGB(0xFB, 0xFB, 0xFB);
+    COLORREF row_alt = RGB(0xF3, 0xF3, 0xF3);       // SecondaryRegionBrush（Light 覆盖为 #F3F3F3）
+    // 官方背景层级：Light 下 RegionBrush=#FFFFFF，RegionBrushOpacity25=#40FFFFFF
+    // 叠加在白根底上仍是纯白（Opacity 系列只在设置了背景图时才有可见差异）
+    COLORREF card_bg = RGB(0xFF, 0xFF, 0xFF);      // RegionBrushOpacity25 实色
+    COLORREF card_bg_soft = RGB(0xFD, 0xFD, 0xFD); // MouseOverRegionBrushOpacity10（日志卡片底）
+    // 复选框底色走控件自身 Background（Light 实色白），边框 BorderColor
+    COLORREF checkbox_bg = RGB(0xFF, 0xFF, 0xFF);
+    // NoSelectedHighlightListBoxItemStyle：默认背景 = 卡片白；
+    // IsMouseOver = MouseOverRegionBrushOpacity75(#BFEEEEEE 叠白) = #F2F2F2
+    COLORREF item_bg = RGB(0xFF, 0xFF, 0xFF);
+    COLORREF item_hover = RGB(0xF2, 0xF2, 0xF2);
+    COLORREF trace_text = RGB(0x80, 0x80, 0x80);    // TraceLogBrush（Light=Gray）
 
     // ---- 亮/暗主题（官方 Res/Themes/Dark.xaml）----
     bool dark = false;
@@ -80,6 +85,10 @@ struct Theme {
         t.checkbox_bg    = RGB(0x2E, 0x2E, 0x33);   // RegionBrushOpacity50 等效
         t.item_bg        = RGB(0x23, 0x23, 0x26);
         t.item_hover     = RGB(0x2B, 0x2B, 0x30);   // MouseOverRegionBrush（官方）
+        t.status_running = RGB(0x1F, 0x26, 0x37);   // #20326CF3 叠 #1C1C1C
+        t.status_done    = RGB(0x2B, 0x36, 0x2B);   // #2090EE90
+        t.status_error   = RGB(0x37, 0x21, 0x21);   // #20FF4444
+        t.trace_text     = RGB(0xA9, 0xA9, 0xA9);   // TraceLogBrush（Dark=DarkGray）
         t.hover          = RGB(0x2B, 0x2B, 0x30);
         t.row_alt        = RGB(0x1F, 0x1F, 0x22);
         t.border         = RGB(0x3E, 0x3E, 0x42);
@@ -97,7 +106,6 @@ struct Theme {
 
     // 切换主题（dark=false 回到默认亮色）
     void set_dark(bool d) { *this = d ? make_dark() : Theme{}; }
-    COLORREF item_hover = RGB(0xFA, 0xFA, 0xFA);
     COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）
 };
 
@@ -127,21 +135,22 @@ enum class CheckState { Off = 0, On = 1, Once = 2 };
 class Gui {
 public:
     Theme theme;
-    HFONT font = nullptr;       // 14px
-    HFONT font_bold = nullptr;  // 14px 粗体
-    HFONT font_small = nullptr; // 12px
-    HFONT font_title = nullptr; // 16px 粗体
-    HFONT font_big = nullptr;   // 15px 粗体
+    HFONT font = nullptr;       // 12px —— 官方 WPF 默认正文
+    HFONT font_bold = nullptr;  // 12px 粗体
+    HFONT font_small = nullptr; // 11px —— 官方辅助/次级文字
+    HFONT font_title = nullptr; // 14px 粗体 —— 官方标题
+    HFONT font_big = nullptr;   // 16px 粗体 —— 官方大标题
 
     void init_fonts() {
         if (font) return;
-        // 字号对齐 MAA 官方 WPF 规格：正文 12pt≈16px、辅助 11pt≈15px、
-        // 标题 14pt≈19px、大标题 15pt≈20px（96DPI 下 1pt = 1.333px）
-        font = make_font(16, false);
-        font_bold = make_font(16, true);
-        font_small = make_font(15, false);
-        font_title = make_font(19, true);
-        font_big = make_font(20, true);
+        // WPF 的 FontSize 单位是 DIP（96DPI 下 = px），不是磅：官方默认正文 12、辅助 11，
+        // 标题 14、大标题 16。实测官方截图「使用药剂」4 字 47px、「自动战斗」4 字 46px，
+        // 均对应 12px —— 早先按 12pt≈16px 换算是把 DIP 当成了磅，整页文字因此大了一圈。
+        font = make_font(12, false);
+        font_bold = make_font(12, true);
+        font_small = make_font(11, false);
+        font_title = make_font(14, true);
+        font_big = make_font(16, true);
     }
 
     // ------------------------------------------------------------ 帧
@@ -286,6 +295,8 @@ public:
     bool hovered(RECT r) const {
         return PtInRect(&r, in_.mouse) && PtInRect(&clip_, in_.mouse);
     }
+    // 面板里自绘的小控件（列表行删除键等）用它判定「本帧在该格按下」
+    bool click_in(RECT r) const { return hovered(r) && in_.pressed; }
 
     // ------------------------------------------------------------ 滚动区域
     // 注意：滚动通过调用方在绘制时手动减去 scroll 值实现（见 scroll_offset()），
@@ -390,16 +401,20 @@ public:
         g.FillPath(&br, &gp);
     }
 
-    // 官方图标集（path 取自 MaaWpfGui/Res/Styles/Basic/Geometries.xaml）
+    // 官方图标集（几何取自 MaaWpfGui/Res/Styles/Basic/Geometries.xaml）
+    // TaskQueueAddTaskIcon：细描边圆圈 + 加号
     void icon_add_task(RECT r, COLORREF c) {
-        draw_icon_path(L"M14.613,10c0,0.23-0.188,0.419-0.419,0.419H10.42v3.774c0,0.23-0.189,0.42-0.42,0.42"
-                       L"s-0.419-0.189-0.419-0.42v-3.774H5.806c-0.23,0-0.419-0.189-0.419-0.419"
-                       L"s0.189-0.419,0.419-0.419h3.775V5.806c0-0.23,0.189-0.419,0.419-0.419"
-                       L"s0.42,0.189,0.42,0.419v3.775h3.774C14.425,9.581,14.613,9.77,14.613,10 "
-                       L"M17.969,10c0,4.401-3.567,7.969-7.969,7.969c-4.402,0-7.969-3.567-7.969-7.969"
-                       L"c0-4.402,3.567-7.969,7.969-7.969C14.401,2.031,17.969,5.598,17.969,10 "
-                       L"M17.13,10c0-3.932-3.198-7.13-7.13-7.13S2.87,6.068,2.87,10c0,3.933,3.198,7.13,7.13,7.13"
-                       L"S17.13,13.933,17.13,10", r, c);
+        using namespace Gdiplus;
+        Graphics g(dc_);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        int w = r.right - r.left, h = r.bottom - r.top;
+        int d = w < h ? w : h;
+        Pen pen(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.4f);
+        g.DrawEllipse(&pen, (REAL)(r.left + (w - d) / 2), (REAL)(r.top + (h - d) / 2),
+                      (REAL)(d - 2), (REAL)(d - 2));
+        int cx = r.left + w / 2, cy = r.top + h / 2, arm = d / 4;
+        g.DrawLine(&pen, cx - arm, cy, cx + arm, cy);
+        g.DrawLine(&pen, cx, cy - arm, cx, cy + arm);
     }
     void icon_link(RECT r, COLORREF c) {
         draw_icon_path(L"M29.25 6.76a6 6 0 0 0-8.5 0l1.42 1.42a4 4 0 1 1 5.67 5.67l-8 8a4 4 0 1 1-5.67-5.66"
@@ -451,26 +466,144 @@ public:
         g.DrawLine(&pen, r.left + w / 2, r.top + 7, r.left + w / 2, r.top + h - 4);
     }
 
-    // 齿轮（ConfigGeometry 的简化等效：外圈 + 中心，官方为 32x32 Carbon 齿轮）
+    // 齿轮（官方 ConfigGeometry 是描边齿轮：外齿圈 + 内孔，这里等效为线框）
     void icon_gear(RECT r, COLORREF c) {
         using namespace Gdiplus;
         Graphics g(dc_);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-        int rad = (r.right - r.left) / 2 - 2;
-        SolidBrush br(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
-        // 齿（8 个方向的小矩形）
+        int rad = (r.right - r.left) / 2 - 1;
+        Pen pen(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.5f);
         for (int k = 0; k < 8; ++k) {
             double a = k * 3.14159265 / 4.0;
-            int tx = cx + (int)(cos(a) * (rad - 1));
-            int ty = cy + (int)(sin(a) * (rad - 1));
-            g.FillEllipse(&br, tx - 2, ty - 2, 5, 5);
+            double c1 = cos(a), s1 = sin(a);
+            g.DrawLine(&pen, (REAL)(cx + c1 * (rad - 2)), (REAL)(cy + s1 * (rad - 2)),
+                       (REAL)(cx + c1 * (rad + 1)), (REAL)(cy + s1 * (rad + 1)));
         }
-        g.FillEllipse(&br, cx - rad, cy - rad, rad * 2, rad * 2);
-        // 中心挖孔（用背景色）
-        SolidBrush hole(Color(255, GetRValue(theme.card_bg), GetGValue(theme.card_bg),
-                              GetBValue(theme.card_bg)));
-        g.FillEllipse(&hole, cx - rad / 3, cy - rad / 3, rad * 2 / 3, rad * 2 / 3);
+        g.DrawEllipse(&pen, (REAL)(cx - rad + 2), (REAL)(cy - rad + 2),
+                      (REAL)((rad - 2) * 2), (REAL)((rad - 2) * 2));
+        g.DrawEllipse(&pen, (REAL)(cx - rad / 3), (REAL)(cy - rad / 3),
+                      (REAL)(rad * 2 / 3), (REAL)(rad * 2 / 3));
+    }
+
+    // hc:SplitButton / ComboBox 右端的下拉箭头
+    void icon_chevron(RECT r, COLORREF c, bool up) {
+        HPEN p = CreatePen(PS_SOLID, 1, c);
+        HGDIOBJ old = SelectObject(dc_, p);
+        int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        int dy = up ? -2 : 2;
+        MoveToEx(dc_, cx - 3, cy - dy, nullptr);
+        LineTo(dc_, cx, cy + dy);
+        LineTo(dc_, cx + 3, cy - dy);
+        SelectObject(dc_, old);
+        DeleteObject(p);
+    }
+    void icon_chevron_down(RECT r, COLORREF c) { icon_chevron(r, c, false); }
+
+    // 官方 hc:NumericUpDown 右端的菱形（上下箭头共用一条轮廓）
+    void icon_diamond(RECT r, COLORREF c) {
+        HPEN p = CreatePen(PS_SOLID, 1, c);
+        HGDIOBJ old = SelectObject(dc_, p);
+        int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        POINT pts[5] = { { cx, cy - 5 }, { cx + 4, cy }, { cx, cy + 5 }, { cx - 4, cy },
+                         { cx, cy - 5 } };
+        Polyline(dc_, pts, 5);
+        SelectObject(dc_, old);
+        DeleteObject(p);
+    }
+
+    // 官方 controls:TooltipBlock：贴在所在格右端的「?」圆圈（NormalOpacity=0.25）
+    void circle_outline(RECT r, COLORREF c) {
+        HPEN p = CreatePen(PS_SOLID, 1, c);
+        HGDIOBJ oldp = SelectObject(dc_, p);
+        HGDIOBJ oldb = SelectObject(dc_, GetStockObject(NULL_BRUSH));
+        Ellipse(dc_, r.left, r.top, r.right, r.bottom);
+        SelectObject(dc_, oldb);
+        SelectObject(dc_, oldp);
+        DeleteObject(p);
+    }
+
+    void icon_tip(RECT r, COLORREF c) {
+        circle_outline({ (r.left + r.right) / 2 - 5, (r.top + r.bottom) / 2 - 5,
+                         (r.left + r.right) / 2 + 6, (r.top + r.bottom) / 2 + 6 }, c);
+        text((r.left + r.right) / 2 - 3, (r.top + r.bottom) / 2 - 7, L"?", c, font_small);
+    }
+
+    // 官方 ComboBox：Height=30、CornerRadius=4、文本左对齐、右侧灰色下拉箭头。
+    // 弹出层必须盖住本帧后续绘制的控件，所以 combo() 只登记，帧末由
+    // 页面调 flush_combo_popup() 统一绘制并回收点击（选中结果下一帧生效）。
+    int combo(const char* id, RECT r, const std::vector<std::wstring>& items, int cur,
+              const std::wstring& placeholder = L"", bool item_icon = false) {
+        std::string key = id;
+        int picked = -1;
+        std::string mark = key + "|";
+        if (combo_pick_.rfind(mark, 0) == 0) {
+            picked = atoi(combo_pick_.c_str() + mark.size());
+            combo_pick_.clear();
+        }
+        bool hov = hovered(r);
+        if (hov) hot_ = key;
+        if (hov && in_.pressed) active_ = key;
+        bool open = combo_open_ == key;
+        if (hov && active_ == key && in_.released) {
+            combo_open_ = open ? std::string() : key;
+            open = !open;
+        }
+        round_rect(r, theme.card_bg, open ? theme.primary : theme.border, 4);
+        std::wstring txt = (cur >= 0 && cur < (int)items.size()) ? items[cur] : placeholder;
+        // 官方掉落材料下拉：IsEditable 收起态塞不进图片，用一个不命中的 16px 浮层贴在左端，
+        // ComboBox 以 Padding=28 为它让出文本起点；「不选择」项同位画描边圆环占位。
+        int tx0 = r.left + (item_icon ? 28 : 8);
+        if (item_icon)
+            circle_outline({ r.left + 12, (r.top + r.bottom) / 2 - 8,
+                             r.left + 28, (r.top + r.bottom) / 2 + 8 }, theme.border);
+        RECT tr{ tx0, r.top, r.right - 22, r.bottom };
+        push_clip(tr);
+        text_clipped(tr, txt, txt.empty() ? theme.trace_text : theme.text, font);
+        pop_clip();
+        icon_chevron_down({ r.right - 18, r.top, r.right - 4, r.bottom }, theme.dim);
+        if (open) {
+            combo_pop_.key = key;
+            combo_pop_.box = r;
+            combo_pop_.items = items;
+            combo_pop_.cur = cur;
+            combo_pop_.live = true;
+        }
+        return picked;
+    }
+
+    // 帧末调用：绘制展开中的下拉层，并处理「点选项」/「点外部关闭」
+    void flush_combo_popup() {
+        if (!combo_pop_.live) return;
+        combo_pop_.live = false;
+        RECT b = combo_pop_.box;
+        int n = (int)combo_pop_.items.size();
+        const int row = 26;
+        RECT list{ b.left, b.bottom + 2, b.right, b.bottom + 2 + n * row };
+        fill(list, theme.card_bg);
+        round_rect(list, CLR_INVALID, theme.border, 4);
+        bool hit = false;
+        for (int i = 0; i < n; ++i) {
+            RECT ir{ list.left + 1, list.top + i * row, list.right - 1, list.top + (i + 1) * row };
+            bool hov = hovered(ir);
+            if (hov) {
+                hit = true;
+                push_clip(ir);
+                fill(ir, theme.item_hover);
+                pop_clip();
+            }
+            RECT tr{ ir.left + 8, ir.top, ir.right - 8, ir.bottom };
+            push_clip(tr);
+            text_clipped(tr, combo_pop_.items[i],
+                         i == combo_pop_.cur ? theme.primary : theme.text, font);
+            pop_clip();
+            if (hov && in_.pressed) {
+                combo_pick_ = combo_pop_.key + "|" + std::to_string(i);
+                combo_open_.clear();
+                return;
+            }
+        }
+        if (in_.pressed && !hit && !PtInRect(&b, in_.mouse)) combo_open_.clear();
     }
 
     // 官方样式滚动条（HandyControl ScrollBarBaseStyle）：
@@ -495,14 +628,11 @@ public:
                 && in_.mouse.x <= scroll_rect_.right
                 && in_.mouse.y >= scroll_rect_.top
                 && in_.mouse.y <= scroll_rect_.bottom;
-        if (hov) {
-            fill({ tx, scroll_rect_.top, tx + 4, scroll_rect_.bottom },
-                 RGB(0xF0, 0xF0, 0xF0));
-        }
-        // Thumb：官方 PrimaryTextBrush，圆角 2
-        round_rect({ tx, ty, tx + 4, ty + thumb_h },
-                   hov ? RGB(0x42, 0x42, 0x42) : RGB(0x9E, 0x9E, 0x9E),
-                   CLR_INVALID, 2);
+        // Thumb：官方 PrimaryTextBrush，圆角 2；HandyControl 的 ScrollBarBaseStyle
+        // 默认 Opacity=0，只有指针进入滚动区才显形（否则静态界面里像一根多余的竖线）
+        if (!hov) return;
+        fill({ tx, scroll_rect_.top, tx + 4, scroll_rect_.bottom }, RGB(0xF0, 0xF0, 0xF0));
+        round_rect({ tx, ty, tx + 4, ty + thumb_h }, RGB(0x42, 0x42, 0x42), CLR_INVALID, 2);
     }
 
     // 当前滚动偏移（绘制 item 时从 y 中减去）
@@ -567,33 +697,94 @@ public:
 
     // 横向选项条（单选，返回点击索引，未点击 -1）已在下方 option_strip
 
-    // 数字输入框：左侧标签 + 中间输入 + 右侧 +/- 步进按钮
+    // 官方 hc:ButtonGroup：整组只有一条外框（CornerRadius=4，仅首尾两端圆角），
+    // 相邻按钮之间是 1px 分隔线，而不是各自一个圆角矩形。
+    // widths[i] <= 0 表示均分剩余宽度；cells 非空时回填每格矩形。
+    // 返回被点击的格下标，未点击返回 -1。
+    int button_group(const char* id, RECT r, const std::vector<std::wstring>& labels,
+                     const std::vector<int>& widths, int style = 0,
+                     std::vector<RECT>* cells = nullptr) {
+        int n = (int)labels.size();
+        if (n <= 0) return -1;
+        std::vector<RECT> cs(n);
+        int fixed = 0, flex = 0;
+        for (int i = 0; i < n; ++i) {
+            int w = i < (int)widths.size() ? widths[i] : 0;
+            if (w > 0) { fixed += w; } else { ++flex; }
+        }
+        int total = r.right - r.left;
+        int each = flex > 0 ? (std::max)(1, (total - fixed) / flex) : 0;
+        int x = r.left;
+        for (int i = 0; i < n; ++i) {
+            int w = (i < (int)widths.size() && widths[i] > 0) ? widths[i] : each;
+            cs[i] = { x, r.top, x + w, r.bottom };
+            x += w;
+        }
+        if (cells) *cells = cs;
+
+        COLORREF base_fill = style == 1 ? theme.primary : theme.card_bg;
+        COLORREF hov_fill = style == 1 ? theme.primary_dark : theme.hover;
+        COLORREF txt_c = style == 1 ? RGB(255, 255, 255) : theme.text;
+
+        // 外框先画（含底色），再叠 hover 底色，最后分隔线与文字
+        round_rect(r, base_fill, theme.border, 4);
+
+        int clicked = -1;
+        for (int i = 0; i < n; ++i) {
+            bool hov = hovered(cs[i]);
+            std::string iid = std::string(id) + "#" + std::to_string(i);
+            if (hov) hot_ = iid;
+            if (hov && in_.pressed) active_ = iid;
+            if (hov && active_ == iid && in_.released) clicked = i;
+            if (!hov) continue;
+            push_clip(r);                       // hover 底色绝不越出整组外框
+            fill(cs[i], hov_fill);
+            pop_clip();
+        }
+        for (int i = 1; i < n; ++i)
+            fill({ cs[i].left, r.top + 1, cs[i].left + 1, r.bottom - 1 }, theme.border);
+        for (int i = 0; i < n; ++i) {
+            if (cs[i].right <= cs[i].left) continue;
+            push_clip(cs[i]);
+            text_clipped(cs[i], labels[i], txt_c, font);
+            pop_clip();
+        }
+        return clicked;
+    }
+
+    // 官方 hc:NumericUpDown：一个圆角框，右端上下箭头在框内（不是 -/+ 两个按钮）。
+    // 标签为空时文本顶满左边界，窄格（面板右列 ~110px）也能正常显示。
     void number_input(const char* id, RECT r, const std::wstring& label,
                       int& value, int step = 1, int min_v = 0, int max_v = 9999) {
-        int lw = 150;
-        RECT save = clip_;
-        text(r.left, r.top + (r.bottom - r.top - 17) / 2, label, theme.text, font);
-        (void)save;
-        RECT ir{ r.left + lw, r.top, r.right - 76, r.bottom };
+        int lw = 0;
+        if (!label.empty()) {
+            lw = text_size(label, font).cx + 8;
+            if (lw > 150) lw = 150;
+            text(r.left, r.top + (r.bottom - r.top - 17) / 2, label, theme.text, font);
+        }
+        const int spin = 16;
+        bool narrow = (r.right - r.left) < 60;
+        RECT box{ r.left + lw, r.top, r.right, r.bottom };
         std::string edit = std::to_string(value);
-        text_input(id, ir, edit, nullptr);
+        text_input(id, box, edit, nullptr, lw == 0 ? 1 : 0);
         int nv = value;
         try { nv = std::stoi(edit); } catch (...) { nv = value; }
         if (nv < min_v) nv = min_v;
         if (nv > max_v) nv = max_v;
         value = nv;
-        // 窄列时 ± 按钮会挤压输入框，宽度不足则省略
-        int w = r.right - r.left;
-        if (w >= 150) {
-            RECT minus_b{ r.right - 72, r.top, r.right - 40, r.bottom };
-            RECT plus_b{ r.right - 36, r.top, r.right - 4, r.bottom };
-            if (button((std::string(id) + "-m").c_str(), minus_b, L"-", 0)) {
-                value = (value - step < min_v) ? min_v : value - step;
-            }
-            if (button((std::string(id) + "-p").c_str(), plus_b, L"+", 0)) {
-                value = (value + step > max_v) ? max_v : value + step;
-            }
-        }
+        if (narrow) return;
+        int mid = (r.top + r.bottom) / 2;
+        RECT up{ r.right - spin, r.top + 1, r.right - 1, mid };
+        RECT dn{ r.right - spin, mid, r.right - 1, r.bottom - 1 };
+        std::string uid = std::string(id) + "-up", did = std::string(id) + "-dn";
+        bool hup = hovered(up), hdn = hovered(dn);
+        if (hup) hot_ = uid;
+        if (hdn) hot_ = did;
+        // 官方样式：右端只有一个菱形（上下箭头共用轮廓），无分隔线、无 hover 底色
+        icon_diamond({ r.right - spin, r.top, r.right - 2, r.bottom },
+                     (hup || hdn) ? theme.primary : theme.dim);
+        if (hup && in_.pressed) value = (value + step > max_v) ? max_v : value + step;
+        if (hdn && in_.pressed) value = (value - step < min_v) ? min_v : value - step;
     }
 
     // 提示行（对应 MAA 的 Tip 文本，三级文字色）
@@ -605,7 +796,8 @@ public:
 
     // 三态复选框（对应 MAA 官方语义）：
     //   左键 = 开/关切换；右键 = 切换「仅生效一次」（该次运行有效，不写入配置）
-    bool checkbox3(const char* id, RECT r, const std::wstring& label, CheckState& st) {
+    bool checkbox3(const char* id, RECT r, const std::wstring& label, CheckState& st,
+                   int* label_lines = nullptr) {
         bool hov = hovered(r);
         if (hov) hot_ = id;
         if (hov && in_.pressed) active_ = id;
@@ -624,42 +816,32 @@ public:
         int vpad = ((r.bottom - r.top) - box) / 2;
         if (vpad < 0) vpad = 0;
         RECT br{ r.left, r.top + vpad, r.left + box, r.top + vpad + box };
-        // 官方复选框底色 RegionBrushOpacity50（浅灰，与按钮形成层次）
-        COLORREF fill_c = theme.checkbox_bg, line_c = RGB(180, 188, 200);
+        // 官方：未选中 = 白底 + BorderBrush(#E0E0E0)；选中 = DarkPrimaryBrush 实底 + 白勾。
+        // null（仅一次）态复选框本身没有专属配色，视觉上等同未选中。
+        COLORREF fill_c = theme.checkbox_bg, line_c = theme.border;
         if (st == CheckState::On) { fill_c = theme.primary; line_c = theme.primary; }
-        else if (st == CheckState::Once) { fill_c = theme.primary_light; line_c = theme.primary; }
         round_rect(br, fill_c, line_c, 3);
-        if (st != CheckState::Off) {
-            HPEN p = CreatePen(PS_SOLID, 2, st == CheckState::On ? RGB(255, 255, 255)
-                                                                 : theme.primary);
+        if (st == CheckState::On) {
+            HPEN p = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
             HGDIOBJ old = SelectObject(dc_, p);
             MoveToEx(dc_, br.left + 3, br.top + 8, nullptr);
             LineTo(dc_, br.left + 6, br.top + 12);
             LineTo(dc_, br.left + 13, br.top + 4);
             SelectObject(dc_, old);
             DeleteObject(p);
-            if (st == CheckState::Once) {
-                // 「仅一次」加圆点标记
-                HPEN d = CreatePen(PS_SOLID, 3, theme.primary);
-                HGDIOBJ od = SelectObject(dc_, d);
-                Ellipse(dc_, br.left + 5, br.top + 5, br.left + 11, br.top + 11);
-                SelectObject(dc_, od);
-                DeleteObject(d);
-            }
         }
         // 官方 CheckBox 文字 TextWrapping=Wrap：窄列下长标签换行显示，不被裁切
+        // null 态文字色 = TraceLogBrush（Light #808080），这是官方唯一的「仅一次」提示
+        COLORREF label_c = (st == CheckState::Once) ? theme.trace_text : theme.text;
         RECT save = clip_;
         int tx = r.left + box + 8;
         int avail = r.right - tx;
         SIZE full = text_size(label, font);
-        int tpad = ((r.bottom - r.top) - 18) / 2;
+        int tpad = ((r.bottom - r.top) - text_size(L"Ag", font).cy) / 2;
         if (tpad < 0) tpad = 0;
+        int lines = 1;
         if (full.cx <= avail) {
-            text(tx, r.top + tpad, label, theme.text, font);
-            if (st == CheckState::Once) {
-                text(tx + full.cx + 6, r.top + tpad,
-                     L"（仅一次）", theme.primary, font_small);
-            }
+            text(tx, r.top + tpad, label, label_c, font);
         } else {
             // 按可用宽度逐字换行（最多两行）
             std::wstring line1, line2;
@@ -670,13 +852,13 @@ public:
                 else { line1 += ch; used += cw; }
                 if (line2.size() > 26) { line2.resize(26); line2 += L"…"; break; }
             }
-            text(tx, r.top + tpad - 2, line1, theme.text, font);
-            if (!line2.empty()) text(tx, r.top + tpad + 16, line2, theme.text, font);
-            if (st == CheckState::Once) {
-                text(tx + text_size(line1, font).cx + 6, r.top + tpad,
-                     L"（仅一次）", theme.primary, font_small);
+            text(tx, r.top + tpad - 2, line1, label_c, font);
+            if (!line2.empty()) {
+                text(tx, r.top + tpad + 16, line2, label_c, font);
+                lines = 2;
             }
         }
+        if (label_lines) *label_lines = lines;
         (void)save;
         return changed;
     }
@@ -722,7 +904,8 @@ public:
         return click;
     }
 
-    void text_input(const char* id, RECT r, std::string& value, const wchar_t* hint = nullptr) {
+    void text_input(const char* id, RECT r, std::string& value, const wchar_t* hint = nullptr,
+                    int align = 0) {
         bool hov = hovered(r);
         if (hov) hot_ = id;
         if (hov && in_.pressed) {
@@ -734,15 +917,21 @@ public:
         round_rect(r, theme.card_bg, focused ? theme.primary : theme.border, 4);
         std::wstring w = widen(value);
         RECT save = clip_;
+        int ty = r.top + ((r.bottom - r.top) - text_size(L"Ag", font).cy) / 2;
         if (w.empty() && hint) {
-            text(r.left + 8, r.top + (r.bottom - r.top - 17) / 2, hint, RGB(170, 178, 190), font);
+            if (align == 1) {
+                SIZE hs = text_size(hint, font);
+                text((r.left + r.right - hs.cx) / 2, ty, hint, RGB(170, 178, 190), font);
+            } else {
+                text(r.left + 8, ty, hint, RGB(170, 178, 190), font);
+            }
         } else {
             // 水平滚动以露出光标
             int maxw = r.right - r.left - 14;
             SIZE sz = text_size(w, font);
-            int x = r.left + 7;
+            int x = (align == 1) ? (r.left + r.right - sz.cx) / 2 : r.left + 7;
             if (sz.cx > maxw) x = r.left + 7 - (sz.cx - maxw) - 8;
-            text(x, r.top + (r.bottom - r.top - 17) / 2, w, theme.text, font);
+            text(x, ty, w, theme.text, font);
             if (focused && (GetTickCount() / 530) % 2 == 0) {
                 SIZE cs = text_size(w, font);
                 int cx = std::min<int>(x + cs.cx + 1, (int)r.right - 3);
@@ -774,25 +963,66 @@ public:
     }
 
     // 横向选项条：返回点击的索引，未点击返回 -1
-    int option_strip(const char* id, RECT r, const std::vector<std::wstring>& opts, int cur) {
+    // 官方 hc:ButtonGroup（RadioButton 组）：整组一条外框、相邻格共用 1px 分隔线，
+    // 选中格 = 白底 + PrimaryBrush 描边 + 蓝字（不是蓝底白字）。
+    // vertical=true 对应官方 Orientation="Vertical"（如「刷取数量/目标库存」）；
+    // big=true 用正文字号，对应直接放 RadioButton 文本的场合。
+    int option_strip(const char* id, RECT r, const std::vector<std::wstring>& opts, int cur,
+                     bool vertical = false, bool big = false) {
         int n = (int)opts.size();
-        int gap = 4;
-        int w = (r.right - r.left - gap * (n - 1)) / n;
+        if (n <= 0) return -1;
+        int span = vertical ? (r.bottom - r.top) : (r.right - r.left);
+        int w = span / n;
+        std::vector<RECT> cs(n);
+        for (int i = 0; i < n; ++i) {
+            int a = r.left + i * w, b = (i == n - 1) ? r.right : r.left + (i + 1) * w;
+            int c1 = r.top + i * w, c2 = (i == n - 1) ? r.bottom : r.top + (i + 1) * w;
+            cs[i] = vertical ? RECT{ r.left, c1, r.right, c2 } : RECT{ a, r.top, b, r.bottom };
+        }
+
+        round_rect(r, theme.card_bg, theme.border, 4);
         int clicked = -1;
         for (int i = 0; i < n; ++i) {
-            RECT ir{ r.left + i * (w + gap), r.top, r.left + i * (w + gap) + w, r.bottom };
-            bool hov = hovered(ir);
+            bool hov = hovered(cs[i]);
             if (hov) hot_ = id + std::to_string(i);
             if (hov && in_.pressed) active_ = id + std::to_string(i);
-            bool sel = (i == cur);
-            COLORREF fill = sel ? theme.primary_light : RGB(255, 255, 255);
-            COLORREF border = sel ? theme.primary : theme.border;
-            COLORREF txt = sel ? theme.primary_dark : theme.dim;
-            round_rect(ir, fill, border, 5);
-            RECT save = clip_;
-            text_clipped(ir, opts[i], txt, font_small);
-            clip_ = save;
             if (hov && active_ == id + std::to_string(i) && in_.released) clicked = i;
+            if (!hov || i == cur) continue;
+            push_clip(r);
+            fill(cs[i], theme.hover);
+            pop_clip();
+        }
+        for (int i = 1; i < n; ++i) {
+            if (vertical)
+                fill({ r.left + 1, cs[i].top, r.right - 1, cs[i].top + 1 }, theme.border);
+            else
+                fill({ cs[i].left, r.top + 1, cs[i].left + 1, r.bottom - 1 }, theme.border);
+        }
+        if (cur >= 0 && cur < n) {
+            RECT sr = cs[cur];
+            sr.left = (cur == 0) ? r.left + 1 : sr.left + 1;
+            sr.right = (cur == n - 1) ? r.right - 1 : sr.right - 1;
+            sr.top = (cur == 0) ? r.top + 1 : sr.top + 1;
+            sr.bottom = (cur == n - 1) ? r.bottom - 1 : sr.bottom - 1;
+            round_rect(sr, theme.card_bg, theme.primary, 3);
+        }
+        for (int i = 0; i < n; ++i) {
+            COLORREF txt = (i == cur) ? theme.primary : theme.text;
+            HFONT f = big ? font : font_small;
+            // 一格放不下的长选项（MaaEnd 的 case 名常常是英文全名）截成省略号，
+            // 否则居中的文字会左右溢出、压到邻格文字上
+            int avail = (cs[i].right - cs[i].left) - 8;
+            std::wstring label = opts[i];
+            SIZE sz = text_size(label, f);
+            if (sz.cx > avail) {
+                label = ellipsize(label, avail, f);
+                sz = text_size(label, f);
+            }
+            // 官方 hc:ButtonGroup 每格内容居中；左对齐会让首字压住 1px 选中边框
+            push_clip(cs[i]);
+            text(cs[i].left + ((cs[i].right - cs[i].left) - sz.cx) / 2,
+                 cs[i].top + ((cs[i].bottom - cs[i].top) - sz.cy) / 2, label, txt, f);
+            pop_clip();
         }
         return clicked;
     }
@@ -810,16 +1040,27 @@ public:
     }
 
     // ------------------------------------------------------------ 剪裁栈
+    // clip_ 只管文字（ExtTextOut 的 ETO_CLIPPED）；GDI+ 的 FillPath/DrawPath
+    // 走的是 HDC 自身的裁剪区域，所以必须同步 SelectClipRgn，否则滚动区/面板
+    // 里的控件底色会画到裁剪区之外（例如压住列底的「常规/高级设置」条）。
     void push_clip(RECT r) {
         RECT inter;
         IntersectRect(&inter, &clip_, &r);
         clip_stack_.push_back(clip_);
+        int save = SaveDC(dc_);
+        if (save) IntersectClipRect(dc_, inter.left, inter.top, inter.right, inter.bottom);
+        dc_save_.push_back(save);
         clip_ = inter;
     }
     void pop_clip() {
         if (!clip_stack_.empty()) {
             clip_ = clip_stack_.back();
             clip_stack_.pop_back();
+            if (!dc_save_.empty()) {
+                int save = dc_save_.back();
+                dc_save_.pop_back();
+                if (save) RestoreDC(dc_, save);
+            }
         }
     }
     RECT clip() const { return clip_; }
@@ -831,6 +1072,8 @@ public:
     void set_dc(HDC dc, RECT client) {
         dc_ = dc;
         clip_ = client;
+        clip_stack_.clear();
+        dc_save_.clear();
         // 文字背景透明 + 高质量拉伸（缩放/位图时不出现块状）
         SetBkMode(dc_, TRANSPARENT);
         SetStretchBltMode(dc_, HALFTONE);
@@ -841,23 +1084,36 @@ public:
 
 private:
     static HFONT make_font(int px, bool bold) {
-        // ANTIALIASED_QUALITY：字体抗锯齿（WPF 文字平滑的关键；
-        // 默认 DEFAULT_QUALITY 在小字号下锯齿明显，是"不像官方"的主因之一）
+        // CLEARTYPE_QUALITY：系统「字体平滑」开着时按子像素渲染，与 WPF 一致。
+        // 之前用 ANTIALIASED_QUALITY 强制灰度抗锯齿，小字号下发虚，是「看不清」的主因。
+        // OUT_DEFAULT_PRECIS：OUT_DEVICE_PRECIS 在内存 DC 上可能挑到点阵字体。
         return CreateFontW(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
                            FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                           OUT_DEVICE_PRECIS, CLIP_DEFAULT_PRECIS,
-                           ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS,
+                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS,
                            L"Microsoft YaHei");
     }
 
     HDC dc_ = nullptr;
     RECT clip_{ 0, 0, 0, 0 };
     std::vector<RECT> clip_stack_;
+    std::vector<int> dc_save_;
     Input in_;
     std::string hot_;
     std::string r_active_;   // 右键活动控件
     std::string active_;
     std::string focus_;
+    // 下拉框：展开中的控件、待登记的弹出层、帧末回收的点击
+    struct ComboPop {
+        std::string key;
+        RECT box{};
+        std::vector<std::wstring> items;
+        int cur = -1;
+        bool live = false;
+    };
+    std::string combo_open_;
+    std::string combo_pick_;
+    ComboPop combo_pop_;
     bool wheel_used_ = false;
     // 滚动
     RECT scroll_rect_{};

@@ -254,8 +254,22 @@ private:
     void skip_ws() {
         while (i_ < s_.size()) {
             char c = s_[i_];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') ++i_;
-            else break;
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { ++i_; continue; }
+            // JSONC：MaaEnd 官方 interface 任务文件里带 // 与 /* */ 注释，
+            // 整文件解析失败会连带丢掉该文件的全部任务和参数定义。
+            if (c == '/' && i_ + 1 < s_.size()) {
+                if (s_[i_ + 1] == '/') {
+                    i_ += 2;
+                    while (i_ < s_.size() && s_[i_] != '\n') ++i_;
+                    continue;
+                }
+                if (s_[i_ + 1] == '*') {
+                    size_t e = s_.find("*/", i_ + 2);
+                    i_ = (e == std::string::npos) ? s_.size() : e + 2;
+                    continue;
+                }
+            }
+            break;
         }
     }
 
@@ -293,6 +307,7 @@ private:
         if (peek() == '}') { ++i_; return v; }
         while (true) {
             skip_ws();
+            if (peek() == '}') { ++i_; return v; }   // 容忍尾随逗号
             if (peek() != '"') err("expected object key");
             std::string key = parse_string();
             skip_ws();
@@ -316,6 +331,7 @@ private:
         if (peek() == ']') { ++i_; return v; }
         while (true) {
             skip_ws();
+            if (peek() == ']') { ++i_; return v; }   // 容忍尾随逗号
             v.arr_.push_back(parse_value(depth + 1));
             skip_ws();
             char c = peek();
@@ -432,7 +448,15 @@ inline Value parse(const std::string& src) { return Parser(src).parse(); }
 
 inline bool try_parse(const std::string& src, Value& out) {
     try {
-        out = Parser(src).parse();
+        // 容忍 UTF-8 BOM（记事本 / PowerShell 5.x Set-Content -Encoding UTF8 会加）
+        const char* p = src.c_str();
+        size_t n = src.size();
+        if (n >= 3 && (unsigned char)p[0] == 0xEF &&
+            (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) {
+            p += 3;
+            n -= 3;
+        }
+        out = Parser(std::string(p, n)).parse();
         return true;
     } catch (...) {
         return false;
