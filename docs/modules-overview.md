@@ -32,7 +32,13 @@
 
 - 职责：核心登记 / 版本探测（子进程加载 DLL 查 AsstGetVersion、MaaVersion）/ 检查更新 / 下载解包 / 默认核心。
 - **最近（11-08，+60 行）**：多源回退（GitHub 直连 → gh-proxy → ghfast → moeyy → Mirror酱 CDK）、`tar.exe` 解包、版本校验；来源 `adopt / download / manual`；被删核心自动回退默认。
-- **11-10 GUI 首验**：核心管理页 8 列表格（类型/名称/版本/来源/路径/默认/更新/操作）与 `state\final_cores.json` 逐条一致（4 条：6.13.0、5.15.0-beta.1、6.21.1、6.22.0）。
+- **最近（11-10 夜，自动更新对齐 MAA 官方）**：
+  - 更新链补全为「检查 → 下载 → sha256 校验 → 解包 → 探测包内版本 → 登记 `release_tag` → 设为默认核心」；同版本/同 tag 复用不重复占盘，并回填 `release_tag`。
+  - 修 P0 资产误选：过滤条件 `x64` 匹配不到 `x86_64`，导致回退分支选中 **aarch64** 包；改为显式枚举 `x86_64/x64/amd64` 且排除 `aarch64/arm64`（回退分支同样排除）。
+  - 修版本比对口径：MaaEnd tag(`v3.0.0`) 与包内 `interface.json` 版本(`5.16.0-beta.2`) 不同源，改为 **tag-vs-tag** 优先；拿不到 tag 才回退探测值并置 `tag_mismatch` 提示。
+  - 修下载无超时把后台线程挂死（连不上资产 CDN 时永久阻塞）；sha256 打开文件失败重试（杀软/索引器短暂占用）；安装完成清理 `.tmp`（省 1 GB+）。
+  - CLI：`--cli core-check <kind>` / `--cli core-update <kind>`，输出 `CURRENT/CHECK/UPDATED/ALREADY_LATEST/UPDATE_FAILED stage=`。
+- **11-10 GUI 首验**：核心管理页与 `state\final_cores.json` 逐条一致；列宽改为按面板宽度自适应（右侧 检查/设默认/删除 右对齐，修掉旧固定偏移把「操作」列挤出可视区）。
 
 ### 4. 配置导入 — `config_import.hpp`（38 KB，新增未跟踪）
 
@@ -80,6 +86,7 @@
 
 - 职责：代理（none/http/socks5）、镜像源 CDK、LLM、主题、启动、更新策略；持久化 `state\settings.json`。
 - 最近（11-08，+57 行）：补「启动设置」「更新设置」两组（含持久化与测试）。
+- **最近（11-10 夜，对齐 MAA 官方 Update 组）**：`CheckOnStartup` / `CheckOnSchedule`（6 h）/ `AutoDownloadUpdatePackage` / `AutoInstallUpdatePackage` / `VersionType`(stable·beta·nightly) / `UpdateSource`(auto·github·mirrorchyan) / `GitHubToken`；旧 `update_force_github` 静默忽略。启动与定时检查都落在**后台线程**（UI 不阻塞），检查到更新后按「自动下载 / 自动安装」两项决定是否直接拉包并设为默认。设置页新增「更新设置」组（4 开关 + 渠道/源分段控件 + Token 输入 + 链路说明）。
 
 ### 12. 智能规划 — `planner.hpp`（20 KB）
 
@@ -102,10 +109,11 @@
 | 多安装导入（Maa1/Maa5）→ 连接 → 6 个一键长草 → 真实定时触发 | **11-09 端到端通过**（`trace.log` 有 `[sched] exec-... -> done`） |
 | 定时数据与 MAA 原生一致性 | **11-10 已对齐**（gui.new.json 修复后） |
 | 核心管理页视觉对比 | **11-10 PASS**（能力面超过 MAA 原生） |
-| 设置页慢帧（曾 53 s） | 未修，P1 |
+| Maa、MaaEnd 自动更新闭环（检查→下载→sha256→解包→登记→设默认） | **11-10 夜端到端通过**（MaaEnd 5.15.0-beta.1→5.16.0-beta.2 复用/回填；MAA 6.13.0→6.22.0 新装并设默认；二次检查均 `has_update=0`） |
+| 设置页慢帧（曾 53 s） | 已修（检查/下载移到后台线程，`post_action` 队列） |
 | 定时计划无 GUI 页（只能 `--cli sched-list`） | 未做，P2 |
-| 表格列截断 / 窗口无最大化 | 未修，P2 |
-| 11-05 以来全部改动仍在 working tree（未提交） | 需整理提交 |
+| 表格列截断 / 窗口无最大化 | 列宽已改自适应；窗口最大化仍未做，P2 |
+| 11-05 以来全部改动仍在 working tree（未提交） | 已提交 `652b873` 并推送 origin/main |
 
 ## 四、证据
 
