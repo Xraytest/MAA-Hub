@@ -1057,8 +1057,17 @@ void MaaHubWindow::load_post_action() {
 void MaaHubWindow::save_task_list() {
     mj::Value v = mj::Value::object();
     for (auto& kv : task_list_) {
+        // 按 catalog 目录序落盘（StartUp 恒第一），不让 std::set 字典序进文件：
+        // 调度器/CLI 按文件数组原序执行，字母序会把 StartUp 排最后导致 02:00 链失败。
         mj::Value arr = mj::Value::array();
-        for (auto& nm : kv.second) arr.push(nm);
+        std::vector<mj::Value> cat = catalog_of(kind_of(kv.first));
+        for (auto& t : cat) {
+            std::string nm = t.get_str("name", "");
+            if (!nm.empty() && kv.second.count(nm)) arr.push(nm);
+        }
+        if (arr.items().empty()) {          // 目录不可用（快照未就绪）兜底原序
+            for (auto& nm : kv.second) arr.push(nm);
+        }
         v.set(kv.first, std::move(arr));
     }
     util::write_file(util::exe_dir() + "\\state\\task-lists.json",

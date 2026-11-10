@@ -693,10 +693,43 @@ public:
 
     // 顺序跑一串任务（每个一次 run，等空闲再下一个），同步执行。
     // 设备联调 / 无头流程用；params 取各任务已保存的面板参数。
+    // 规范任务序（MAA 原生语义）：StartUp 恒第一（先拉起游戏）、CloseDown 恒最后。
+    // maaend 的 CloseGamePC 同理排最后（先跑游戏内任务再关游戏）。
+    // 背景：task-lists.json 由 std::set 字典序落盘（app_window save_task_list），
+    // 不重排会变成 Award->...->StartUp，首任务找不到游戏直接失败。
+    static std::vector<std::string> canonical_task_order(const std::string& kind,
+                                                         std::vector<std::string> tasks) {
+        if (tasks.size() < 2) return tasks;
+        const char* first = kind == "maa" ? "StartUp" : nullptr;
+        const char* last = kind == "maa" ? "CloseDown"
+                         : kind == "maaend" ? "CloseGamePC" : nullptr;
+        auto pos_of = [&](const std::string& t) -> int {
+            for (size_t i = 0; i < tasks.size(); ++i)
+                if (tasks[i] == t) return (int)i;
+            return -1;
+        };
+        if (first) {
+            int p = pos_of(first);
+            if (p > 0) {   // 存在且不在首位 -> 提到最前
+                tasks.erase(tasks.begin() + p);
+                tasks.insert(tasks.begin(), first);
+            }
+        }
+        if (last) {
+            int p = pos_of(last);
+            if (p >= 0 && p < (int)tasks.size() - 1) {  // 存在且不在末位 -> 移到末尾
+                tasks.erase(tasks.begin() + p);
+                tasks.push_back(last);
+            }
+        }
+        return tasks;
+    }
+
     std::string run_task_sequence(const std::string& exec_id,
-                                  const std::vector<std::string>& tasks) {
+                                  std::vector<std::string> tasks) {
         ExecutorEntry e;
         if (!get_executor(exec_id, e)) return "no-executor";
+        tasks = canonical_task_order(e.kind, std::move(tasks));
         Plan plan;
         plan.id = "cli-" + random_hex(6);
         plan.ts = util::now_sec();
