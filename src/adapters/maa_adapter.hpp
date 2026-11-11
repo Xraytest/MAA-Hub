@@ -87,7 +87,12 @@ public:
                 SetEnvironmentVariableW(L"PATH", (add + L";" + path).c_str());
             }
         }
-        std::string user_dir = st_.install_dir + "\\cache\\maahub";
+        // user_dir 必须按执行器隔离：多个 maa worker 共享同一 install_dir 时，
+        // MaaCore 各自的 asst.log（同一文件名）会因独占句柄竞争而集体静默丢日志
+        // （2026-11-11 ENG01 实测：3 worker 共用 cache\maahub，仅 1 份日志幸存）。
+        std::string exec_id = cfg_.get_str("exec_id", "");
+        std::string user_dir = st_.install_dir + "\\cache\\"
+            + (exec_id.empty() ? "maahub" : exec_id);
         util::ensure_dir(user_dir);
         fn_.AsstSetUserDir(user_dir.c_str());
         if (!fn_.AsstLoadResource(st_.install_dir.c_str())) {

@@ -1255,6 +1255,7 @@ private:
             core = cores_->default_core(e.kind);
         }
         mj::Value wcfg = mj::Value::object();
+        wcfg.set("exec_id", e.id);   // maa 适配器据此隔离 AsstSetUserDir 日志目录
         wcfg.set("install_dir", core.path);
         wcfg.set("display_name", e.label);
         wcfg.set("game_window_class", "UnityWndClass");
