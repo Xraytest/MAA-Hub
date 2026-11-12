@@ -34,7 +34,6 @@ public:
         // 工作目录 = exe 所在目录的上级（项目根），与 Python 版一致
         std::wstring workdir = util::utf8_to_wide(util::parent_dir(util::exe_dir()));
         if (!util::spawn_process(cmd, workdir, L"", proc_)) {
-            last_error_ = "worker spawn failed";
             return false;
         }
         reader_ = std::thread([this] { read_loop(); });
@@ -42,12 +41,10 @@ public:
         for (int i = 0; i < 200; ++i) {
             if (ready_) return true;
             if (!proc_.alive()) {
-                last_error_ = "worker exited early";
                 return false;
             }
             Sleep(100);
         }
-        last_error_ = "worker start timeout";
         return false;
     }
 
@@ -57,7 +54,6 @@ public:
         // 而内部 mtx_/cv_ 不支持重入。
         std::lock_guard<std::mutex> call_lk(call_mtx_);
         if (!proc_.alive()) {
-            last_error_ = "worker not running";
             return false;
         }
         int64_t cid = 0;
@@ -73,7 +69,6 @@ public:
             std::lock_guard<std::mutex> wlk(wmtx_);
             DWORD n = 0;
             if (!WriteFile(proc_.stdin_write, line.data(), (DWORD)line.size(), &n, nullptr)) {
-                last_error_ = "write to worker failed";
                 return false;
             }
         }
@@ -91,7 +86,6 @@ public:
             return ok_last_;
         }
         pending_.erase(cid);
-        last_error_ = cmd + " timeout";
         return false;
     }
 
@@ -196,7 +190,6 @@ private:
     int64_t seq_ = 0;
     std::map<int64_t, mj::Value> pending_;
     bool ok_last_ = false;
-    std::string last_error_;
 };
 
 } // namespace hub

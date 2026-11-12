@@ -1434,7 +1434,6 @@ private:
     // temperature / max_tokens / timeout_sec 不在 AppSettings 里，继续读 config.json。
     void load_llm_config() {
         AppSettings st = settings_->get();
-        llm_cfg_.enabled = st.llm_enabled;
         if (!st.llm_base_url.empty()) llm_cfg_.base_url = st.llm_base_url;
         llm_cfg_.api_key = st.llm_api_key;
         if (!st.llm_model.empty()) llm_cfg_.model = st.llm_model;

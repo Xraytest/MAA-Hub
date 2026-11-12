@@ -4,7 +4,6 @@
 #include "../util.hpp"
 
 #include <windows.h>
-#include <memory>
 #include <random>
 #include <algorithm>
 
@@ -258,7 +257,6 @@ public:
                 if (head.rfind("option.", 0) == 0) {
                     ok = head.substr(7);
                     cache["*|" + ok + "|" + cn] = kv.second.as_string();
-                    cache["|" + ok + "|" + cn] = kv.second.as_string();
                 } else if (head.rfind("task.", 0) == 0) {
                     std::string rest = head.substr(5);
                     size_t op = rest.find(".option.");

@@ -4,34 +4,11 @@
 #include "../util.hpp"
 
 #include <windows.h>
-#include <memory>
 
 namespace hub {
 
-// AsstMsg 枚举（官方回调消息协议）
-enum AsstMsg {
-    InternalError = 0,
-    InitFailed = 1,
-    ConnectionInfo = 2,
-    AllTasksCompleted = 3,
-    AsyncCallInfo = 4,
-    Destroyed = 5,
-    TaskChainError = 10000,
-    TaskChainStart = 10001,
-    TaskChainCompleted = 10002,
-    TaskChainExtraInfo = 10003,
-    TaskChainStopped = 10004,
-    SubTaskError = 20000,
-    SubTaskStart = 20001,
-    SubTaskCompleted = 20002,
-    SubTaskExtraInfo = 20003,
-    SubTaskStopped = 20004,
-    ReportRequest = 30000,
-};
 
 // AsstWin32ScreencapMethod / AsstWin32InputMethod
-constexpr uint64_t SCREENCAP_GDI = 1;
-constexpr uint64_t SCREENCAP_FRAMEPOOL = 2;
 constexpr uint64_t SCREENCAP_SCREENDC = 32;
 constexpr uint64_t INPUT_SEIZE = 1;
 

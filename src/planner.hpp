@@ -192,7 +192,6 @@ private:
 class LlmPlanner {
 public:
     struct Config {
-        bool enabled = false;
         std::string base_url = "https://api.deepseek.com";
         std::string api_key;
         std::string model = "deepseek-chat";

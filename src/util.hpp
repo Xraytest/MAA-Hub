@@ -106,9 +106,6 @@ inline std::string base64_encode_str(const std::string& s) {
 // ---------------- 窗口查找 ----------------
 struct WindowInfo {
     HWND hwnd = nullptr;
-    std::string cls;
-    std::string title;
-    DWORD pid = 0;
 };
 
 // 按窗口类名 + 标题正则关键字查找可见顶层窗口（与 Python 版行为一致）
@@ -141,9 +138,6 @@ inline bool find_window(const std::string& class_regex, const std::string& title
             if (hay.find(needle) == std::string::npos) return TRUE;
         }
         c->out->hwnd = hwnd;
-        c->out->cls = util::wide_to_utf8(wcls);
-        c->out->title = t;
-        GetWindowThreadProcessId(hwnd, &c->out->pid);
         c->found = true;
         return FALSE;
     }, (LPARAM)&ctx);
@@ -169,7 +163,6 @@ struct ProcHandle {
     HANDLE process = nullptr;
     HANDLE stdin_write = nullptr;   // 主进程写 -> worker 读
     HANDLE stdout_read = nullptr;   // worker 写 -> 主进程读
-    DWORD pid = 0;
     bool alive() const {
         if (!process) return false;
         return WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
@@ -191,7 +184,6 @@ struct ProcHandle {
     void close() {
         close_pipes();
         if (process) { CloseHandle(process); process = nullptr; }
-        pid = 0;
     }
 };
 
@@ -271,7 +263,6 @@ inline bool spawn_process(const std::wstring& cmdline, const std::wstring& workd
     CloseHandle(pi.hThread);
     if (HANDLE job = child_job()) AssignProcessToJobObject(job, pi.hProcess);
     out.process = pi.hProcess;
-    out.pid = pi.dwProcessId;
     out.stdin_write = in_write;
     out.stdout_read = out_read;
     return true;

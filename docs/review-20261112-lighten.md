@@ -298,6 +298,43 @@ r15 已把"可删的显式冗余"扫过一遍（75 处）。r16 换了搜法：*
 
 **部署（r16 已上远端，00:19:50 完成）**：`swap-r16.ps1` 六阶段——A 前置校验（live 必须精确是 1,467,392 B / `2383AFFC…`，新件必须精确是 1,465,856 B / `AC94569D…`，否则 exit 2 不动手）→ B 备份并校验（`_r16scratch\backup\MaaHub-1467392-20261113-001944.exe`，sha 全等）→ C 停进程（7 个 → `REMAINING=0`）→ D 安装后**再校验 sha**（不等则从备份回滚并 exit 4）→ E 用 `Win32_Process Create` 无窗口拉起（`rc=0 pid=253620`）→ F 复核：**`PROCS=7`（root 253620 + 6 worker，全部 `START=00:19:50`）、`STATE_JSON=9`、trace 985,514 B / mtime 00:19:51**，含 6 条 `spawn_worker … load_ok=1`（`57fec764dd37`/`8b1b54dccbeb`/`5fa8dd2145ee`/`84691d0fba02`/`6ac900828da1`/`83dc5881a4ce`）与 2 条 `maaend load done`，**无 `exec-02913292d1eb`**（探针执行器已在 23:26 退役）。远端 scratch 里 `iso`/`diffbox-*`/`g2` 已删干净，只留脚本与证据。
 
+## 二·补11 r17（00:40–00:57）：首次进入 `src\adapters\` + 第二轮"会发码的死语句"（**63 行 → −2,560 B**）
+
+r16 的教训是"删行数不等于减体积"。r17 因此换了两件事：① **把 1,841 行从未被扫描过的 `src\adapters\`（`maaend_adapter.hpp` 1244 行、`maa_adapter.hpp` 509 行、`adapter.hpp` 88 行）纳入范围**；② 主文件走"第二轮"，只找**不可达分支 / 死常量 / 重复条件 / 空块 / 死库符号**这些**藏在会被发射的函数体里**的东西。
+
+**方法（比前几轮更严）**：4 组并行只读扫描（adapters 拆 2 组 + 主文件拆 2 组）→ 23 条候选 → 每条交独立复核（3 条一批、并发 4），复核者必须自读上下文 + 自 grep，**不采信扫描者写的证据**。结果 **17 条 confirmed / 6 条 rejected-behaviour / 0 条误报为"被引用"**——这 6 条否决是本轮最有价值的产出，见文末。
+
+改动分布（**11 个文件 / 37 个操作（36 段删除 + 1 处常量折叠）；删 63 行、改 1 行**）：
+
+| 文件 | 删掉的是什么 | 删/改 |
+|---|---|---|
+| `gui.hpp` | **死成员 `hot_` 整条链路**：声明、`begin()` 里的 `clear()`、以及 8 处 `if (hov) hot_ = …;`（combo/button/button_group/spin/checkbox3/text_input/右侧下拉），连带 `spin()` 里只为它服务的 `uid`/`did` 两个局部；死字体 `font_big`（声明 + `make_font(16, true)`，全仓零读取，白白 `CreateFontW` 一个从不用的字体）；`#include <deque>`（唯一 `std::deque` 用户在 `app_window.hpp`，已由 `hub.hpp` 间接提供） | 0 / 14 |
+| `adapters\maa_adapter.hpp` | 死枚举 `enum AsstMsg {…17 个枚举值…}`（20 行）——**枚举值本身从未被引用**，回调分支走 `ev.what` 字符串、消息表 `kMsg[]` 用具名整数 `{10001, {"task","TaskChainStart"}}`；死常量 `SCREENCAP_GDI`/`SCREENCAP_FRAMEPOOL`（只有 `SCREENDC`/`INPUT_SEIZE` 在用）；`#include <memory>` | 0 / 23 |
+| `adapters\maaend_adapter.hpp` | `load_case_labels` 里 `cache["|" + ok + "|" + cn]` 这条**三重键死写入**（真正被 229 行读的是它上一行的 `"*|" + ok + "|" + cn`；带前导 `|` 的键不会被 `task|key|case`（task 非空）或 `norm_case_key`（首字符不可能是 `|`）查到）；`#include <memory>` | 0 / 2 |
+| `worker_client.hpp` | 死成员 `last_error_` 的 6 处赋值（`worker spawn failed`/`exited early`/`start timeout`/`not running`/`write failed`/`timeout`）+ 声明（r16 已删掉唯一的读接口 `last_error()`） | 0 / 7 |
+| `util.hpp` | `WindowInfo` 的 `cls`/`title`/`pid` 三个只写不读字段 + 对应三处填充（含一次 `GetWindowThreadProcessId` 调用；`wcls`/`t` 仍在过滤逻辑里使用，不受影响）；`ProcHandle::pid` 字段 + `close()` 里的清零 + `spawn_process` 里的 `out.pid = pi.dwProcessId`（`pi.hProcess`/`pi.hThread` 照旧使用） | 0 / 9 |
+| `app_window.cpp` | 不可达的 `else if (!tasks.empty()) { sel_task = tasks[0]…; sel_valid = true; }`（3 行）：`sel_task` 在 1488-1494 已保证"tasks 非空 ⇒ 非空且能在 tasks 中命中"，故进入 `!sel_valid` 分支时 `tasks` 必为空 | 0 / 3 |
+| `main.cpp` | 不可达的 `if (!cat.is_array()) { printf("catalog empty\n"); return 1; }`：`executor_catalog` 的四条返回路径全部 guarantees 数组（缓存分支先 `is_array()` 才返回、无 worker 回 `array()`、worker 分支要 `r.is_array()`、兜底 `array()`） | 0 / 1 |
+| `settings.hpp` | `load()` 里的空 `else { }` 分支（`} else {` 一行删除后，原 `}` 直接闭合 `else if`，控制流与三档语义逐字节不变） | 0 / 1 |
+| `hub.hpp` + `planner.hpp` | `LlmPlanner::Config::enabled` 字段（写入端只有 `hub.hpp:1437`，全仓零读取——走不走 LLM 由 `planner_name == "heuristic"` 决定）+ 该处唯一赋值 | 0 / 1 + 0 / 1 |
+| `task_panels.hpp` | `int col = 0;`（全程只写一次、只读一次，且乘的是 `col` ⇒ `fx` 恒等于 `c.x`），改为 `int fx = c.x;` | 1 / 1 |
+
+**体积结果：`build\MaaHub.exe` 1,465,856 B → 1,463,296 B（−2,560 B，−0.17%）**；源码 **14,071 → 14,008 行（−63）**。单位行收益是本轮最高（r16 是 338 行换 1,536 B ≈ 4.5 B/行，r17 是 63 行换 2,560 B ≈ 41 B/行），原因与"减法定律"一致：**这一轮删的是真的会发码的语句**——每帧执行的 `hot_ = std::string` 赋值（8 处 × 字符串拼接）、`CreateFontW`、`GetWindowThreadProcessId`、`WorkerClient` 里 6 处字符串字面量赋值、以及 `AsstMsg` 那张表的 20 行声明区，而不是 r16 那批"本来就被 LTCG 丢弃的未引用 inline 成员"。
+
+| 门 | 结果（门 2/3/4 全部在远端 WorkCenter 执行；本机只编译与文本比对） |
+|---|---|
+| 门1 编译 | `build.bat release` **EXIT=0、0 error、13 warning**（`C4996×6 + C4244×7`，与基线码集一致；行号随删除位移：`util.hpp:370`、`hub.hpp:128`、`core_manager.hpp:63/64/632`、`app_window.cpp:2047`）；exe 1,463,296 B / SHA256 `96E93CC3…` |
+| 门2 探针 | 从 r17 源码重建 `probe_norm.exe` 后在远端运行：**1315 B 无 BOM，与 r16 接受体逐字节 IDENTICAL**（md5 `3E1D010EB1BF183798FBCE4EC448F275`） |
+| 门3 导入 | 三配置独立沙箱 maa1/maa3/maa5 各 `exit=0`、`entries=6` ⇒ **TOTAL=18**；18 条载荷行与 r16 基线**多重集全等（DIFF_COUNT=0）** |
+| 门4 差分（形态 B） | 旧 = 远端在跑 r16（1,465,856 B）vs 新 = r17（1,463,296 B），各建沙箱 + 同一份 9 个 `state\*.json`，**7 例全部 `SAME=True`、`MISMATCHES=0`**；跑完 `MaaHub.exe COUNT=7`（live Hub 与 6 worker 未被惊动，PID 仍是 r16 部署时的 253620 一系） |
+| 体积门 | −2,560 B（不增长） |
+
+**部署（00:57:40 完成）**：六阶段全过 —— A 前置校验（live 必须精确 `1,465,856 B / AC94569D…`，新件必须 `1,463,296 B / 96E93CC3…`，否则 exit 2）→ B 备份 `_r17scratch\backup\MaaHub-1465856-20261113-005734.exe`（sha 全等）→ C 停 7 进程 `REMAINING=0` → D 安装后二次 sha 校验 → E `Win32_Process Create` 拉起（`rc=0 pid=267436`）→ F 复核 **`PROCS=7`、`STATE_JSON=9`、trace 988,467 B@00:57:41**、6 条 `spawn_worker load_ok=1`、无探针执行器。远端 `iso`/`diffbox-*`/`g2` 已清理，只留脚本、cfg 与证据。
+
+**明确否决的 6 条（本轮最重要的"不删"清单，防下一轮重犯）**：`maa_adapter.hpp` 的 `AsstCreate` / `AsstSetStaticOption` / `AsstSetTaskParams` / `AsstLog` / `AsstGetImage` / `AsstGetNullSize` 六行看似"全仓只有定义 + 一行 `sym()` 登记、0 调用"，但 `sym()` 的返回值参与 `resolve_symbols()` 的 `ok` 合取，而 `load()` 在 `if (!resolve_symbols())` 时报 `missing AsstApi exports` 并失败——**删掉任何一行都把"19 个导出必须齐全"的加载期校验放宽为 18 个**：对用户自备（`install_dir` 由配置指定、`core_manager` 只查文件存在）的旧版/精简版 MaaCore，错误返回会从"加载失败"变成"加载成功"。虽然随附的两份 `MaaCore.dll`（6.13.0 / 6.22.0）都导出这 19 个符号、删了在随附数据上不可观测，但"绝对等价"只在随附二进制上成立、对用户核心不成立，因此按判据整批判否决。**登记为一类风险模式：`GetProcAddress` 校验表的成员不是死代码，哪怕成员本身从未被调用。**
+
+**另一条主动放弃的候选**：`maaend_adapter.hpp:291` 的 `cache["*|" + option] = …` 写入（全局 option 标签落进两段式键），只有存在字面名为 `*` 的 task 时才会被 `option_label` 的 `task|key` 查到。删它依赖"不存在名为 `*` 的 task"这个数据假设（随附 interface.json 已确认没有），且删除后行为在那种退化数据下会变，故**不动**；作为"疑似死逻辑（全局 option 标签回退从未生效）"登记，属产品语义问题而非轻量化。
+
 ## 三、纪律性排除（明确决定不改的，及理由）
 
 | 项 | 位置 | 不改理由 |
@@ -356,8 +393,8 @@ r15 已把"可删的显式冗余"扫过一遍（75 处）。r16 换了搜法：*
    每项提取必须各自过门（编译 EXIT=0 + 探针 1318 B 逐字节 IDENTICAL + 独立沙箱 3×6 导入 18 条 + **函数体搬移类另过差分测试门 4**）。另有低优先候选：`app_window.cpp:3009/3039` checked/run 残留、`maaend_adapter.hpp:1036 / maa_adapter.hpp:269` 跨文件样板（收益小风险中）、`accounts.hpp`/`planner.hpp` 合并后疑似失效的 `#include <random>`（删前须确认无其它 `mt19937`/`random_device` 使用者）、`parse_url` 内保留的 `std::wstring::npos` 误写（与 `string::npos` 同为 -1，行为正确，规范化重写单独轮次过门）。
 2. **`/W4` 存量警告逐条判定**（r14 已消掉 4 条：C4456×2、C4189×1、C4100×2 中的 worker_main 一条——注意 C4100 的 UI 侧 `save_post_action` 只加了 `(void)` 消警，未改签名）。剩余：C4244×7 已判定良性并固化（见 §三 表），C4996×6（`getenv`/`strcpy` 等）待单独决策，`draw_rename_box` 等处剩余 C4100 属纯噪音。**注意 `/W4` 未被 build.bat 透传**（`/W4x` 试过也不转发），逐条复查须手动加参数构建——那是"检查构建"而非交付构建，产物不要覆盖 `build\MaaHub.exe`。
 3. 体积/依赖面：✅ **已关账（r16）**。`json.hpp` 的零使用 API 已全部删掉（`Value::type()`、`get_path_bool()`、实例 `dump()`、自由函数 `parse()`、别名 `ValuePtr` + `<memory>`/`<sstream>`）；**`escape`/`write` 的序列化分支全部在用，不可裁**（明细见二·补10）。
-4. ✅ **（r14 立项、r15 实测确认，「减法类」轻量化）**：删冗余调用点 / 死局部 / 未用形参 / 冗余调用 / 死分支 —— 不新增函数体、不触 LTCG 定律，**r15 已实测确认它能把 exe 真的变小（75 处 −3,072 B）**。后续继续按此路线扫描，但每一项仍须过四门，尤其门 4 形态 B。**r16 用 45 项复核了「边际收益递减」这个判断**：−338 行源码只换 **−1,536 B**（见二·补10），说明「死符号」这一层已经见底；下一轮应转向 ① C4996 决策 ② GUI 真机冒烟 ③ §四.7 登记的功能侧缺口。
-5. ✅ **两件事都已完成（本轮完成）**：① 工作树已提交为 git 基线 `fcee346`（`轻量化 r14+r15：删冗余 5 处、纯减法批 75 处（exe 1,470,464→1,467,392 B）`），未提交状态这个事故根源已消除；② r15 构建 **1,467,392 B** 已于 **23:14** 部署到 WorkCenter（替换远端 1,542,656 B 中间构建），复核 7 进程 / 9 个 `state\*.json` / trace 正常。此后 r16（**1,465,856 B**）已于 **00:19:50** 二次部署（见二·补10）。**部署流程固化为六阶段**：前置 sha 校验 → 备份并校验 → 停进程（要求 REMAINING=0）→ 安装后二次 sha 校验（不等即回滚）→ `Win32_Process Create` 无窗口拉起 → 复核进程/state/trace。
+4. ✅ **（r14 立项、r15 实测确认，「减法类」轻量化）**：删冗余调用点 / 死局部 / 未用形参 / 冗余调用 / 死分支 —— 不新增函数体、不触 LTCG 定律，**r15 已实测确认它能把 exe 真的变小（75 处 −3,072 B）**，r17 再次验证（37 处 −2,560 B，且第一次覆盖 `src\adapters\`）。后续继续按此路线扫描，每一项仍须过四门，尤其门 4 形态 B。**r16 的 `-338 行只换 -1,536 B` 与 r17 的 `63 行换 -2,560 B` 一起说明：决定收益的不是删除行数，而是删掉的语句是否真的被发射成机器码**（死 inline 成员 0 B、每帧执行的 `hot_` 赋值/Win32 调用/GDI 建字体才有字节）。
+5. ✅ **已全部完成**：① 工作树已提交为 git 基线 `fcee346`；② 部署链已走到第三代——**12:55** 中间构建（1,542,656 B）→ **23:14** r15（1,467,392 B）→ **00:19** r16（1,465,856 B）→ **00:57:40** r17（1,463,296 B），每次都是「前置 sha 校验 → 备份并校验 → 停进程（REMAINING=0）→ 安装后二次 sha 校验 → `Win32_Process Create` 无窗口拉起 → 复核进程/state/trace」六阶段，备份链在 `_r15scratch\backup\`、`_r16scratch\backup\`、`_r17scratch\backup\`。
 6. ✅ **已完成（23:26）**：`exec-02913292d1eb` 已退役，走的是「停 Hub → 备份 4 份 state → 覆盖预计算替换文件（executors/schedules/task-lists/task-params）→ 起 Hub → 复核」的受控写路径，`===RETIRE_EXIT=0`：4 个文件引用数 1→0、schedules 条目 25→24、executors 7→6、进程 8→7、trace 中 6 条 `spawn_worker` 不再含该 id。备份 `_r15scratch\backup\retire-20261112-232658`。**教训保留**：Hub 运行期直接改 `executors.json` 会被内存态覆盖，退役必须停进程 + 整体替换 + 事后复核引用数。
 7. **已登记的产品特性项（不在轻量化范围，只记录）**：MaaHub **没有单实例守卫、也没有 `state\.lock`**——零参数启动会起第二个完整 Hub + 7 个 worker 共写同一 `state`（20:36 已实证并复盘，见 §五）。这类缺陷属于功能缺口，本轮只做记录与规避（每次 CLI 调用一律带 `--cli`），不在"轻量化"授权范围内擅自实现。
 
@@ -390,6 +427,9 @@ r15 已把"可删的显式冗余"扫过一遍（75 处）。r16 换了搜法：*
 | **r14 门控证据（远端）** | `_tmp\maahub-day1\seq-diff-r14.txt`（7,867 B） / `gate3-r14.txt`（14,834 B） / `probe-remote.txt`（1,315 B） / `diff-remote.txt`（47 B） | 门4 双 exe 6 例 MISMATCHES=0；门3 TOTAL=18；门2 BODY_IDENTICAL=True；门4b parse_url 19 URL mismatches=0 |
 | **r15 门控证据（远端）** | `_tmp\maahub-day1\gate3-r15.txt`（379 行，`EXE=1467392 MTIME=2026/11/12 22:38:48`） / `seq-diff-r15.txt`（7,867 B，`OLD_EXE=1542656` vs `NEW_EXE=1467392`，6 例 `MISMATCHES=0`） / `evidence\probe-r15.txt`（1,315 B 无 BOM，md5 `3E1D010EB1BF183798FBCE4EC448F275`） / `evidence\parse-url-r15.txt`（47 B） | r15 四门：门1 EXIT=0/0 err/13 warn；门2 BODY_IDENTICAL=True；门3 TOTAL=18 且归一化 transcript 全等；门4 A+B 均 0 mismatch |
 | **r16 门控证据（远端）** | `evidence\r16-g2-probe.txt`（1,315 B 无 BOM，md5 `3E1D010EB1BF183798FBCE4EC448F275`） / `evidence\r16-gate3.txt`（`TOTAL=18`，与 r15 多重集全等） / `evidence\r16-gate4.txt`（10,590 B，7 例 `MISMATCHES=0`） / `evidence\r16-swap.txt`（5,098 B，六阶段全过） | r16 四门：门1 EXIT=0 / 0 err / 13 warn（C4996×6 + C4244×7）；门2 逐字节 IDENTICAL；门3 十八条全等；门4 形态 B 七例零 mismatch |
+| **r17 门控证据（远端）** | `evidence\r17-g2-probe.txt`（1,315 B 无 BOM，md5 与 r16 接受体全等） / `evidence\r17-gate3.txt`（15,194 B，`TOTAL=18`，载荷 `DIFF_COUNT=0`） / `evidence\r17-gate4.txt`（10,592 B，`OLD_EXE=1465856` vs `NEW_EXE=1463296`，7 例 `SAME=True`） / `evidence\r17-swap.txt`（5,097 B，六阶段全过） | r17 四门：门1 EXIT=0 / 0 err / 13 warn；门2 逐字节 IDENTICAL；门3 十八条与 r16 全等；门4 形态 B 七例零 mismatch |
+| **r17 二进制快照** | `_tmp\maahub-day1\evidence\accepted-hub\MaaHub-r17-1463296-20261113-005533.exe`（本地权威件）+ 远端 `_r17scratch\bin\MaaHub.exe`（已装为 live）与 `_r17scratch\backup\MaaHub-1465856-20261113-005734.exe`（上一代 r16） | r17 exe = 1,463,296 B / SHA256 `96E93CC3A3B96562FD0076B4EDA2FA6887268AD7E4728C8E035BFD0DDF93EAF2`；回滚一律用副本覆盖，禁用 git checkout |
+| **r17 扫描/复核留痕** | workflow `maahub-r17-lighten-review-v2`（12 个 agent：4 扫 + 8 复核，23 候选 → 17 confirmed / 6 rejected-behaviour）；`_tmp\maahub-day1\r17\manifest.json`（37 操作，带首/末行断言）+ `apply_dels.ps1`（**已内置「区间内大括号净额 0」校验**，本轮 0 告警）+ `evidence\r16-swap.txt` 等 | 删除批可复现清单：61 行按区间删 + 1 行替换 + 1 行常量折叠；脚本对 BOM/换行风格（本仓为 LF）自动探测并保持 |
 | **r16 源码/二进制快照** | `build\_r15keep\MaaHub-r15-1467392.exe`（上一轮权威构建本地留存）+ 远端 `_r16scratch\bin\MaaHub.exe`（已装为 live） / 远端 `_r16scratch\backup\MaaHub-1467392-20261113-001944.exe` | r16 exe = 1,465,856 B / SHA256 `AC94569DAD7F37A2137F640ED455D30D06E0448243EB195CFF5FF2EFE525D591`；回滚一律用副本覆盖，禁用 git checkout |
 | **r16 远端脚本与删除脚本** | `_tmp\maahub-day1\remote\gate2-r16.cmd` / `gate3-r16.ps1` / `seq-diff-r16.ps1` / `swap-r16.ps1` / `audit-r16.ps1`（均 ASCII，零非 ASCII 字节）；`_tmp\maahub-day1\r16\manifest.json`（45 项删除清单，带首/末行断言）+ `del_ranges.ps1` + `edits.json` + `apply_edits.ps1` | 删除批的可复现清单：324 行按区间删 + 14 行按字符串替换；**下一轮须给 `del_ranges.ps1` 补「区间内大括号净额 0」校验**（r16 曾因吞掉一个函数收尾 `}` 触发一百余条级联编译错误） |
 | **r15 源码/二进制快照** | `_tmp\maahub-day1\evidence\accepted-hub\MaaHub-r15-1467392-224122.exe` + `r15-post-20261112-224122\`（7 文件）+ `r15-pre-20261112-222933\` / `r15-pre-20261112-223454\` | 减法批前后双向快照，带时刻戳，位于 `iso_import.ps1` 覆盖范围之外；回滚用副本覆盖，禁用 git checkout |
@@ -405,10 +445,10 @@ r15 已把"可删的显式冗余"扫过一遍（75 处）。r16 换了搜法：*
 
 ## 六、当前状态
 
-- `build\MaaHub.exe` = **1,465,856 B**（00:17 r16 构建；r13/r14 为 1,470,464 B，r15 为 1,467,392 B）。`build.bat release` 干净通过（EXIT=0 / 13 警告 / 0 错误）。累计轻量化：LTCG −60,928 B、标签去重 −1,024 B、random_hex 合并 −6,656 B、URL 拆分 −3,072 B、checked-run 类外合并 −1,024 B、r13 0 B、r14 0 B、r15 −3,072 B、**r16 −1,536 B（同时源码 −326 行）**。
-- 源码行数/字节（r16 后实测，含空行总行数）：`util.hpp` **556 / 22,052 B**、`hub.hpp` **1508 / 64,872 B**、`planner.hpp` **439 / 19,952 B**、`accounts.hpp` **266 / 10,515 B**、`core_manager.hpp` **962 / 45,032 B**、`main.cpp` **973 / 45,798 B**、`worker_main.cpp` **176 / 7,066 B**、`config_import.hpp` **929 / 45,508 B**、`gui.hpp` **938 / 44,970 B**、`task_panels.hpp` **899 / 46,011 B**、`worker_client.hpp` **202 / 7,662 B**、`app_window.hpp` **292 / 13,511 B**、`settings.hpp` **184 / 7,904 B**、`json.hpp` **455 / 15,590 B**、`app_window.cpp` **3444 / 166,768 B**（仍是最大单文件；三份 `.cpp` + 十二份 `.hpp` 合计 **12,230 行**）。
+- `build\MaaHub.exe` = **1,463,296 B**（00:55 r17 构建；r13/r14 1,470,464 B、r15 1,467,392 B、r16 1,465,856 B）。`build.bat release` 干净通过（EXIT=0 / 13 警告 / 0 错误）。累计轻量化：LTCG −60,928 B、标签去重 −1,024 B、random_hex 合并 −6,656 B、URL 拆分 −3,072 B、checked-run 类外合并 −1,024 B、r13 0 B、r14 0 B、r15 −3,072 B、r16 −1,536 B、**r17 −2,560 B**。
+- 源码行数/字节（r17 后实测，含空行总行数，**首次把 `src\adapters\` 三文件计入**）：`util.hpp` **547 / 21,785 B**、`hub.hpp` **1507 / 64,828 B**、`planner.hpp` **438 / 19,921 B**、`accounts.hpp` **266 / 10,515 B**、`core_manager.hpp` **962 / 45,032 B**、`main.cpp` **972 / 45,727 B**、`worker_main.cpp` **176 / 7,066 B**、`worker_main.hpp` **7 / 139 B**、`config_import.hpp` **929 / 45,508 B**、`gui.hpp` **924 / 44,447 B**、`task_panels.hpp` **898 / 45,969 B**、`worker_client.hpp` **195 / 7,334 B**、`app_window.hpp` **292 / 13,511 B**、`settings.hpp` **183 / 7,886 B**、`json.hpp` **455 / 15,590 B**、`app_window.cpp` **3441 / 166,645 B**（仍是最大单文件）、`adapters\adapter.hpp` **88 / 2,922 B**、`adapters\maa_adapter.hpp` **486 / 22,376 B**、`adapters\maaend_adapter.hpp` **1242 / 57,971 B**；全树合计 **14,008 行**。
 - `assets\MaaCore.dll` 未被本轮触碰：56,198,144 B，MD5 `6701554378F11708A9CF452621F06619`。
 - **验收门已从三重升级为四重，且门 4 有两个形态**：编译 + 探针逐字节 + 独立沙箱导入 18 条 + 差分测试。门 4 形态 A = 单函数差分（`parse_url_diff` 类，验证搬移/重写的函数体）；形态 B = **双 exe CLI 差分**（r14 新增，旧二进制 vs 新二进制各建沙箱、各拷同一份 state，逐例比 EXIT + 完整 stdout，验证改动落在分发路径/UI 侧时仍能给出可执行断言）。r15 用一次 75 处的大批改动把这套门走完（A/B 均 0 mismatch），说明门的粒度足以覆盖"批量删除"这种最难用肉眼确认的变更。门 4 的引入是对"回归门不执行被改代码"这一证据缺口的直接补强。
-- **部署状态（2026-11-13 00:19 收尾口径）**：远端 WorkCenter（`C:\Users\xray\Documents\MaaHub\`）现在跑的就是本地权威构建 **r16 = 1,465,856 B / SHA256 `AC94569D…`** —— 活 Hub **pid=253620**（+ 6 个 worker，全部 `START=00:19:50`）、`build\state\*.json` **9 个**、trace 985,514 B / mtime 00:19:51，6 条 `spawn_worker … load_ok=1`（`57fec764dd37`/`8b1b54dccbeb`/`5fa8dd2145ee`/`84691d0fba02`/`6ac900828da1`/`83dc5881a4ce`）且**不含已退役的 `exec-02913292d1eb`**。演进链：12:55 部署中间构建（1,542,656 B，pid=253064）→ 23:14 换 r15（1,467,392 B）→ 00:19 换 r16。两级备份目录 `_r15scratch\backup\` 与 `_r16scratch\backup\` 均保留并已校验 sha256。
+- **部署状态（2026-11-13 00:57 收尾口径）**：远端 WorkCenter（`C:\Users\xray\Documents\MaaHub\`）现在跑的就是本地权威构建 **r17 = 1,463,296 B / SHA256 `96E93CC3…`** —— 活 Hub **pid=267436**（+ 6 个 worker，全部 `START=00:57:40`）、`build\state\*.json` **9 个**、trace 988,467 B / mtime 00:57:41，6 条 `spawn_worker … load_ok=1`（`84691d0fba02`/`57fec764dd37`/`5fa8dd2145ee`/`8b1b54dccbeb`/`6ac900828da1`/`83dc5881a4ce`）+ 2 条 `maaend load done`，**不含已退役的 `exec-02913292d1eb`**。演进链：12:55 中间构建（1,542,656 B）→ 23:14 r15 → 00:19 r16 → 00:57 r17。三级备份目录均保留并已校验 sha256。
 - **测试一律远端执行（用户硬性纪律）**：本轮全部门 2/3/4 均在 WorkCenter 远端跑，含新增的双 exe 差分类。本机 `pwsh` 只做文件哈希/文本比对/脚本下发，**不执行任何产品程序或测试程序**（20:36 那次本地误启动的教训见 §五 事故复盘条）。
 - 长期目标保持 armed，继续迭代 review。

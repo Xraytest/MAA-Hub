@@ -152,7 +152,6 @@ private:
                         MOVEFILE_REPLACE_EXISTING);
         } else if (!util::file_exists(path)) {
             return;   // 首次运行：安静地用默认值
-        } else {
         }
         // 上一份好内容兜底
         std::string bak;

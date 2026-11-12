@@ -429,9 +429,8 @@ inline bool panel_infrast(PanelCtx& c) {
     // 单列排布（右栏宽度有限，两列会溢出到信息条外）
     int half = (c.right - c.x) - 8;
     for (int k = 0; k < 8; ++k) {
-        int col = 0;
         int row = k;
-        int fx = c.x + col * (half + 12);
+        int fx = c.x;
         int fy = c.y + row * 24;
         std::string key = std::string("facility_") + std::to_string(k);
         bool v = c.get_bool(key);

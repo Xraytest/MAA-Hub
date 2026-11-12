@@ -10,7 +10,6 @@
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
 #include <algorithm>
-#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -123,7 +122,6 @@ public:
     HFONT font_bold = nullptr;  // 12px 粗体
     HFONT font_small = nullptr; // 11px —— 官方辅助/次级文字
     HFONT font_title = nullptr; // 14px 粗体 —— 官方标题
-    HFONT font_big = nullptr;   // 16px 粗体 —— 官方大标题
 
     void init_fonts() {
         if (font) return;
@@ -134,13 +132,11 @@ public:
         font_bold = make_font(12, true);
         font_small = make_font(11, false);
         font_title = make_font(14, true);
-        font_big = make_font(16, true);
     }
 
     // ------------------------------------------------------------ 帧
     void begin(const Input& in) {
         in_ = in;
-        hot_.clear();
 
         wheel_used_ = false;
     }
@@ -407,7 +403,6 @@ public:
             combo_pick_.clear();
         }
         bool hov = hovered(r);
-        if (hov) hot_ = key;
         if (hov && in_.pressed) active_ = key;
         bool open = combo_open_ == key;
         if (hov && active_ == key && in_.released) {
@@ -522,7 +517,6 @@ public:
     bool button(const char* id, RECT r, const std::wstring& label_text, int style = 0,
                 bool enabled = true) {
         bool hov = hovered(r) && enabled;
-        if (hov) hot_ = id;
         bool click = false;
         if (hov && in_.pressed) active_ = id;
         if (hov && active_ == id && in_.released) click = true;
@@ -594,7 +588,6 @@ public:
         for (int i = 0; i < n; ++i) {
             bool hov = hovered(cs[i]);
             std::string iid = std::string(id) + "#" + std::to_string(i);
-            if (hov) hot_ = iid;
             if (hov && in_.pressed) active_ = iid;
             if (hov && active_ == iid && in_.released) clicked = i;
             if (!hov) continue;
@@ -636,10 +629,7 @@ public:
         int mid = (r.top + r.bottom) / 2;
         RECT up{ r.right - spin, r.top + 1, r.right - 1, mid };
         RECT dn{ r.right - spin, mid, r.right - 1, r.bottom - 1 };
-        std::string uid = std::string(id) + "-up", did = std::string(id) + "-dn";
         bool hup = hovered(up), hdn = hovered(dn);
-        if (hup) hot_ = uid;
-        if (hdn) hot_ = did;
         // 官方样式：右端只有一个菱形（上下箭头共用轮廓），无分隔线、无 hover 底色
         icon_diamond({ r.right - spin, r.top, r.right - 2, r.bottom },
                      (hup || hdn) ? theme.primary : theme.dim);
@@ -657,7 +647,6 @@ public:
     bool checkbox3(const char* id, RECT r, const std::wstring& label, CheckState& st,
                    int* label_lines = nullptr) {
         bool hov = hovered(r);
-        if (hov) hot_ = id;
         if (hov && in_.pressed) active_ = id;
         bool changed = false;
         if (hov && active_ == id && in_.released) {
@@ -723,7 +712,6 @@ public:
     void text_input(const char* id, RECT r, std::string& value, const wchar_t* hint = nullptr,
                     int align = 0) {
         bool hov = hovered(r);
-        if (hov) hot_ = id;
         if (hov && in_.pressed) {
             active_ = id;
             focus_ = id;
@@ -799,7 +787,6 @@ public:
         int clicked = -1;
         for (int i = 0; i < n; ++i) {
             bool hov = hovered(cs[i]);
-            if (hov) hot_ = id + std::to_string(i);
             if (hov && in_.pressed) active_ = id + std::to_string(i);
             if (hov && active_ == id + std::to_string(i) && in_.released) clicked = i;
             if (!hov || i == cur) continue;
@@ -913,7 +900,6 @@ private:
     std::vector<RECT> clip_stack_;
     std::vector<int> dc_save_;
     Input in_;
-    std::string hot_;
     std::string r_active_;   // 右键活动控件
     std::string active_;
     std::string focus_;

@@ -1785,9 +1785,6 @@ void MaaHubWindow::page_executor(RECT content) {
             gui_.text(rx0, right_col.top + 40,
                       L"\u8bf7\u5728\u5de6\u4fa7\u91cd\u65b0\u9009\u62e9\u4efb\u52a1\uff0c\u6216\u66f4\u65b0\u6838\u5fc3\u7248\u672c",
                       gui_.theme.dim, gui_.font_small);
-        } else if (!tasks.empty()) {
-            sel_task = tasks[0].get_str("name", "");
-            sel_valid = true;
         }
     }
 

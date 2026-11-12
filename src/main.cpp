@@ -522,7 +522,6 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
         }
         hub.refresh_catalogs();
         mj::Value cat = hub.executor_catalog(id, 0.0);
-        if (!cat.is_array()) { printf("catalog empty\n"); return 1; }
         for (auto& t : cat.items()) {
             std::string n = t.get_str("name", "");
             mj::Value one = mj::Value::object();
