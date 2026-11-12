@@ -165,6 +165,13 @@ private:
     bool find_executor(const std::string& id, mj::Value& out) const;
     std::vector<mj::Value> executors_of(const std::string& kind) const;
     std::vector<mj::Value> catalog_of(const std::string& kind) const;
+    // 取 executor 的 catalog 并按 task_order_（用户拖拽顺序）重排；
+    // action_run_from / action_run_checked 共用同一排序口径（与左列显示一致）。
+    std::vector<mj::Value> ordered_catalog_items(const std::string& id);
+    // 两处「已勾选则运行」循环体逐字节相同（r9 合并）：命中勾选→组参数→运行→
+    // 「仅一次」复位。返回本次是否成功启动。定义在 app_window.cpp 类外，规避 LTCG
+    // 隐式 inline 双份发射（见 review-20261112-lighten 第三节末行教训）。
+    bool run_item_if_checked(const std::string& id, const std::string& name);
 
     HINSTANCE hInst_ = nullptr;
     HWND hwnd_ = nullptr;

@@ -412,7 +412,8 @@ inline bool panel_infrast(PanelCtx& c) {
     c.y += 16;
     pc_radio(c, "drones_idx", { L"\u4e0d\u4f7f\u7528", L"\u8d38\u6613\u7ad9",
                                 L"\u5236\u9020\u7ad9", L"\u53d1\u7535\u7ad9",
-                                L"\u529e\u516c\u5ba4" }, 0);
+                                L"\u529e\u516c\u5ba4", L"\u52a0\u5de5\u7ad9",
+                                L"\u4f1a\u5ba2\u5ba4" }, 0);
     pc_number(c, "dorm_threshold", L"\u5bbf\u820d\u5fc3\u60c5\u9608\u503c", 30, 5, 0, 100);
     c.y += 6;
 
@@ -512,7 +513,6 @@ inline bool panel_recruit(PanelCtx& c) {
     pc_check(c, "auto_expedite", L"自动使用加急许可");
     c.y += 4;
 
-    c.g.group_title(c.x, c.y, L"Tag 策略");
     c.g.group_title(c.x, c.y, L"Tag 策略");
     c.y += 20;
     // 官方 hc:ComboBox「公招多选 Tag 的策略」

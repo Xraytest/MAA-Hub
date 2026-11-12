@@ -401,7 +401,6 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
         for (auto& e : entries->items()) {
             std::string when;
             if (e.get_str("kind", "") == "maaend") {
-                mj::Value wd;
                 std::string days;
                 if (auto* w = e.find("weekdays"); w && w->is_array())
                     for (auto& d : w->items()) {
@@ -569,12 +568,11 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
         std::string err = st.get_str("last_error", "");
         printf("finished task=%s state=%s elapsed=%.0fs%s\n", task.c_str(), run_state.c_str(), el,
                err.empty() ? "" : (" error=" + err).c_str());
-        if (!err.empty() && err.size() > 300) err = err.substr(0, 300);
         return run_state == "failed" ? 1 : 0;
     }
     if (cmd == "seq") {
-        std::string id = resolve(cli_arg(args, 1));
-        if (id.empty()) { printf("executor not found: %s\n", cli_arg(args, 1).c_str()); return 1; }
+        // 外层 :475 已把 args[1] 解析进 id 并做了非空检查；args 至此未被写，
+        // 重复 resolve 是同义反复，直接复用外层 id（行为逐字节不变）
         std::string list = cli_arg(args, 2);
         std::vector<std::string> tasks;
         size_t pos = 0;

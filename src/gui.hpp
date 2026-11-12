@@ -304,7 +304,6 @@ public:
     void begin_scroll(const char* id, RECT r, int content_h, float& scroll_y) {
         scroll_rect_ = r;
         scroll_content_h_ = content_h;
-        scroll_id_ = id;
         scroll_y_ = &scroll_y;
         if (hovered(r) && in_.wheel && !wheel_used_) {
             *scroll_y_ -= in_.wheel * 40.0f;
@@ -649,9 +648,7 @@ public:
     // ------------------------------------------------------------ 控件
     // 分组标题（对应 MAA 设置区的 GroupBox / 分隔小标题）
     void group_title(int x, int y, const std::wstring& label) {
-        RECT save = clip_;
         text(x, y, label, theme.dim, font_small);
-        (void)save;
     }
     void divider(RECT r) {
         fill({ r.left, r.top, r.right, r.top + 1 }, theme.border);
@@ -744,7 +741,6 @@ public:
         for (int i = 1; i < n; ++i)
             fill({ cs[i].left, r.top + 1, cs[i].left + 1, r.bottom - 1 }, theme.border);
         for (int i = 0; i < n; ++i) {
-            if (cs[i].right <= cs[i].left) continue;
             push_clip(cs[i]);
             text_clipped(cs[i], labels[i], txt_c, font);
             pop_clip();
@@ -789,9 +785,7 @@ public:
 
     // 提示行（对应 MAA 的 Tip 文本，三级文字色）
     void tip_line(int x, int y, int right, const std::wstring& text) {
-        RECT save = clip_;
         text_clipped({ x, y, right, y + 16 }, text, theme.faint, font_small);
-        (void)save;
     }
 
     // 三态复选框（对应 MAA 官方语义）：
@@ -833,7 +827,6 @@ public:
         // 官方 CheckBox 文字 TextWrapping=Wrap：窄列下长标签换行显示，不被裁切
         // null 态文字色 = TraceLogBrush（Light #808080），这是官方唯一的「仅一次」提示
         COLORREF label_c = (st == CheckState::Once) ? theme.trace_text : theme.text;
-        RECT save = clip_;
         int tx = r.left + box + 8;
         int avail = r.right - tx;
         SIZE full = text_size(label, font);
@@ -859,7 +852,6 @@ public:
             }
         }
         if (label_lines) *label_lines = lines;
-        (void)save;
         return changed;
     }
 
@@ -933,8 +925,7 @@ public:
             if (sz.cx > maxw) x = r.left + 7 - (sz.cx - maxw) - 8;
             text(x, ty, w, theme.text, font);
             if (focused && (GetTickCount() / 530) % 2 == 0) {
-                SIZE cs = text_size(w, font);
-                int cx = std::min<int>(x + cs.cx + 1, (int)r.right - 3);
+                int cx = std::min<int>(x + sz.cx + 1, (int)r.right - 3);
                 HPEN p = CreatePen(PS_SOLID, 1, theme.text);
                 HGDIOBJ old = SelectObject(dc_, p);
                 MoveToEx(dc_, cx, r.top + 6, nullptr);
@@ -1118,7 +1109,6 @@ private:
     // 滚动
     RECT scroll_rect_{};
     int scroll_content_h_ = 0;
-    const char* scroll_id_ = nullptr;
     float* scroll_y_ = nullptr;
 };
 

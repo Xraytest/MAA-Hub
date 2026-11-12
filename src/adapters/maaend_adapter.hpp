@@ -238,25 +238,7 @@ public:
     }
 
     static void load_case_labels(std::map<std::string, std::string>& cache) {
-        std::string root = label_dir_ref();
-        std::vector<std::string> files;
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(util::utf8_to_wide(root + "\\*").c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) return;
-        do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            std::wstring n = fd.cFileName;
-            if (n == L"." || n == L"..") continue;
-            std::string sub = root + "\\" + util::wide_to_utf8(n);
-            WIN32_FIND_DATAW fd2;
-            HANDLE h2 = FindFirstFileW(util::utf8_to_wide(sub + "\\zh_cn.json").c_str(), &fd2);
-            if (h2 != INVALID_HANDLE_VALUE) {
-                files.push_back(sub + "\\zh_cn.json");
-                FindClose(h2);
-            }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-        for (auto& fp : files) {
+        for (auto& fp : locale_files()) {
             std::string content;
             if (!util::read_file(fp, content)) continue;
             mj::Value j;
@@ -296,25 +278,7 @@ public:
     }
 
     static void load_option_labels(std::map<std::string, std::string>& cache) {
-        std::string root = label_dir_ref();
-        std::vector<std::string> files;
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(util::utf8_to_wide(root + "\\*").c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) return;
-        do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            std::wstring n = fd.cFileName;
-            if (n == L"." || n == L"..") continue;
-            std::string sub = root + "\\" + util::wide_to_utf8(n);
-            WIN32_FIND_DATAW fd2;
-            HANDLE h2 = FindFirstFileW(util::utf8_to_wide(sub + "\\zh_cn.json").c_str(), &fd2);
-            if (h2 != INVALID_HANDLE_VALUE) {
-                files.push_back(sub + "\\zh_cn.json");
-                FindClose(h2);
-            }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-        for (auto& fp : files) {
+        for (auto& fp : locale_files()) {
             std::string content;
             if (!util::read_file(fp, content)) continue;
             mj::Value j;

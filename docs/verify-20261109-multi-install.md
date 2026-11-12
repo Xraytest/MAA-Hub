@@ -250,3 +250,35 @@ MAA 配置已导入 (MaaAssistantArknights_5)：执行器复用 1，任务 0 个
 
 「跳过未知键 9 个」指 `Configurations.Default` 里 MaaHub 尚未支持的 9 个键
 （如 `TaskConfig`、`StartUp` 等未建模项），属预期行为，不是解析失败。
+
+---
+
+## 8. 2026-11-12 更新：MAA 6.x `TaskQueue` 导入落地（推翻 §1.3 与 §7.3 的「参数 0 项」）
+
+§1.3 记录的「导入仍然不写任务序列 / 参数 0 项」在 11-12 已失效。MAA 6.x 把任务参数整体
+迁到了 `Configurations.<Current>.TaskQueue`（官方任务对象数组，字段 PascalCase），
+扁平 `<Task>.<Param>` 键基本消失，所以旧导入器对 6.x 配置只能建执行器、参数全跳过。
+
+本轮改动（`src/config_import.hpp` + `src/hub.hpp`）：
+
+| 改动 | 位置 | 作用 |
+|---|---|---|
+| `import_task_queue()` | `config_import.hpp`（MAA 段前） | 解析 TaskQueue 数组，逐任务把官方字段映射到 Hub 面板键；只转 `IsEnable=true`，同 `TaskType` 首个生效 |
+| TaskQueue 拦截 | `import_maa` 成员循环 `key=="TaskQueue"` | 在点号键解析前拦截，避免被当未知键跳过；`client_type` 取 `Gui.RuntimeSettings.ClientType` |
+| 写 `c.task_lists` | `import_task_queue` 末尾 | 任务序列随导入落 `task-lists.json`（不再依赖 GUI 手选） |
+| `kDrones` 扩 7 档 | `hub.hpp` + `config_import.hpp` | 补 PureGold/OriginStone，maa1 的 PureGold 不再落回"不使用" |
+| `drones_idx` 存在性门 | `hub.hpp` normalize | 只有真写过 `drones_idx` 才映射 `drones`，不再无条件覆盖 |
+| `client_type` 归一 | `hub.hpp` StartUp 分支 | 面板 int 下标 0..5 → MaaCore 字符串枚举，非法回退 `Official` |
+| `canonical_task_order` 全序 | `hub.hpp` | maa 链重排为 `StartUp→Recruit→Infrast→Fight→Mall→Award`（原来只提 StartUp/压 CloseDown，Award 会抢在 Fight 前） |
+| Mall `buy_first_str` | `hub.hpp` normalize | 补优先购字符串→数组（原先只转 blacklist） |
+
+本机实测（`D:\WorkSpace\_tmp\maahub-day1\localtest\`，三份真实 `gui.new.json`）：
+每份导入 `任务 6 个，参数 36 项，跳过未知键 7 个`（TaskQueue.UserDataUpdate/DepotMaintain/
+Roguelike + Gui/Copilot/Toolbox/TaskSelectedIndex），maa1 `drones_idx=5`(PureGold)、
+maa3/5 `drones_idx=1`(Money)、Fight `stage`/`medicine`、Award 7 键、Recruit confirm 数组
+逐项与 `evidence\taskqueue-maa{1,3,5}.json` 权威快照吻合；normalize 探针确认下发形态
+`drones:"PureGold"` / `client_type:"Official"` / `blacklist:["加急许可"]` 正确。
+
+> 注意：`account_name` 导出即掩码（`180****3658`），导入只写 `account_name_set=true`，
+> 真实登录名由执行器绑定的账号在 `run_on_executor` 注入（见 `accounts.hpp::apply_to_task`）。
+> 账号绑定与连接配置（MuMu adb `127.0.0.1:16384`）需在部署时单独 `--cli link` / `--cli set-connect`。

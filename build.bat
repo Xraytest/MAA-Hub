@@ -28,6 +28,8 @@ if not exist build mkdir build
 set SRCS=%ROOT%\src\main.cpp %ROOT%\src\worker_main.cpp %ROOT%\src\app_window.cpp
 
 REM Native Win32 GUI, zero third-party deps
+REM /GL + /LTCG: whole-program optimization. Verified 2026-11-12 (docs\review-20261112-lighten.md):
+REM identical warning set, byte-equal normalize probe, semantic-equal import + 6 CLI verbs; exe -3.9%.
 set CLFLAGS=/nologo /EHsc /std:c++17 /W3 /utf-8 /Fo:%ROOT%\build\ /Fe:%ROOT%\build\MaaHub.exe
 set LINKFLAGS=gdi32.lib user32.lib shell32.lib winhttp.lib advapi32.lib msimg32.lib
 
@@ -35,7 +37,8 @@ if /i "%CONFIG%"=="debug" (
     set CLFLAGS=%CLFLAGS% /Zi /Od
     set LINKFLAGS=%LINKFLAGS% /DEBUG
 ) else (
-    set CLFLAGS=%CLFLAGS% /O2 /DNDEBUG
+    set CLFLAGS=%CLFLAGS% /O2 /GL /DNDEBUG
+    set LINKFLAGS=/LTCG %LINKFLAGS%
 )
 
 echo [BUILD] config=%CONFIG%

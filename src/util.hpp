@@ -1,4 +1,4 @@
-// 公共工具：UTF-8/Wide 转换、Base64、SHA1、窗口查找、进程启动、时间格式化
+// 公共工具：UTF-8/Wide 转换、Base64、窗口查找、进程启动、时间格式化
 #pragma once
 #include <windows.h>
 #include <string>
@@ -6,8 +6,27 @@
 #include <cstdio>
 #include <cstdint>
 #include <chrono>
+#include <random>
+#include <mutex>
 
 namespace util {
+
+// 均匀随机 hex（每字节）。原先在 hub/accounts/planner/core_manager 有 5 份逐字节相同的拷贝，
+// 合并到此。注：原来每份各自持有独立 static mt19937_64，不同函数并行调用时无共享状态、天然无竞态；
+// 合并为单一共享 rng 后必须加锁，才能保持与合并前同等的安全（ID 生成极低频，锁开销可忽略）。
+inline std::string random_hex(size_t bytes) {
+    static std::mt19937_64 rng{ std::random_device{}() };
+    static std::mutex mtx;
+    std::lock_guard<std::mutex> lk(mtx);
+    std::string out;
+    const char* hex = "0123456789abcdef";
+    for (size_t i = 0; i < bytes; ++i) {
+        unsigned v = (unsigned)(rng() & 0xFF);
+        out += hex[v >> 4];
+        out += hex[v & 15];
+    }
+    return out;
+}
 
 inline std::string wide_to_utf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -82,45 +101,6 @@ inline std::string base64_decode(const std::string& in) {
 
 inline std::string base64_encode_str(const std::string& s) {
     return base64_encode((const uint8_t*)s.data(), s.size());
-}
-
-// ---------------- SHA1 ----------------
-inline void sha1(const uint8_t* data, size_t len, uint8_t out[20]) {
-    uint32_t h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;
-    std::vector<uint8_t> msg(data, data + len);
-    uint64_t bitlen = (uint64_t)len * 8;
-    msg.push_back(0x80);
-    while (msg.size() % 64 != 56) msg.push_back(0);
-    for (int i = 7; i >= 0; --i) msg.push_back((uint8_t)((bitlen >> (i * 8)) & 0xFF));
-
-    auto rol = [](uint32_t v, int c) { return (v << c) | (v >> (32 - c)); };
-
-    for (size_t chunk = 0; chunk < msg.size(); chunk += 64) {
-        uint32_t w[80];
-        for (int i = 0; i < 16; ++i) {
-            w[i] = ((uint32_t)msg[chunk + i * 4] << 24) | ((uint32_t)msg[chunk + i * 4 + 1] << 16)
-                 | ((uint32_t)msg[chunk + i * 4 + 2] << 8) | (uint32_t)msg[chunk + i * 4 + 3];
-        }
-        for (int i = 16; i < 80; ++i) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
-        uint32_t a = h0, b = h1, c = h2, d = h3, e = h4;
-        for (int i = 0; i < 80; ++i) {
-            uint32_t f, k;
-            if (i < 20) { f = (b & c) | ((~b) & d); k = 0x5A827999; }
-            else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }
-            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
-            else { f = b ^ c ^ d; k = 0xCA62C1D6; }
-            uint32_t tmp = rol(a, 5) + f + e + k + w[i];
-            e = d; d = c; c = rol(b, 30); b = a; a = tmp;
-        }
-        h0 += a; h1 += b; h2 += c; h3 += d; h4 += e;
-    }
-    uint32_t hs[5] = { h0, h1, h2, h3, h4 };
-    for (int i = 0; i < 5; ++i) {
-        out[i * 4] = (uint8_t)(hs[i] >> 24);
-        out[i * 4 + 1] = (uint8_t)(hs[i] >> 16);
-        out[i * 4 + 2] = (uint8_t)(hs[i] >> 8);
-        out[i * 4 + 3] = (uint8_t)hs[i];
-    }
 }
 
 // ---------------- 窗口查找 ----------------
@@ -325,11 +305,6 @@ inline std::wstring make_env_block(const std::wstring& extra_path_dir) {
     return full;
 }
 
-inline uint64_t now_ms() {
-    return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
 inline double now_sec() {
     return (double)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count() / 1000.0;
@@ -461,24 +436,6 @@ inline bool write_file(const std::string& path, const std::string& content) {
         return false;
     }
     return true;
-}
-
-inline std::string read_file_tail(const std::string& path, size_t max_bytes = 65536) {
-    HANDLE h = CreateFileW(utf8_to_wide(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return {};
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(h, &size)) { CloseHandle(h); return {}; }
-    LONGLONG start = size.QuadPart > (LONGLONG)max_bytes ? size.QuadPart - (LONGLONG)max_bytes : 0;
-    LARGE_INTEGER li{};
-    li.QuadPart = start;
-    SetFilePointerEx(h, li, nullptr, FILE_BEGIN);
-    std::string out;
-    char buf[8192];
-    DWORD n = 0;
-    while (ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0) out.append(buf, n);
-    CloseHandle(h);
-    return out;
 }
 
 inline std::string trim_ascii(const std::string& s) {

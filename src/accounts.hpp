@@ -4,7 +4,6 @@
 #include <vector>
 #include <mutex>
 #include <map>
-#include <random>
 #include <algorithm>
 
 #include "json.hpp"
@@ -93,7 +92,7 @@ public:
                 const std::string& identifier, const std::string& match_mode,
                 const std::string& server, const std::string& notes) {
         Account a;
-        a.id = "acc_" + random_hex(8);
+        a.id = "acc_" + util::random_hex(8);
         a.label = label;
         a.game = game;
         a.identifier = identifier;
@@ -233,18 +232,6 @@ public:
     }
 
 private:
-    static std::string random_hex(size_t bytes) {
-        static std::mt19937_64 rng{ std::random_device{}() };
-        std::string out;
-        const char* hex = "0123456789abcdef";
-        for (size_t i = 0; i < bytes; ++i) {
-            unsigned v = (unsigned)(rng() & 0xFF);
-            out += hex[v >> 4];
-            out += hex[v & 15];
-        }
-        return out;
-    }
-
     void load() {
         std::string content;
         if (!util::read_file(dir_ + "\\accounts.json", content)) return;

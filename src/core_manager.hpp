@@ -186,14 +186,14 @@ public:
             std::lock_guard<std::mutex> lk(mtx_);
             for (auto& x : cores_) {
                 if (x.path == dest) {
-                    dest = cores_root_ + "\\" + kind + "-" + version + "-" + random_hex(4);
+                    dest = cores_root_ + "\\" + kind + "-" + version + "-" + util::random_hex(4);
                     break;
                 }
             }
         }
         if (!copy_tree(src_path, dest)) return "";
         CoreInfo c;
-        c.id = "core-" + random_hex(8);
+        c.id = "core-" + util::random_hex(8);
         c.kind = kind;
         c.path = dest;
         c.name = (kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + (" " + version);
@@ -391,9 +391,9 @@ public:
             } else {
                 if (v.is_array()) {
                     for (auto& r : v.items()) {
-                        std::string tag = r.get_str("tag_name", "");
-                        std::string lower = tag;
-                        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                        std::string lower = r.get_str("tag_name", "");
+                        std::transform(lower.begin(), lower.end(), lower.begin(),
+                                       [](int c) { return (char)::tolower(c); });
                         bool pre = r.get_bool("prerelease", false);
                         bool is_beta = lower.find("beta") != std::string::npos;
                         bool is_nightly = lower.find("nightly") != std::string::npos
@@ -418,7 +418,8 @@ public:
                     for (auto& a : assets->items()) {
                         std::string n = a.get_str("name", "");
                         std::string lower = n;
-                        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                        std::transform(lower.begin(), lower.end(), lower.begin(),
+                                       [](int c) { return (char)::tolower(c); });
                         // 注意 "x86_64" 不含 "x64" 子串，必须显式枚举；并排除 arm 包
                         bool is_arm = lower.find("aarch64") != std::string::npos
                                    || lower.find("arm64") != std::string::npos;
@@ -439,7 +440,8 @@ public:
                         for (auto& a : assets->items()) {
                             std::string n = a.get_str("name", "");
                             std::string lower = n;
-                            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                            std::transform(lower.begin(), lower.end(), lower.begin(),
+                                       [](int c) { return (char)::tolower(c); });
                             // 回退时同样排除 arm 包，避免在 x64 机器上拉到 aarch64 核心
                             bool is_arm = lower.find("aarch64") != std::string::npos
                                        || lower.find("arm64") != std::string::npos;
@@ -586,7 +588,7 @@ public:
             for (auto& x : self.cores_) {
                 if (x.path == dest) {
                     dest = self.cores_root_ + "\\" + kind + "-"
-                           + (version.empty() ? "unknown" : version) + "-" + random_hex(4);
+                           + (version.empty() ? "unknown" : version) + "-" + util::random_hex(4);
                     break;
                 }
             }
@@ -601,7 +603,7 @@ public:
             return "";
         }
         CoreInfo c;
-        c.id = "core-" + random_hex(8);
+        c.id = "core-" + util::random_hex(8);
         c.kind = kind;
         c.path = dest;
         c.name = display_name.empty()
@@ -611,7 +613,6 @@ public:
         c.release_tag = release_tag;
         c.created_at = util::now_sec();
         c.version = version;
-        c.is_default = false;
         {
             std::lock_guard<std::mutex> lk(self.mtx_);
             self.cores_.push_back(c);
@@ -780,7 +781,7 @@ private:
             std::string path = cores_root_ + "\\" + name;
             if (!valid_core_dir(kind, path)) continue;
             CoreInfo c;
-            c.id = "core-" + random_hex(8);
+            c.id = "core-" + util::random_hex(8);
             c.kind = kind;
             c.path = path;
             c.version = probe_version(kind, path);
@@ -806,19 +807,30 @@ private:
         util::write_file(dir_ + "\\cores.json", mj::Value::dump_pretty(v));
     }
 
-    static std::string random_hex(size_t bytes) {
-        static std::mt19937_64 rng{ std::random_device{}() };
-        std::string out;
-        const char* hex = "0123456789abcdef";
-        for (size_t i = 0; i < bytes; ++i) {
-            unsigned v = (unsigned)(rng() & 0xFF);
-            out += hex[v >> 4];
-            out += hex[v & 15];
+    // ---------------------------------------------------------------- HTTP
+    // URL 拆分（scheme / host:port / path）。原先 http_get 与 http_download 各自内联了
+    // 逐字节相同的 13 行块，合并到此处（r7）。原块的 `slash == std::wstring::npos`
+    // 笔误已在 r13 规范化为 `std::string::npos`：两者同为 (size_t)-1、`slash` 是 size_t，
+    // 可证等价，并用 parse_url_diff（19 URL 含空主机/无协议/端口越界等边界）差分确认。
+    static void parse_url(const std::string& url, std::wstring& host, std::wstring& path,
+                          INTERNET_PORT& port, bool& https) {
+        port = INTERNET_DEFAULT_HTTPS_PORT;
+        https = true;
+        std::string u = url;
+        if (u.rfind("https://", 0) == 0) u = u.substr(8);
+        else if (u.rfind("http://", 0) == 0) { u = u.substr(7); https = false; port = INTERNET_DEFAULT_HTTP_PORT; }
+        size_t slash = u.find('/');
+        std::string hostpart = slash == std::string::npos ? u : u.substr(0, slash);
+        path = util::utf8_to_wide(slash == std::string::npos ? "/" : u.substr(slash));
+        size_t colon = hostpart.find(':');
+        if (colon != std::string::npos) {
+            host = util::utf8_to_wide(hostpart.substr(0, colon));
+            port = (INTERNET_PORT)atoi(hostpart.substr(colon + 1).c_str());
+        } else {
+            host = util::utf8_to_wide(hostpart);
         }
-        return out;
     }
 
-    // ---------------------------------------------------------------- HTTP
     // 按设置打开 WinHTTP 会话：none=自动探测；http/socks5=命名代理
     static HINTERNET open_session(int timeout_ms, const AppSettings* settings) {
         std::wstring proxy, bypass;
@@ -850,23 +862,9 @@ private:
                                 const AppSettings* settings = nullptr,
                                 const std::vector<std::pair<std::string, std::string>>& headers = {}) {
         std::wstring host, path;
-        INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
-        bool https = true;
-        {
-            std::string u = url;
-            if (u.rfind("https://", 0) == 0) u = u.substr(8);
-            else if (u.rfind("http://", 0) == 0) { u = u.substr(7); https = false; port = INTERNET_DEFAULT_HTTP_PORT; }
-            size_t slash = u.find('/');
-            std::string hostpart = slash == std::wstring::npos ? u : u.substr(0, slash);
-            path = util::utf8_to_wide(slash == std::string::npos ? "/" : u.substr(slash));
-            size_t colon = hostpart.find(':');
-            if (colon != std::string::npos) {
-                host = util::utf8_to_wide(hostpart.substr(0, colon));
-                port = (INTERNET_PORT)atoi(hostpart.substr(colon + 1).c_str());
-            } else {
-                host = util::utf8_to_wide(hostpart);
-            }
-        }
+        INTERNET_PORT port;
+        bool https;
+        parse_url(url, host, path, port, https);
         HINTERNET session = open_session(timeout_ms, settings);
         if (!session) return "";
         HINTERNET conn = WinHttpConnect(session, host.c_str(), port, 0);
@@ -911,23 +909,9 @@ private:
                               std::atomic<int>* progress,
                               const AppSettings* settings = nullptr) {
         std::wstring host, path;
-        INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
-        bool https = true;
-        {
-            std::string u = url;
-            if (u.rfind("https://", 0) == 0) u = u.substr(8);
-            else if (u.rfind("http://", 0) == 0) { u = u.substr(7); https = false; port = INTERNET_DEFAULT_HTTP_PORT; }
-            size_t slash = u.find('/');
-            std::string hostpart = slash == std::wstring::npos ? u : u.substr(0, slash);
-            path = util::utf8_to_wide(slash == std::string::npos ? "/" : u.substr(slash));
-            size_t colon = hostpart.find(':');
-            if (colon != std::string::npos) {
-                host = util::utf8_to_wide(hostpart.substr(0, colon));
-                port = (INTERNET_PORT)atoi(hostpart.substr(colon + 1).c_str());
-            } else {
-                host = util::utf8_to_wide(hostpart);
-            }
-        }
+        INTERNET_PORT port;
+        bool https;
+        parse_url(url, host, path, port, https);
         HINTERNET session = open_session(120000, settings);
         if (!session) return false;
         // 下载用更短的超时：资产 CDN 不可达时要在半分钟内失败，而不是把后台线程

@@ -4,7 +4,6 @@
 #include <vector>
 #include <utility>
 #include <mutex>
-#include <random>
 #include <windows.h>
 #include <winhttp.h>
 
@@ -71,7 +70,7 @@ class HeuristicPlanner {
 public:
     Plan plan(const std::string& goal, const mj::Value& state, const mj::Value& catalog) {
         Plan p;
-        p.id = "plan_" + random_hex(6);
+        p.id = "plan_" + util::random_hex(6);
         p.ts = util::now_sec();
         p.planner = "heuristic";
         p.goal = goal;
@@ -188,18 +187,6 @@ private:
         }
         return v;
     }
-
-    static std::string random_hex(size_t bytes) {
-        static std::mt19937_64 rng{ std::random_device{}() };
-        std::string out;
-        const char* hex = "0123456789abcdef";
-        for (size_t i = 0; i < bytes; ++i) {
-            unsigned v = (unsigned)(rng() & 0xFF);
-            out += hex[v >> 4];
-            out += hex[v & 15];
-        }
-        return out;
-    }
 };
 
 // ---------------------------------------------------------------- LLM 规划器
@@ -239,7 +226,7 @@ public:
             return p;
         }
         Plan p;
-        p.id = "plan_llm_" + random_hex(6);
+        p.id = "plan_llm_" + util::random_hex(6);
         p.ts = util::now_sec();
         p.planner = "llm";
         p.goal = goal;
@@ -443,18 +430,6 @@ private:
             steps.push_back(std::move(s));
         }
         return { steps, warnings };
-    }
-
-    static std::string random_hex(size_t bytes) {
-        static std::mt19937_64 rng{ std::random_device{}() };
-        std::string out;
-        const char* hex = "0123456789abcdef";
-        for (size_t i = 0; i < bytes; ++i) {
-            unsigned v = (unsigned)(rng() & 0xFF);
-            out += hex[v >> 4];
-            out += hex[v & 15];
-        }
-        return out;
     }
 
     Config cfg_;

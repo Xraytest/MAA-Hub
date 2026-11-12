@@ -12,7 +12,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,6 +26,21 @@
 #include "worker_client.hpp"
 
 namespace hub {
+
+// 单一事实来源：面板下标 <-> 核心字符串枚举表（C++17 inline 变量，跨 TU 单实例）。
+// 原先 hub.hpp::normalize_task_params（函数内 static）与 config_import.hpp（文件内 static，
+// 每个 TU 一份副本）各写一遍，共 3 张表 6 处定义。
+inline const char* const kFacility[] = { "Control", "Mfg", "Trade", "Power",
+                                         "Reception", "Office", "Training",
+                                         "Processing" };
+inline const char* const kDrones[] = { "_NotUse", "Money", "SyntheticJade",
+                                       "CombatRecord", "Chip", "PureGold",
+                                       "OriginStone" };
+inline const char* const kClients[] = { "Official", "Bilibili", "txwy",
+                                         "YoStarEN", "YoStarJP", "YoStarKR" };
+inline constexpr size_t kFacilityCount = 8;
+inline constexpr size_t kDroneCount = 7;
+inline constexpr size_t kClientCount = 6;
 
 struct HubEvent {
     std::string id_;
@@ -198,7 +212,7 @@ public:
         if (core.id.empty()) return "";
 
         ExecutorEntry e;
-        e.id = "exec-" + random_hex(6);
+        e.id = "exec-" + util::random_hex(6);
         e.kind = kind;
         e.label = label.empty() ? (kind == "maa" ? "MAA 实例" : "MaaEnd 实例") : label;
         e.account_id = account_id;
@@ -365,23 +379,25 @@ public:
             // mode: 0默认 / 10000自定义 / 20000轮换
             int m = (int)num("mode", 0);
             out.set("mode", (int64_t)(m == 1 ? 10000 : m == 2 ? 20000 : 0));
-            // drones: 索引 -> MAA 字符串
-            static const char* kDrones[] = { "_NotUse", "Money", "SyntheticJade",
-                                             "CombatRecord", "Chip" };
-            int d = (int)num("drones_idx", 0);
-            if (d < 0 || d > 4) d = 0;
-            out.set("drones", std::string(kDrones[d]));
+            // drones: 索引 -> MAA 字符串（与面板 drones_idx radio / config_import kDrones 同序：
+            // 贸易站=Money 制造站=SyntheticJade 发电站=CombatRecord 办公室=Chip
+            // 加工站=PureGold 会客室=OriginStone）
+            // 只有面板/导入真正写过 drones_idx 才映射；否则保留已存在的 drones 字符串
+            // （fill_defaults 补的默认值、或 TaskQueue 直写场景），不再无条件覆盖
+            if (in.find("drones_idx")) {
+                int d = (int)num("drones_idx", 0);
+                if (d < 0 || d >= (int)kDroneCount) d = 0;
+                out.set("drones", std::string(kDrones[d]));
+            }
             // 面板「换班设施」8 个勾选 -> 核心 facility 数组（数组序即换班优先级）
             // 名字必须是核心 infrast.json roomType 里的键，Workshop/Mine 之类会被拒
-            static const char* kFac[] = { "Control", "Mfg", "Trade", "Power", "Reception",
-                                          "Office", "Training", "Processing" };
             bool touched = false;
             mj::Value fac = mj::Value::array();
-            for (int k = 0; k < 8; ++k) {
+            for (int k = 0; k < (int)kFacilityCount; ++k) {
                 std::string key = "facility_" + std::to_string(k);
                 if (!in.find(key)) continue;
                 touched = true;
-                if (boolean(key, false)) fac.push(kFac[k]);
+                if (boolean(key, false)) fac.push(kFacility[k]);
             }
             if (touched) out.set("facility", std::move(fac));
         }
@@ -409,23 +425,44 @@ public:
             out.set("select", std::move(select));
         }
         if (task == "Mall") {
-            // blacklist_str -> blacklist 数组；buy_first 字符串 -> 数组
-            std::string bl = in.get_str("blacklist_str", "");
-            if (!bl.empty()) {
+            // blacklist_str / buy_first_str -> 核心的 blacklist / buy_first 数组
+            // （面板 pc_text 存分号分隔字符串；空格忽略；空串不写，避免清掉已有值）
+            auto split_list = [](const std::string& s) {
                 mj::Value arr = mj::Value::array();
                 std::string cur;
-                for (char ch : bl + ";") {
+                for (char ch : s + ";") {
                     if (ch == ';') {
                         if (!cur.empty()) { arr.push(cur); cur.clear(); }
                     } else if (ch != ' ') {
                         cur += ch;
                     }
                 }
-                out.set("blacklist", std::move(arr));
-            }
+                return arr;
+            };
+            std::string bl = in.get_str("blacklist_str", "");
+            if (!bl.empty()) out.set("blacklist", split_list(bl));
+            std::string bf = in.get_str("buy_first_str", "");
+            if (!bf.empty()) out.set("buy_first", split_list(bf));
         }
         if (task == "StartUp") {
             // account_name_set 只是面板开关，真实参数 account_name 由账号注入提供
+            // client_type：面板 pc_radio 存的是 0..5 下标，MaaCore 要字符串枚举。
+            // 顺序与 task_panels 的 radio 及 maa_adapter 的 enum 完全一致；
+            // 已是合法字符串就原样保留，缺失/非法值回退 "Official"（官服）。
+            std::string ct;
+            if (auto* v = in.find("client_type")) {
+                if (v->is_number()) {
+                    int idx = (int)v->as_int(0);
+                    if (idx < 0 || idx >= (int)kClientCount) idx = 0;
+                    ct = kClients[idx];
+                } else if (v->is_string()) {
+                    ct = v->as_string();
+                }
+            }
+            bool known = false;
+            for (auto* k : kClients) if (ct == k) { known = true; break; }
+            if (!known) ct = "Official";
+            out.set("client_type", ct);
         }
         return out;
     }
@@ -693,33 +730,39 @@ public:
 
     // 顺序跑一串任务（每个一次 run，等空闲再下一个），同步执行。
     // 设备联调 / 无头流程用；params 取各任务已保存的面板参数。
-    // 规范任务序（MAA 原生语义）：StartUp 恒第一（先拉起游戏）、CloseDown 恒最后。
+    // 规范任务序（MAA 原生语义）：StartUp 恒第一（先拉起游戏），中段按官方日常链
+    // Recruit→Infrast→Fight→Mall→Award 全序排列（与用户 TaskQueue 常见顺序一致），
+    // CloseDown 恒最后；未识别任务保持相对次序、排在中段之后。
     // maaend 的 CloseGamePC 同理排最后（先跑游戏内任务再关游戏）。
     // 背景：task-lists.json 由 std::set 字典序落盘（app_window save_task_list），
-    // 不重排会变成 Award->...->StartUp，首任务找不到游戏直接失败。
+    // 不重排会变成 Award->Fight->...->StartUp，首任务找不到游戏直接失败；
+    // 只提 StartUp/压 CloseDown 又会让 Award 抢在 Fight 前，与官方语义不符。
     static std::vector<std::string> canonical_task_order(const std::string& kind,
                                                          std::vector<std::string> tasks) {
         if (tasks.size() < 2) return tasks;
-        const char* first = kind == "maa" ? "StartUp" : nullptr;
-        const char* last = kind == "maa" ? "CloseDown"
-                         : kind == "maaend" ? "CloseGamePC" : nullptr;
-        auto pos_of = [&](const std::string& t) -> int {
-            for (size_t i = 0; i < tasks.size(); ++i)
-                if (tasks[i] == t) return (int)i;
-            return -1;
-        };
-        if (first) {
-            int p = pos_of(first);
-            if (p > 0) {   // 存在且不在首位 -> 提到最前
-                tasks.erase(tasks.begin() + p);
-                tasks.insert(tasks.begin(), first);
-            }
+        if (kind == "maa") {
+            static const char* kMaa[] = { "StartUp", "Recruit", "Infrast", "Fight",
+                                          "Mall", "Award" };
+            auto rank_of = [&](const std::string& t) -> int {
+                if (t == "CloseDown") return 100;
+                for (int i = 0; i < 6; ++i)
+                    if (t == kMaa[i]) return i;
+                return 50;   // 未知任务：中段之后、CloseDown 之前
+            };
+            std::stable_sort(tasks.begin(), tasks.end(),
+                             [&](const std::string& a, const std::string& b) {
+                                 return rank_of(a) < rank_of(b);
+                             });
+            return tasks;
         }
-        if (last) {
-            int p = pos_of(last);
-            if (p >= 0 && p < (int)tasks.size() - 1) {  // 存在且不在末位 -> 移到末尾
-                tasks.erase(tasks.begin() + p);
-                tasks.push_back(last);
+        if (kind == "maaend") {
+            const std::string last = "CloseGamePC";
+            for (size_t i = 0; i < tasks.size(); ++i) {
+                if (tasks[i] == last && i < tasks.size() - 1) {  // 存在且不在末位 -> 移到末尾
+                    tasks.erase(tasks.begin() + i);
+                    tasks.push_back(last);
+                    break;
+                }
             }
         }
         return tasks;
@@ -731,7 +774,7 @@ public:
         if (!get_executor(exec_id, e)) return "no-executor";
         tasks = canonical_task_order(e.kind, std::move(tasks));
         Plan plan;
-        plan.id = "cli-" + random_hex(6);
+        plan.id = "cli-" + util::random_hex(6);
         plan.ts = util::now_sec();
         plan.planner = "cli";
         plan.goal = "cli sequence";
@@ -1452,18 +1495,6 @@ private:
         v.set("data", std::move(data));
         util::write_file(util::exe_dir() + "\\state\\state.json",
                          mj::Value::dump_pretty(v));
-    }
-
-    static std::string random_hex(size_t bytes) {
-        static std::mt19937_64 rng{ std::random_device{}() };
-        std::string out;
-        const char* hex = "0123456789abcdef";
-        for (size_t i = 0; i < bytes; ++i) {
-            unsigned v = (unsigned)(rng() & 0xFF);
-            out += hex[v >> 4];
-            out += hex[v & 15];
-        }
-        return out;
     }
 
     mj::Value config_;

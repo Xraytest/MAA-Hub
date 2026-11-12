@@ -167,11 +167,8 @@ inline const std::map<std::string, char>& task_key_types(const std::string& task
     return it == table.end() ? empty : it->second;
 }
 
-// 基建设施/无人机顺序与 hub.hpp normalize_task_params 一致
-static const char* kFac[] = { "Control", "Mfg", "Trade", "Power",
-                              "Reception", "Office", "Training", "Processing" };
-static const char* kDrones[] = { "_NotUse", "Money", "SyntheticJade",
-                                 "CombatRecord", "Chip" };
+// 基建设施/无人机顺序表为单一事实源：hub.hpp 文件头的 kFacility / kDrones
+// （normalize 与导入器共用，避免两处副本失步）
 
 // 特殊键转换：返回 0=非特殊键，1=已写入，2=识别为特殊键但值无效（计跳过）
 inline int special_maa(Hub& hub, const std::string& exec, const std::string& task,
@@ -190,11 +187,11 @@ inline int special_maa(Hub& hub, const std::string& exec, const std::string& tas
             if (!v.is_array()) return 2;
             std::set<std::string> on;
             for (auto& e : v.items()) on.insert(lower_copy(scalar_text(e)));
-            for (int i = 0; i < 8; ++i) {
+            for (int i = 0; i < kFacilityCount; ++i) {
                 // 必须写全 8 个键：面板端有 touched 标志，只写 true 的会误判
                 hub.set_task_param(exec, task,
                                    "facility_" + std::to_string(i),
-                                   mj::Value(on.count(lower_copy(kFac[i])) > 0));
+                                   mj::Value(on.count(lower_copy(kFacility[i])) > 0));
                 ++c.params_written;
             }
             return 1;
@@ -202,11 +199,9 @@ inline int special_maa(Hub& hub, const std::string& exec, const std::string& tas
         if (param == "Drones") {
             std::string s = lower_copy(scalar_text(v));
             int idx = -1;
-            for (int i = 0; i < 5; ++i) {
+            for (int i = 0; i < kDroneCount; ++i) {
                 if (s == lower_copy(kDrones[i])) { idx = i; break; }
             }
-            // PureGold/OriginStone 面板无人机档没有对应项，落回"不使用"
-            if (idx < 0 && (s == "puregold" || s == "originstone")) idx = 0;
             if (idx < 0) return 2;
             hub.set_task_param(exec, task, "drones_idx", mj::Value(idx));
             ++c.params_written;
@@ -443,6 +438,113 @@ inline void import_maaend(const mj::Value& root, Hub& hub, mj::Value& rep, Ctx& 
     rep.set("preActions", c.pre_actions);
 }
 
+// ---------------------------------------------------------------- MAA 6.x TaskQueue
+
+// Configurations.<Current>.TaskQueue = 官方任务对象数组（$type StartUpTask/RecruitTask/...，
+// 字段 PascalCase）。只转 IsEnable=true 项；同 TaskType 重复时首个生效（maa3/5 的第二个
+// 禁用 Fight 直接跳过）。写入的是面板键（task-params.json 存储口径），运行时由
+// hub.hpp::normalize_task_params 转成核心参数。未识别的任务类型（UserDataUpdate/
+// DepotMaintain/Roguelike 等）只计跳过，不报错。
+inline void import_task_queue(Hub& hub, const std::string& exec, const mj::Value& arr,
+                              int client_idx, Ctx& c, std::set<std::string>& touched) {
+    auto W = [&](const std::string& task, const std::string& key, mj::Value v) {
+        hub.set_task_param(exec, task, key, std::move(v));
+        ++c.params_written;
+        touched.insert(task);
+    };
+    auto getb = [](const mj::Value& o, const char* k, bool def = false) {
+        auto* v = o.find(k);
+        return (v && (v->is_bool() || v->is_number())) ? v->as_bool(def) : def;
+    };
+    std::set<std::string> seen;
+    mj::Value list = mj::Value::array();
+    for (auto& e : arr.items()) {
+        if (!e.is_object()) continue;
+        std::string tt = e.get_str("TaskType", "");
+        if (tt.empty()) continue;
+        if (!getb(e, "IsEnable")) { c.add_skip("TaskQueue." + tt); continue; }
+        if (!seen.insert(tt).second) { c.add_skip("TaskQueue." + tt + ":dup"); continue; }
+        if (tt == "StartUp") {
+            // AccountName 导出即掩码（180****3658），不能当登录名片段写；
+            // 真实 account_name 由执行器绑定的账号在 run_on_executor 注入
+            W(tt, "account_name_set", mj::Value(getb(e, "AccountSwitchEnabled")));
+            W(tt, "client_type", mj::Value((int64_t)client_idx));
+            list.push(tt);
+        } else if (tt == "Recruit") {
+            W(tt, "refresh", mj::Value(getb(e, "RefreshLevel3")));
+            W(tt, "times", mj::Value((int64_t)e.get_int("MaxTimes", 0)));
+            for (int lv = 3; lv <= 6; ++lv)
+                W(tt, "confirm_" + std::to_string(lv),
+                  mj::Value(getb(e, ("Level" + std::to_string(lv) + "Choose").c_str())));
+            list.push(tt);
+        } else if (tt == "Infrast") {
+            std::string m = lower_copy(e.get_str("Mode", ""));
+            W(tt, "mode", mj::Value((int64_t)(m == "custom" ? 1 : m == "rotation" ? 2 : 0)));
+            std::string dr = lower_copy(e.get_str("UsesOfDrones", ""));
+            int di = 0;
+            for (int i = 0; i < kDroneCount; ++i)
+                if (dr == lower_copy(kDrones[i])) { di = i; break; }
+            W(tt, "drones_idx", mj::Value((int64_t)di));
+            W(tt, "dorm_threshold", mj::Value((int64_t)e.get_int("DormThreshold", 30)));
+            // RoomList -> facility_0..7：Dorm/AssistantChange 不在换班键表里自然排除；
+            // 8 个键必须全写（面板 touched 语义）
+            std::set<std::string> on;
+            if (auto* rl = e.find("RoomList"); rl && rl->is_array()) {
+                for (auto& r : rl->items()) {
+                    if (!r.is_object()) continue;
+                    std::string room = r.get_str("Room", "");
+                    bool en = true;
+                    if (auto* iv = r.find("IsEnabled")) en = iv->as_bool(true);
+                    if (!room.empty() && en) on.insert(lower_copy(room));
+                }
+            }
+            for (int i = 0; i < kFacilityCount; ++i)
+                W(tt, "facility_" + std::to_string(i),
+                  mj::Value(on.count(lower_copy(kFacility[i])) > 0));
+            list.push(tt);
+        } else if (tt == "Fight") {
+            bool um = getb(e, "UseMedicine"), us = getb(e, "UseStone");
+            W(tt, "use_medicine", mj::Value(um));
+            W(tt, "medicine", mj::Value((int64_t)(um ? e.get_int("MedicineCount", 0) : 0)));
+            W(tt, "use_stone", mj::Value(us));
+            W(tt, "stone", mj::Value((int64_t)(us ? e.get_int("StoneCount", 0) : 0)));
+            W(tt, "allow_stone_save", mj::Value(getb(e, "UseStoneAllowSave")));
+            if (auto* sp = e.find("StagePlan"); sp && sp->is_array() && !sp->items().empty()) {
+                std::string st = sp->items()[0].as_string();
+                if (!st.empty()) W(tt, "stage", mj::Value(st));
+            }
+            // EnableTimesLimit=false 时不写 perform_battles/times（面板默认不指定次数）
+            if (getb(e, "EnableTimesLimit")) {
+                W(tt, "perform_battles", mj::Value(true));
+                W(tt, "times", mj::Value((int64_t)e.get_int("TimesLimit", 0)));
+            }
+            int64_t series = e.get_int("Series", 0);
+            if (series > 1) W(tt, "series", mj::Value(series));
+            list.push(tt);
+        } else if (tt == "Mall") {
+            W(tt, "shopping", mj::Value(getb(e, "Shopping")));
+            W(tt, "visit_friends", mj::Value(getb(e, "VisitFriends")));
+            std::string bf = e.get_str("FirstList", "");
+            if (!bf.empty()) W(tt, "buy_first_str", mj::Value(bf));
+            std::string bl = e.get_str("BlackList", "");
+            if (!bl.empty()) W(tt, "blacklist_str", mj::Value(bl));
+            list.push(tt);
+        } else if (tt == "Award") {
+            W(tt, "award", mj::Value(getb(e, "Award")));
+            W(tt, "mail", mj::Value(getb(e, "Mail")));
+            W(tt, "recruit", mj::Value(getb(e, "FreeGacha")));
+            W(tt, "orundum", mj::Value(getb(e, "Orundum")));
+            W(tt, "mining", mj::Value(getb(e, "Mining")));
+            W(tt, "special_access", mj::Value(getb(e, "SpecialAccess")));
+            W(tt, "sign_in_event", mj::Value(getb(e, "SignInEvent")));
+            list.push(tt);
+        } else {
+            c.add_skip("TaskQueue." + tt);
+        }
+    }
+    if (!list.items().empty()) c.task_lists.set(exec, list);
+}
+
 // ---------------------------------------------------------------- MAA
 
 inline void import_maa(const mj::Value& root, Hub& hub, mj::Value& rep, Ctx& c) {
@@ -476,6 +578,23 @@ inline void import_maa(const mj::Value& root, Hub& hub, mj::Value& rep, Ctx& c) 
     std::set<std::string> touched;  // 至少写入过一项参数的任务
     for (auto& kv : conf->members()) {
         const std::string& key = kv.first;
+        // MAA 6.x：任务参数整体在 TaskQueue 数组里（无点号键），单独走结构化转换
+        if (key == "TaskQueue") {
+            if (kv.second.is_array()) {
+                int client_idx = 0;  // 面板 radio 下标：0=官服/Official（表见 hub.hpp kClients）
+                if (auto* gui = conf->find("Gui"); gui && gui->is_object()) {
+                    if (auto* rs = gui->find("RuntimeSettings"); rs && rs->is_object()) {
+                        std::string ct = rs->get_str("ClientType", "Official");
+                        for (int i = 0; i < kClientCount; ++i)
+                            if (ct == kClients[i]) { client_idx = i; break; }
+                    }
+                }
+                import_task_queue(hub, exec, kv.second, client_idx, c, touched);
+            } else {
+                c.add_skip(key);
+            }
+            continue;
+        }
         size_t dot = key.find('.');
         if (dot == std::string::npos || dot == 0 || dot + 1 >= key.size()) {
             c.add_skip(key);
@@ -727,7 +846,6 @@ inline mj::Value import_from_path(const std::string& path, Hub& hub,
     const std::string tag = install_tag_of(file);
     rep = import_from_text(text, hub, hint, tag);
     rep.set("source_file", file);
-    rep.set("install_tag", tag);
     return rep;
 }
 
@@ -752,16 +870,12 @@ inline mj::Value import_from_text(const std::string& text, Hub& hub,
         auto* cfgs = root.find("Configurations");
         std::string hint = lower_copy(kind_hint);
         if (insts && insts->is_array()) {
-            rep.set("format", "maaend");
             import_maaend(root, hub, rep, c);
         } else if (cfgs && cfgs->is_object()) {
-            rep.set("format", "maa");
             import_maa(root, hub, rep, c);
         } else if (hint == "maaend") {
-            rep.set("format", "maaend");
             import_maaend(root, hub, rep, c);
         } else if (hint == "maa") {
-            rep.set("format", "maa");
             import_maa(root, hub, rep, c);
         } else {
             c.add_error("无法识别的配置格式（既非 MaaEnd instances，也非 MAA Configurations）");

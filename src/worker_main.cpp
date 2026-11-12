@@ -21,6 +21,7 @@ namespace hub {
 
 
 static std::unique_ptr<IAdapter> make_adapter(const std::string& kind, const mj::Value& cfg) {
+    (void)cfg;  // 预留：两类适配器目前都无需按实例配置构造参数
     if (kind == "maa") return std::make_unique<MaaAdapter>();
     if (kind == "maaend") return std::make_unique<MaaEndAdapter>();
     return nullptr;
