@@ -538,8 +538,8 @@ public:
         int bh = r.bottom - r.top;
         int pad = bw >= 48 ? 6 : (bw >= 24 ? 3 : 1);
         int avail = bw - pad * 2;
-        HFONT f = font;
-        std::wstring lbl = label_text;
+        HFONT f;               // fit_label 无条件写满两个出参，故无需初值
+        std::wstring lbl;
         fit_label(label_text, avail, f, lbl);
         SIZE sz = text_size(lbl, f);
         int tx = r.left + (bw - sz.cx) / 2;
@@ -621,7 +621,7 @@ public:
         std::string edit = std::to_string(value);
         text_input(id, box, edit, nullptr, lw == 0 ? 1 : 0);
         int nv = value;
-        try { nv = std::stoi(edit); } catch (...) { nv = value; }
+        try { nv = std::stoi(edit); } catch (...) {}
         if (nv < min_v) nv = min_v;
         if (nv > max_v) nv = max_v;
         value = nv;
@@ -720,7 +720,6 @@ public:
         // 官方 MaaTextBoxDefaultStyle：Background=RegionBrushOpacity25、圆角 4
         round_rect(r, theme.card_bg, focused ? theme.primary : theme.border, 4);
         std::wstring w = widen(value);
-        RECT save = clip_;
         int ty = r.top + ((r.bottom - r.top) - text_size(L"Ag", font).cy) / 2;
         if (w.empty() && hint) {
             if (align == 1) {
@@ -746,7 +745,6 @@ public:
                 DeleteObject(p);
             }
         }
-        clip_ = save;
         // 键盘输入
         if (focused) {
             if (in_.char_input) {
@@ -835,9 +833,7 @@ public:
         // （原为纯白 #FFFFFF + 圆角 10，形成"大白板"观感）
         round_rect(r, theme.card_bg, theme.border, 4);
         if (!title.empty()) {
-            RECT save = clip_;
             text(r.left + 18, r.top + 14, title, theme.text, font_bold);
-            clip_ = save;
         }
     }
 

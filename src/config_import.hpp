@@ -146,9 +146,6 @@ struct Ctx {
 inline const std::map<std::string, char>& task_key_types(const std::string& task) {
     static const std::map<std::string, std::map<std::string, char>> table = {
         { "StartUp",     { { "client_type", 's' }, { "account_name", 's' } } },
-        // CloseDown.ClientType 不映射：MaaHub 面板的 CloseDown client_type 是布尔开关
-        // （与 StartUp 的 radio enum 语义不同），MAA 导出的是枚举字符串，写错类型有害
-        { "CloseDown",   {} },
         { "Fight",       { { "stage", 's' }, { "medicine", 'n' }, { "stone", 'n' },
                            { "times", 'n' }, { "series", 'n' }, { "drops", 'o' },
                            { "report_to_penguin", 'b' }, { "use_medicine", 'b' },

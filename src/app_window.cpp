@@ -1791,7 +1791,6 @@ void MaaHubWindow::page_executor(RECT content) {
     int rx = right_col.left;
     if (!sel_task.empty() && sel_valid) {
         TaskUiState& ui = task_ui_[id][sel_task];
-        ui.open = true;     // 官方没有「收起参数」开关：选中任务即展示其设置面板
         // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
         {
             mj::Value saved = hub_->task_params(id, sel_task);
@@ -2769,11 +2768,10 @@ void MaaHubWindow::backend_loop() {
                         dl_progress_ = 0;
                         dl_stage_ = "下载";
                         std::string installed;
-                        bool unchanged = false;
                         std::string id = CoreManager::pull_core(
                             auto_kind, ui.download_url, "", &dl_progress_, &dl_stage_, &st,
                             ui.latest_tag, st.update_auto_install, ui.asset_sha256,
-                            &installed, &unchanged);
+                            &installed);
                         dl_progress_ = -1;
                         if (!id.empty()) {
                             std::lock_guard<std::mutex> lk(upd_mtx_);

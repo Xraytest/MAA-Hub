@@ -786,8 +786,7 @@ public:
             if (plans_.size() > 50) plans_.erase(plans_.begin());
         }
         stop_flag_ = false;
-        int ran = 0;
-        exec_worker(plan, &ran);   // 同步：CLI 直接等整串跑完
+        exec_worker(plan);   // 同步：CLI 直接等整串跑完
         std::string status = "done";
         {
             std::lock_guard<std::mutex> lk(plans_mtx_);
@@ -1132,8 +1131,7 @@ private:
         util::trace("spawn_worker id=" + id + " load_ok=" + (loaded ? "1" : "0") + " reply=" + ld);
     }
 
-    void exec_worker(Plan plan, int* ran = nullptr) {
-        int completed = 0;
+    void exec_worker(Plan plan) {
         std::string status = "done";
         std::string fail_reason;
         for (auto& step : plan.steps) {
@@ -1161,7 +1159,6 @@ private:
                 status = "failed";
                 break;
             }
-            ++completed;
             ExecutorEntry e;
             if (get_executor(step.exec_id, e) && !e.account_id.empty()
                 && (step.task == "Award" || step.task == "DailyRewards")) {
@@ -1203,7 +1200,6 @@ private:
                 break;
             }
         }
-        if (ran) *ran = completed;
         if (stop_flag_ || stopping_) status = "stopped";
         update_plan_status(plan.id, status, fail_reason);
         // run_on_executor 正常完成后不清 running_task_（只清 call 失败路径）。

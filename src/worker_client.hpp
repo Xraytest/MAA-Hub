@@ -56,9 +56,8 @@ public:
         if (!proc_.alive()) {
             return false;
         }
-        int64_t cid = 0;
         std::unique_lock<std::mutex> lk(mtx_);
-        cid = ++seq_;
+        int64_t cid = ++seq_;
         pending_[cid] = mj::Value::object();
         mj::Value req = mj::Value::object();
         req.set("cmd", cmd);
