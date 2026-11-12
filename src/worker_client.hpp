@@ -4,11 +4,9 @@
 #include <condition_variable>
 #include <functional>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 #include "adapters/adapter.hpp"
 #include "json.hpp"
@@ -98,7 +96,6 @@ public:
     }
 
     bool alive() const { return proc_.alive(); }
-    const std::string& last_error() const { return last_error_; }
 
     void shutdown() {
         if (shutting_down_.exchange(true)) return;

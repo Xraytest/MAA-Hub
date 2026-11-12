@@ -80,7 +80,6 @@ struct UpdateInfo {
     long long asset_size = 0;    // 资产字节数（0 = 未知）
     std::string asset_sha256;    // 上游给出的 sha256（可空，空则不校验）
     std::string source_name;
-    std::string release_notes;
     bool has_update = false;
     // 当前核心没有 tag 且版本口径与上游不同（如 MaaEnd tag=v3.0.0 / interface=5.15.0-beta.1）
     // 此时无法可靠判定新旧，置位让 UI 提示「口径不一致，建议按上游 tag 安装」
@@ -412,7 +411,6 @@ public:
                 ui.latest_tag = rel->get_str("tag_name", "");
                 ui.latest = ui.latest_tag;
                 ui.source_name = name;
-                ui.release_notes = rel->get_str("body", "").substr(0, 2000);
                 auto* assets = rel->find("assets");
                 if (assets && assets->is_array()) {
                     for (auto& a : assets->items()) {
@@ -626,17 +624,6 @@ public:
         return c.id;
     }
 
-    void refresh_version(const std::string& id) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& c : cores_) {
-            if (c.id == id) {
-                c.version = probe_version(c.kind, c.path);
-                c.updated_at = util::now_sec();
-                break;
-            }
-        }
-        save();
-    }
 
     // ---------------------------------------------------------------- 工具
     // 文件 SHA-256（小写 hex）；失败返回空串

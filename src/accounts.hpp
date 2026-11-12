@@ -4,7 +4,6 @@
 #include <vector>
 #include <mutex>
 #include <map>
-#include <algorithm>
 
 #include "json.hpp"
 #include "util.hpp"

@@ -135,12 +135,6 @@ public:
         return save();
     }
 
-    // 加载结果说明："" = 正常；missing/corrupt/recovered 的可读描述
-    std::string load_note() const {
-        std::lock_guard<std::mutex> lk(mtx_);
-        return load_note_;
-    }
-
 private:
     void load() {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -150,18 +144,15 @@ private:
             mj::Value v;
             if (mj::try_parse(content, v)) {
                 s_ = AppSettings::from_json(v);
-                load_note_.clear();
                 return;
             }
             // 主文件损坏：留证据再尝试备份（原子写后不应再发生，兼容修复旧损伤）
-            load_note_ = "settings.json 解析失败";
             MoveFileExW(util::utf8_to_wide(path).c_str(),
                         util::utf8_to_wide(path + ".corrupt").c_str(),
                         MOVEFILE_REPLACE_EXISTING);
         } else if (!util::file_exists(path)) {
             return;   // 首次运行：安静地用默认值
         } else {
-            load_note_ = "settings.json 读取失败";
         }
         // 上一份好内容兜底
         std::string bak;
@@ -169,12 +160,10 @@ private:
             mj::Value v;
             if (mj::try_parse(bak, v)) {
                 s_ = AppSettings::from_json(v);
-                load_note_ += "，已从 settings.json.bak 恢复";
                 util::write_file(path, mj::Value::dump_pretty(s_.to_json()));
                 return;
             }
         }
-        if (!load_note_.empty()) load_note_ += "，使用默认设置";
     }
 
     bool save() {
@@ -190,7 +179,6 @@ private:
     std::string dir_;
     mutable std::mutex mtx_;
     AppSettings s_;
-    std::string load_note_;
 };
 
 } // namespace hub

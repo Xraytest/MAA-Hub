@@ -173,7 +173,6 @@ public:
         }
         for (auto& t : stops) t.join();
         util::trace("hub dtor workers stopped");
-        if (save_thread_.joinable()) save_thread_.join();
         util::trace("hub dtor end");
     }
 
@@ -673,12 +672,6 @@ public:
             }
             schedule_save();
         }
-        for (auto& cb : subscribers_) cb(*he);
-    }
-
-    void subscribe(std::function<void(const HubEvent&)> cb) {
-        std::lock_guard<std::mutex> lk(ev_mtx_);
-        subscribers_.push_back(std::move(cb));
     }
 
     std::vector<std::shared_ptr<HubEvent>> recent_events(int limit = 100,
@@ -711,7 +704,6 @@ public:
             }
         }
         Plan plan;
-        (void)0;
         if (planner_name == "heuristic") {
             HeuristicPlanner hp;
             plan = hp.plan(goal, snap, catalog);
@@ -1045,26 +1037,6 @@ public:
         schedule_save_task_params();
     }
 
-    void erase_task_param(const std::string& exec_id, const std::string& task,
-                          const std::string& key) {
-        {
-            std::lock_guard<std::mutex> lk(tp_mtx_);
-            auto e = task_params_.find(exec_id);
-            if (e == task_params_.end()) return;
-            auto t = e->second.find(task);
-            if (t == e->second.end()) return;
-            t->second.erase(key);
-        }
-        schedule_save_task_params();
-    }
-
-    void remove_task_params(const std::string& exec_id) {
-        {
-            std::lock_guard<std::mutex> lk(tp_mtx_);
-            task_params_.erase(exec_id);
-        }
-        schedule_save_task_params();
-    }
 
     AccountStore& accounts() { return *accounts_; }
     CoreManager& cores() { return *cores_; }
@@ -1072,7 +1044,6 @@ public:
     AppSettings app_settings() const { return settings_->get(); }
     // 保存设置后让 LLM 配置立即生效（llm_cfg_ 原先只在构造时读一次）
     void reload_llm_config() { load_llm_config(); }
-    mj::Value& config() { return config_; }
 
     // 后台线程：并行拉起所有执行器 worker
     // 串行时总耗时 = Σ(每个执行器 spawn+discover+load)，MaaEnd 的 load 要 ~6s，
@@ -1508,7 +1479,6 @@ private:
 
     std::mutex ev_mtx_;
     std::vector<std::shared_ptr<HubEvent>> events_;
-    std::vector<std::function<void(const HubEvent&)>> subscribers_;
     std::mutex data_mtx_;
     std::map<std::string, mj::Value> data_;
 
@@ -1524,7 +1494,6 @@ private:
     std::atomic<bool> stop_flag_{ false };
     std::atomic<bool> stopping_{ false };
     std::thread exec_thread_;
-    std::thread save_thread_;
     uint64_t last_save_ = 0;
 
     // 调度器（构造起线程，析构 stopping_ + 有界等待回收）

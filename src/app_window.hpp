@@ -64,7 +64,6 @@ private:
     static LRESULT CALLBACK wnd_proc(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle_msg(HWND, UINT, WPARAM, LPARAM);
     void on_paint(HDC dc, RECT client);
-    void render(RECT client);
 
     // 页面
     // 原生标题栏：窗口标题对齐官方 UpdateWindowTitle（实例名 + 连接地址）
@@ -87,7 +86,6 @@ private:
     int gif_x_ = -1, gif_y_ = -1;          // -1 = 默认右下角
     bool gif_dragging_ = false;
     int gif_drag_dx_ = 0, gif_drag_dy_ = 0;
-    size_t gif_index_ = 0;
     bool gif_hidden_ = true;   // 默认隐藏（无内置 GIF 资源，避免遮挡内容）
     // 执行器列表：一个执行器 = 一个独立的 MAA/MaaEnd 实例，常驻左侧栏
     void draw_executor_list(RECT r);
@@ -142,10 +140,8 @@ private:
 
     // 动作
     void action_create_executor();
-    void action_delete_executor(const std::string& id);
     void action_connect(const std::string& id);
     void action_disconnect(const std::string& id);
-    void action_stop(const std::string& id);
     void action_run(const std::string& id, const std::string& task, const mj::Value& params);
     void action_run_checked(const std::string& id);
     void action_run_from(const std::string& id, const std::string& from_task);
@@ -154,16 +150,12 @@ private:
     void action_reject(const std::string& plan_id);
     void action_stop_exec();
     void action_check_update(const std::string& core_id);
-    void action_pull_core(const std::string& kind, const std::string& url);
-    void action_pull_latest(const std::string& kind);
     void action_auto_update(const std::string& kind);   // 一键：检查 → 下载 → 设为默认
-    void action_adopt(const std::string& kind);
     void action_save_settings();
     void action_import_config();
 
     // 数据辅助（返回拷贝：快照会被后台线程整体替换，指针会悬空）
     bool find_executor(const std::string& id, mj::Value& out) const;
-    std::vector<mj::Value> executors_of(const std::string& kind) const;
     std::vector<mj::Value> catalog_of(const std::string& kind) const;
     // 取 executor 的 catalog 并按 task_order_（用户拖拽顺序）重排；
     // action_run_from / action_run_checked 共用同一排序口径（与左列显示一致）。
@@ -180,7 +172,6 @@ private:
     bool offscreen_ = false;   // 离屏模式：窗口永不显示（仅测试/渲染用）
     int dump_w_ = 0, dump_h_ = 0;   // 离屏客户区尺寸，0 = 用真实窗口的 800x600
 
-    int sidebar_w_ = 250;
     int topbar_h_ = 36;   // 官方 TabItem 高度约 30，加内边距
 
     gui::Gui gui_;
@@ -265,7 +256,6 @@ private:
     std::string last_plan_json_;
     // 核心
     std::string core_msg_;
-    double core_msg_ts_ = 0;
     UpdateInfo update_info_;
     std::mutex upd_mtx_;   // 保护 update_info_ / has_update_info_（backend 写、UI 读）
     bool has_update_info_ = false;

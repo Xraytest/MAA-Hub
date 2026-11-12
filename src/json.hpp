@@ -5,15 +5,11 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
-#include <memory>
-#include <sstream>
 #include <string>
 #include <vector>
 
 namespace mj {
 
-class Value;
-using ValuePtr = std::shared_ptr<Value>;
 
 class Value {
 public:
@@ -33,7 +29,6 @@ public:
     static Value array() { Value v; v.type_ = Array; return v; }
     static Value object() { Value v; v.type_ = Object; return v; }
 
-    Type type() const { return type_; }
     bool is_null() const { return type_ == Null; }
     bool is_bool() const { return type_ == Bool; }
     bool is_number() const { return type_ == Int || type_ == Double; }
@@ -124,12 +119,7 @@ public:
         auto* v = find_path(dotted);
         return (v && v->is_number()) ? v->as_int() : def;
     }
-    bool get_path_bool(const std::string& dotted, bool def = false) const {
-        auto* v = find_path(dotted);
-        return (v && (v->is_bool() || v->is_number())) ? v->as_bool() : def;
-    }
 
-    std::string dump() const { return dump(*this); }
 
     static std::string dump(const Value& v) {
         std::string out;
@@ -444,7 +434,6 @@ private:
     }
 };
 
-inline Value parse(const std::string& src) { return Parser(src).parse(); }
 
 inline bool try_parse(const std::string& src, Value& out) {
     try {

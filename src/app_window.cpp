@@ -879,7 +879,7 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
     RECT list_r{ card.left + 16, card.top + 96, card.right - 16, card.bottom - 56 };
     int row_h = 28;
     int total = (int)all.size();
-    gui_.begin_scroll("addtask-list", list_r, total * row_h + 8,
+    gui_.begin_scroll(list_r, total * row_h + 8,
                       scroll_["addtask-list"]);
     int y = list_r.top + 4 - (int)scroll_["addtask-list"];
     for (int i = 0; i < total; ++i) {
@@ -1390,9 +1390,7 @@ void MaaHubWindow::page_executor(RECT content) {
     std::string id = ex.get_str("id", "");
     std::string kind = ex.get_str("kind", "");
     std::string conn = ex.get_str("conn", "unknown");
-    std::string version = ex.get_str("version", "");
     std::string acc_label = ex.get_str("account_label", "");
-    bool daily_done = ex.get_bool("daily_done_today", false);
     int64_t task_count = ex.get_int("task_count", 0);
     std::string core_version = ex.get_str("core_version", "");
 
@@ -1608,8 +1606,7 @@ void MaaHubWindow::page_executor(RECT content) {
         drop_before_ = -1;
     }
 
-    gui_.begin_scroll(("tasks-" + id).c_str(),
-                      { left_col.left, list_top, left_col.right, left_card.bottom - ADD_ROW_H },
+    gui_.begin_scroll({ left_col.left, list_top, left_col.right, left_card.bottom - ADD_ROW_H },
                       n * item_h + 8, scroll_["tasks-" + id]);
     int y = list_top - (int)scroll_["tasks-" + id];
     for (int ti = 0; ti < n; ++ti) {
@@ -1825,8 +1822,7 @@ void MaaHubWindow::page_executor(RECT content) {
         float& psy = scroll_[skey];
         int& measured = content_h_[skey];
         int content_h = measured > 0 ? measured : panel_h;
-        gui_.begin_scroll(skey.c_str(),
-                          { rx, right_col.top, right_col.right, RC_BOTTOM },
+        gui_.begin_scroll({ rx, right_col.top, right_col.right, RC_BOTTOM },
                           content_h, psy);
         // 滚动偏移必须真的减进内容起点，否则滚轮只动滚动条、内容不动
         PanelCtx pctx{ gui_, rx, right_col.top - (int)psy, right_col.right,
@@ -2037,7 +2033,7 @@ void MaaHubWindow::page_accounts(RECT content) {
     if (auto* a = snap.find("accounts"); a && a->is_array()) accs = a->items();
     std::string today = util::today_str();
     int row_h = 34;
-    gui_.begin_scroll("acc-scroll", { panel.left + 10, ty, panel.right - 10, panel.bottom - 10 },
+    gui_.begin_scroll({ panel.left + 10, ty, panel.right - 10, panel.bottom - 10 },
                       (int)accs.size() * row_h + 10, scroll_["acc"]);
     int ry = ty + 6 - (int)scroll_["acc"];
     if (accs.empty()) gui_.text(panel.left + 16, ry + 6, L"尚未添加账号", gui_.theme.dim, gui_.font_small);
@@ -2379,7 +2375,7 @@ void MaaHubWindow::page_cores(RECT content) {
     std::vector<mj::Value> cores;
     if (auto* c = snap.find("cores"); c && c->is_array()) cores = c->items();
     int row_h = 34;
-    gui_.begin_scroll("core-scroll", { panel.left + 10, ty, panel.right - 10, panel.bottom - 10 },
+    gui_.begin_scroll({ panel.left + 10, ty, panel.right - 10, panel.bottom - 10 },
                       (int)cores.size() * row_h + 10, scroll_["core"]);
     int ry = ty + 6 - (int)scroll_["core"];
     if (cores.empty()) {
@@ -2533,7 +2529,7 @@ void MaaHubWindow::page_planner(RECT content) {
     std::vector<mj::Value> plans;
     if (auto* p = snap.find("plans"); p && p->is_array()) plans = p->items();
     int row_h = 26;
-    gui_.begin_scroll("plans-scroll", { hpanel.left + 10, ty, hpanel.right - 10, hpanel.bottom - 10 },
+    gui_.begin_scroll({ hpanel.left + 10, ty, hpanel.right - 10, hpanel.bottom - 10 },
                       (int)plans.size() * row_h + 10, scroll_["plans"]);
     int ry = ty + 4 - (int)scroll_["plans"];
     for (auto& p : plans) {
@@ -2566,7 +2562,7 @@ void MaaHubWindow::page_events(RECT content) {
     int row_h = 26;
     std::vector<mj::Value> evs;
     if (auto* e = snap.find("events"); e && e->is_array()) evs = e->items();
-    gui_.begin_scroll("ev-scroll", { panel.left + 10, panel.top + 40, panel.right - 10, panel.bottom - 10 },
+    gui_.begin_scroll({ panel.left + 10, panel.top + 40, panel.right - 10, panel.bottom - 10 },
                       (int)evs.size() * row_h + 10, scroll_["ev"]);
     int ry = panel.top + 44 - (int)scroll_["ev"];
     if (evs.empty()) gui_.text(panel.left + 16, ry + 8, L"暂无事件", gui_.theme.dim, gui_.font_small);
@@ -2601,16 +2597,6 @@ bool MaaHubWindow::find_executor(const std::string& id, mj::Value& out) const {
     return false;
 }
 
-std::vector<mj::Value> MaaHubWindow::executors_of(const std::string& kind) const {
-    std::vector<mj::Value> out;
-    std::lock_guard<std::mutex> lk(snap_mtx_);
-    if (auto* e = snap_.find("executors"); e && e->is_array()) {
-        for (auto& x : e->items()) {
-            if (kind.empty() || x.get_str("kind", "") == kind) out.push_back(x);
-        }
-    }
-    return out;
-}
 
 std::vector<mj::Value> MaaHubWindow::catalog_of(const std::string& kind) const {
     // 鍙蹇収缂撳瓨锛岀粷涓嶅湪 UI 绾跨▼璋冪敤 worker锛堥伩鍏嶉樆濉炴覆鏌擄級
@@ -2864,7 +2850,6 @@ void MaaHubWindow::post_action(std::function<void()> fn, const std::string& busy
 
 void MaaHubWindow::set_notice(const std::string& s) {
     core_msg_ = s;
-    core_msg_ts_ = util::now_sec();
     std::lock_guard<std::mutex> lk(snap_mtx_);
     ++snap_version_;
 }
@@ -2909,14 +2894,6 @@ void MaaHubWindow::action_create_executor() {
     set_notice("已创建执行器 " + label);
 }
 
-void MaaHubWindow::action_delete_executor(const std::string& id) {
-    hub_->remove_executor(id);
-    if (selected_exec_ == id) {
-        selected_exec_.clear();
-        page_ = "executor";
-    }
-    set_notice("已删除执行器");
-}
 
 void MaaHubWindow::action_connect(const std::string& id) {
     bool ok = hub_->connect_executor(id);
@@ -2928,10 +2905,6 @@ void MaaHubWindow::action_disconnect(const std::string& id) {
     set_notice("已断开");
 }
 
-void MaaHubWindow::action_stop(const std::string& id) {
-    hub_->stop_executor(id);
-    set_notice("已请求停止");
-}
 
 void MaaHubWindow::action_run(const std::string& id, const std::string& task,
                               const mj::Value& params) {
@@ -3061,44 +3034,6 @@ void MaaHubWindow::action_check_update(const std::string& core_id) {
     } else {
         set_notice("更新检查失败：" + ui.error);
     }
-}
-
-void MaaHubWindow::action_pull_core(const std::string& kind, const std::string& url) {
-    UpdateInfo ui;
-    {
-        std::lock_guard<std::mutex> lk(upd_mtx_);
-        ui = update_info_;
-    }
-    std::string real_url = url.empty() ? ui.download_url : url;
-    if (real_url.empty()) {
-        set_notice("没有可用的下载地址");
-        return;
-    }
-    dl_progress_ = 0;
-    dl_stage_ = "下载";
-    AppSettings st = hub_->app_settings();
-    std::string installed;
-    bool unchanged = false;
-    std::string id = CoreManager::pull_core(kind, real_url, "", &dl_progress_, &dl_stage_, &st,
-                                            ui.latest_tag, /*set_default=*/true,
-                                            ui.asset_sha256, &installed, &unchanged);
-    dl_progress_ = -1;
-    if (id.empty()) {
-        set_notice("更新失败：" + dl_stage_ + "（请检查网络/镜像源）");
-        return;
-    }
-    CoreInfo c;
-    hub_->cores().get(id, c);
-    {
-        std::lock_guard<std::mutex> lk(upd_mtx_);
-        update_info_.has_update = false;
-    }
-    set_notice(unchanged ? ("已是最新核心（" + c.version + "），已设为默认")
-                         : ("已安装 " + c.name + " " + c.version + " 并设为默认"));
-}
-
-void MaaHubWindow::action_pull_latest(const std::string& kind) {
-    action_auto_update(kind);
 }
 
 // 一键更新：检查 → 下载 → 校验 sha256 → 安装 → 设为默认（对齐 MAA 的自动更新链路）

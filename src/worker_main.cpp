@@ -20,8 +20,7 @@
 namespace hub {
 
 
-static std::unique_ptr<IAdapter> make_adapter(const std::string& kind, const mj::Value& cfg) {
-    (void)cfg;  // 预留：两类适配器目前都无需按实例配置构造参数
+static std::unique_ptr<IAdapter> make_adapter(const std::string& kind) {
     if (kind == "maa") return std::make_unique<MaaAdapter>();
     if (kind == "maaend") return std::make_unique<MaaEndAdapter>();
     return nullptr;
@@ -67,7 +66,7 @@ static mj::Value status_to_json(const AppStatus& s, const mj::Value& cfg) {
 
 int worker_main(const std::string& kind, const mj::Value& cfg) {
     util::trace("worker start kind=" + kind);
-    auto adapter = make_adapter(kind, cfg);
+    auto adapter = make_adapter(kind);
     if (!adapter) {
         printf("{\"error\":\"unknown kind %s\"}\n", kind.c_str());
         return 2;

@@ -10,7 +10,6 @@
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
 #include <algorithm>
-#include <codecvt>
 #include <deque>
 #include <map>
 #include <string>
@@ -41,19 +40,14 @@ struct Theme {
     COLORREF primary_dark = RGB(0x32, 0x6C, 0xF3);  // DarkPrimaryColor
     COLORREF primary_light = RGB(0xF3, 0xFB, 0xFF); // LightPrimaryColor
     COLORREF ok = RGB(0x2D, 0xB8, 0x4D);            // SuccessColor
-    COLORREF ok_light = RGB(0xF3, 0xFF, 0xF6);      // LightSuccessColor
     COLORREF warn = RGB(0xE9, 0xAF, 0x20);          // WarningColor
-    COLORREF warn_light = RGB(0xFF, 0xFC, 0xF5);    // LightWarningColor
     COLORREF err = RGB(0xDB, 0x33, 0x40);           // DangerColor
-    COLORREF err_light = RGB(0xFF, 0xF6, 0xF7);     // LightDangerColor
-    COLORREF accent = RGB(0xF8, 0x49, 0x1E);        // AccentColor
     COLORREF hover = RGB(0xF3, 0xF3, 0xF3);         // MouseOverRegionBrush（官方 Light 覆盖值）
     // TaskQueue.TaskItemStatus.*：官方为 #20 前缀（12.5% 黑底叠加），
     // 折算为叠在白色根底（RegionBrush）上的实色
     COLORREF status_running = RGB(0xEC, 0xF3, 0xFD);  // #206C9CF3 InProgress
     COLORREF status_done = RGB(0xEB, 0xF9, 0xEB);     // #2060D060 Completed
     COLORREF status_error = RGB(0xFF, 0xEC, 0xEC);    // #20FF6666 Error
-    COLORREF input_bg = RGB(0xFF, 0xFF, 0xFF);      // DefaultColor
     COLORREF row_alt = RGB(0xF3, 0xF3, 0xF3);       // SecondaryRegionBrush（Light 覆盖为 #F3F3F3）
     // 官方背景层级：Light 下 RegionBrush=#FFFFFF，RegionBrushOpacity25=#40FFFFFF
     // 叠加在白根底上仍是纯白（Opacity 系列只在设置了背景图时才有可见差异）
@@ -68,7 +62,6 @@ struct Theme {
     COLORREF trace_text = RGB(0x80, 0x80, 0x80);    // TraceLogBrush（Light=Gray）
 
     // ---- 亮/暗主题（官方 Res/Themes/Dark.xaml）----
-    bool dark = false;
 
     // 官方 Dark.xaml 权威值：
     //   RegionBrush #1C1C1C、PrimaryTextBrush #E6E6E6、PrimaryBrush #326cf3、
@@ -76,12 +69,10 @@ struct Theme {
     // 无 alpha 合成能力，Opacity* 折算为等效实色（卡片略亮于背景，靠边框分层）
     static Theme make_dark() {
         Theme t;
-        t.dark = true;
         t.bg             = RGB(0x1C, 0x1C, 0x1C);   // RegionBrush（官方）
         t.panel          = RGB(0x23, 0x23, 0x26);
         t.card_bg        = RGB(0x23, 0x23, 0x26);   // RegionBrushOpacity25 等效
         t.card_bg_soft   = RGB(0x1F, 0x1F, 0x22);
-        t.input_bg       = RGB(0x23, 0x23, 0x26);
         t.checkbox_bg    = RGB(0x2E, 0x2E, 0x33);   // RegionBrushOpacity50 等效
         t.item_bg        = RGB(0x23, 0x23, 0x26);
         t.item_hover     = RGB(0x2B, 0x2B, 0x30);   // MouseOverRegionBrush（官方）
@@ -98,15 +89,11 @@ struct Theme {
         t.primary        = RGB(0x32, 0x6C, 0xF3);   // PrimaryBrush（官方，亮暗同色）
         t.primary_dark   = RGB(0x2A, 0x5C, 0xD6);
         t.primary_light  = RGB(0x1E, 0x2A, 0x40);
-        t.ok_light       = RGB(0x14, 0x28, 0x1A);
-        t.warn_light     = RGB(0x2A, 0x24, 0x12);
-        t.err_light      = RGB(0x2A, 0x16, 0x18);
         return t;
     }
 
     // 切换主题（dark=false 回到默认亮色）
     void set_dark(bool d) { *this = d ? make_dark() : Theme{}; }
-    COLORREF dark_mask = RGB(0x20, 0x00, 0x00);     // DarkMaskColor（仅用于透明叠加）
 };
 
 inline std::wstring widen(const std::string& s) { return util::utf8_to_wide(s); }
@@ -120,12 +107,9 @@ struct Input {
     bool rdown = false;       // 右键按住
     bool rpressed = false;    // 本帧刚按下右键
     bool rreleased = false;   // 本帧刚松开右键
-    bool double_click = false;
     int wheel = 0;            // 本帧滚轮增量
     wchar_t char_input = 0;   // WM_CHAR
     int vk = 0;               // WM_KEYDOWN
-    bool shift = false;
-    bool ctrl = false;
 };
 
 // 复选框三态（对应 MAA：关 / 开 / 仅生效一次）
@@ -172,29 +156,6 @@ public:
         HBRUSH b = CreateSolidBrush(c);
         FillRect(dc_, &r, b);
         DeleteObject(b);
-    }
-    void frame(RECT r, COLORREF c, int thickness = 1) {
-        HPEN p = CreatePen(PS_INSIDEFRAME, thickness, c);
-        HGDIOBJ old = SelectObject(dc_, p);
-        HGDIOBJ oldb = SelectObject(dc_, GetStockObject(NULL_BRUSH));
-        Rectangle(dc_, r.left, r.top, r.right, r.bottom);
-        SelectObject(dc_, oldb);
-        SelectObject(dc_, old);
-        DeleteObject(p);
-    }
-    // 水平渐变填充（对应 MAA TitleBrush/PrimaryBrush 的 LinearGradientBrush）
-    void gradient_rect(RECT r, COLORREF c1, COLORREF c2) {
-        TRIVERTEX tv[2]{};
-        tv[0].x = r.left;  tv[0].y = r.top;
-        tv[0].Red = (USHORT)(GetRValue(c1) * 257);
-        tv[0].Green = (USHORT)(GetGValue(c1) * 257);
-        tv[0].Blue = (USHORT)(GetBValue(c1) * 257);
-        tv[1].x = r.right; tv[1].y = r.bottom;
-        tv[1].Red = (USHORT)(GetRValue(c2) * 257);
-        tv[1].Green = (USHORT)(GetGValue(c2) * 257);
-        tv[1].Blue = (USHORT)(GetBValue(c2) * 257);
-        GRADIENT_RECT gr{ 0, 1 };
-        GradientFill(dc_, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
     }
 
     void round_rect(RECT r, COLORREF fill, COLORREF line, int radius) {
@@ -299,9 +260,9 @@ public:
     bool click_in(RECT r) const { return hovered(r) && in_.pressed; }
 
     // ------------------------------------------------------------ 滚动区域
-    // 注意：滚动通过调用方在绘制时手动减去 scroll 值实现（见 scroll_offset()），
+    // 注意：滚动通过调用方在绘制时手动减去 scroll 值实现，
     // 不使用 SetViewportOrigin，保证鼠标命中测试与视觉位置一致。
-    void begin_scroll(const char* id, RECT r, int content_h, float& scroll_y) {
+    void begin_scroll(RECT r, int content_h, float& scroll_y) {
         scroll_rect_ = r;
         scroll_content_h_ = content_h;
         scroll_y_ = &scroll_y;
@@ -320,86 +281,6 @@ public:
         pop_clip();
     }
 
-    // 官方 SVG 图标绘制（Carbon Icons / HandyControl Geometries）
-    // 支持 M/L/A/a/h/v/z 子集（官方图标实际用到的指令）
-    void draw_icon_path(const std::wstring& path, RECT r, COLORREF color,
-                        double viewbox = 32.0) {
-        if (path.empty() || r.right <= r.left || r.bottom <= r.top) return;
-        using namespace Gdiplus;
-        Graphics g(dc_);
-        g.SetSmoothingMode(SmoothingModeAntiAlias);
-        GraphicsPath gp;
-        double sx = (r.right - r.left) / viewbox;
-        double sy = (r.bottom - r.top) / viewbox;
-        double cx = 0, cy = 0;          // current point
-        double sx0 = 0, sy0 = 0;        // subpath start
-        size_t i = 0;
-        auto num = [&](size_t& p) -> double {
-            while (p < path.size() && (path[p] == L' ' || path[p] == L',')) ++p;
-            size_t st = p;
-            while (p < path.size() && (iswdigit(path[p]) || path[p] == L'.' ||
-                   path[p] == L'-' || path[p] == L'+' || path[p] == L'e')) ++p;
-            if (st == p) return 0;
-            return _wtof(path.substr(st, p - st).c_str());
-        };
-        auto skip = [&](size_t& p) { while (p < path.size() && (path[p] == L' ' || path[p] == L',')) ++p; };
-        while (i < path.size()) {
-            skip(i);
-            if (i >= path.size()) break;
-            wchar_t cmd = path[i++];
-            bool rel = iswlower(cmd);
-            wchar_t C = towupper(cmd);
-            if (C == L'M') {
-                double x = num(i) * sx, y = num(i) * sy;
-                if (rel) { x += cx; y += cy; }
-                cx = x; cy = y; sx0 = x; sy0 = y;
-                gp.StartFigure();
-            } else if (C == L'L') {
-                double x = num(i) * sx, y = num(i) * sy;
-                if (rel) { x += cx; y += cy; }
-                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
-                           (REAL)(r.left + x), (REAL)(r.top + y));
-                cx = x; cy = y;
-            } else if (C == L'H') {
-                double x = num(i) * sx;
-                if (rel) x += cx;
-                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
-                           (REAL)(r.left + x), (REAL)(r.top + cy));
-                cx = x;
-            } else if (C == L'V') {
-                double y = num(i) * sy;
-                if (rel) y += cy;
-                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
-                           (REAL)(r.left + cx), (REAL)(r.top + y));
-                cy = y;
-            } else if (C == L'Z') {
-                gp.AddLine((REAL)(r.left + cx), (REAL)(r.top + cy),
-                           (REAL)(r.left + sx0), (REAL)(r.top + sy0));
-                cx = sx0; cy = sy0;
-                gp.CloseFigure();
-            } else if (C == L'A') {
-                double rx = num(i) * sx, ry = num(i) * sy;
-                num(i);                                    // x-axis-rotation
-                double laf = num(i), swf = num(i);
-                double x = num(i) * sx, y = num(i) * sy;
-                if (rel) { x += cx; y += cy; }
-                // 椭圆弧 -> 用 Bezier 近似（4 段）
-                double mx = (cx + x) / 2, my = (cy + y) / 2;
-                double dx = (x - cx) / 2, dy = (y - cy) / 2;
-                gp.AddBezier((REAL)(r.left + cx), (REAL)(r.top + cy),
-                             (REAL)(r.left + mx - dy * 0.5523), (REAL)(r.top + my + dx * 0.5523),
-                             (REAL)(r.left + mx + dy * 0.5523), (REAL)(r.top + my - dx * 0.5523),
-                             (REAL)(r.left + x), (REAL)(r.top + y));
-                cx = x; cy = y;
-                (void)rx; (void)ry; (void)laf; (void)swf;
-            } else {
-                break;   // 不支持的指令，停止
-            }
-        }
-        SolidBrush br(Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
-        g.FillPath(&br, &gp);
-    }
-
     // 官方图标集（几何取自 MaaWpfGui/Res/Styles/Basic/Geometries.xaml）
     // TaskQueueAddTaskIcon：细描边圆圈 + 加号
     void icon_add_task(RECT r, COLORREF c) {
@@ -414,21 +295,6 @@ public:
         int cx = r.left + w / 2, cy = r.top + h / 2, arm = d / 4;
         g.DrawLine(&pen, cx - arm, cy, cx + arm, cy);
         g.DrawLine(&pen, cx, cy - arm, cx, cy + arm);
-    }
-    void icon_link(RECT r, COLORREF c) {
-        draw_icon_path(L"M29.25 6.76a6 6 0 0 0-8.5 0l1.42 1.42a4 4 0 1 1 5.67 5.67l-8 8a4 4 0 1 1-5.67-5.66"
-                       L"l1.41-1.42l-1.41-1.42l-1.42 1.42a6 6 0 0 0 0 8.5A6 6 0 0 0 17 25a6 6 0 0 0 4.27-1.76"
-                       L"l8-8a6 6 0 0 0-.02-8.48z M4.19 24.82a4 4 0 0 1 0-5.67l8-8a4 4 0 0 1 5.67 0A3.94 3.94 0 0 1 19 14"
-                       L"a4 4 0 0 1-1.17 2.85L15.71 19l1.42 1.42l2.12-2.12a6 6 0 0 0-8.51-8.51l-8 8a6 6 0 0 0 0 8.51"
-                       L"A6 6 0 0 0 7 28a6.07 6.07 0 0 0 4.28-1.76l-1.42-1.42a4 4 0 0 1-5.67 0z", r, c);
-    }
-    void icon_unlink(RECT r, COLORREF c) {
-        draw_icon_path(L"M3.584 5.002l1.414-1.415l3.416 3.415L7 8.417z M23.581 24.992l1.415-1.414l3.415 3.416"
-                       L"l-1.415 1.414z M11 2h2v4h-2z M2 11h4v2H2z M26 19h4v2h-4z M19 26h2v4h-2z "
-                       L"M16.58 21.07l-3.71 3.72a4 4 0 1 1-5.66-5.66l3.72-3.72L9.51 14L5.8 17.72a6 6 0 0 0-.06 8.54"
-                       L"A6 6 0 0 0 10 28a6.07 6.07 0 0 0 4.32-1.8L18 22.49z M15.41 10.93l3.72-3.72a4 4 0 1 1 5.66 5.66"
-                       L"l-3.72 3.72L22.49 18l3.71-3.72a6 6 0 0 0 .06-8.54A6 6 0 0 0 22 4a6.07 6.07 0 0 0-4.32 1.8L14 9.51z",
-                       r, c);
     }
     // 任务操作图标（22x22 按钮内 14x14，官方 TaskActionButtonStyle）
     void icon_copy_task(RECT r, COLORREF c) {
@@ -634,8 +500,6 @@ public:
         round_rect({ tx, ty, tx + 4, ty + thumb_h }, RGB(0x42, 0x42, 0x42), CLR_INVALID, 2);
     }
 
-    // 当前滚动偏移（绘制 item 时从 y 中减去）
-    int scroll_offset() const { return scroll_y_ ? (int)*scroll_y_ : 0; }
 
     // 行是否完整落在当前滚动裁剪区内。
     // 列表页原来用「面板底」做 break 阈值，而裁剪区底比面板底高 10px，
@@ -855,46 +719,6 @@ public:
         return changed;
     }
 
-    bool checkbox(const char* id, RECT r, const std::wstring& label, bool& v) {
-        // 复选框区域包含文字
-        bool hov = hovered(r);
-        if (hov) hot_ = id;
-        if (hov && in_.pressed) active_ = id;
-        bool click = false;
-        if (hov && active_ == id && in_.released) {
-            v = !v;
-            click = true;
-        }
-        // 方框与文字在传入矩形内垂直居中（官方 VerticalContentAlignment=Center）
-        int box = 16;
-        int vpad = ((r.bottom - r.top) - box) / 2;
-        if (vpad < 0) vpad = 0;
-        RECT br{ r.left, r.top + vpad, r.left + box, r.top + vpad + box };
-        round_rect(br, v ? theme.primary : RGB(255, 255, 255),
-                   v ? theme.primary : RGB(180, 188, 200), 3);
-        if (v) {
-            // 画勾
-            HPEN p = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-            HGDIOBJ old = SelectObject(dc_, p);
-            MoveToEx(dc_, br.left + 3, br.top + 8, nullptr);
-            LineTo(dc_, br.left + 6, br.top + 12);
-            LineTo(dc_, br.left + 13, br.top + 4);
-            SelectObject(dc_, old);
-            DeleteObject(p);
-        }
-        // 标签同样要裁进复选框区域：任务名 + 描述可能很长，
-        // 不裁的话会一直画到右侧「▶ 立即运行 / ⚙」按钮底下，看起来就是被截断。
-        RECT lr{ r.left + box + 8, r.top, r.right, r.bottom };
-        int avail = lr.right - lr.left;
-        HFONT f = font;
-        std::wstring lbl = label;
-        fit_label(label, avail, f, lbl);
-        SIZE sz = text_size(lbl, f);
-        push_clip(lr);
-        text(lr.left, r.top + ((r.bottom - r.top) - sz.cy) / 2, lbl, theme.text, f);
-        pop_clip();
-        return click;
-    }
 
     void text_input(const char* id, RECT r, std::string& value, const wchar_t* hint = nullptr,
                     int align = 0) {
@@ -1054,7 +878,6 @@ public:
             }
         }
     }
-    RECT clip() const { return clip_; }
 
     // ------------------------------------------------------------ 渲染目标
     // 切换亮/暗主题（官方界面主题设置；影响所有控件配色）

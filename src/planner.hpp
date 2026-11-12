@@ -3,7 +3,6 @@
 #include <string>
 #include <vector>
 #include <utility>
-#include <mutex>
 #include <windows.h>
 #include <winhttp.h>
 

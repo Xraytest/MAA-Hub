@@ -27,7 +27,6 @@
 
 using namespace hub;
 
-static int g_port_override = 0;   // 保留参数兼容（GUI 模式忽略）
 
 static mj::Value load_config(const std::string& path) {
     std::string content;
@@ -704,7 +703,7 @@ int main(int argc, char** argv) {
             i = argc;
         }
         else if (a == "--config" && i + 1 < argc) config_path = argv[++i];
-        else if (a == "--port" && i + 1 < argc) g_port_override = atoi(argv[++i]);
+        else if (a == "--port" && i + 1 < argc) ++i;   // 兼容旧参数：仅吞掉端口值（GUI 模式忽略）
         else if (a == "--core-version" && i + 2 < argc) {
             return core_version_mode(argv[i + 1], argv[i + 2]);
         } else if (a == "--import-core" && i + 2 < argc) {
