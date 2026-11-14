@@ -144,6 +144,21 @@ inline bool find_window(const std::string& class_regex, const std::string& title
     return ctx.found;
 }
 
+// 把窗口客户区校正成指定尺寸。
+// 游戏按 1280x720 渲染时 pipeline 模板才匹配；窗口被拉伸成 1280x768 这类
+// 非 16:9 尺寸后，UI 图标相对模板缩放，识别会静默失败（表现为任务空转）。
+inline bool fit_client_size(HWND hwnd, int want_w, int want_h) {
+    RECT wr{}, cr{};
+    if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return false;
+    const int cur_w = cr.right - cr.left;
+    const int cur_h = cr.bottom - cr.top;
+    if (cur_w == want_w && cur_h == want_h) return true;
+    const int frame_w = (wr.right - wr.left) - cur_w;
+    const int frame_h = (wr.bottom - wr.top) - cur_h;
+    return SetWindowPos(hwnd, nullptr, 0, 0, want_w + frame_w, want_h + frame_h,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
+}
+
 // ---------------- 进程启动 ----------------
 // 所有子进程挂进同一个 Job：父进程一退出（正常退出或崩溃）系统连带结束它们。
 // 之前 worker 会变成孤儿：既继续占着设备/ADB，也牵着父进程的 stdout 管道不放。

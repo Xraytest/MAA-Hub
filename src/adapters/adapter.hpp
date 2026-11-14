@@ -69,6 +69,14 @@ public:
         return false;
     }
 
+    // 任务前置准备。MaaEnd 的 pretask（LaunchGamePC 等）由 agent 子进程完成，
+    // 不是 pipeline 节点，直接 post 给 tasker 会秒失败；这一步负责把设备带到
+    // 可执行任务的现场。返回 false 只记录，不阻断整串任务。
+    virtual bool prepare(const mj::Value& params, std::string& err) {
+        (void)params; (void)err;
+        return true;
+    }
+
     // 取出并清空事件队列（worker 循环调用）
     virtual std::vector<AdapterEvent> drain_events() = 0;
 

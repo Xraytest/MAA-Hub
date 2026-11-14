@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1135,6 +1136,7 @@ private:
     void exec_worker(Plan plan) {
         std::string status = "done";
         std::string fail_reason;
+        std::set<std::string> prepared;   // 每个执行器整串只准备一次
         for (auto& step : plan.steps) {
             if (stop_flag_ || stopping_) {
                 status = "stopped";
@@ -1155,12 +1157,20 @@ private:
                     }
                 }
             }
+            // MaaEnd 的 pretask（LaunchGamePC 等）要在第一段任务前跑：游戏没起来就拉起，
+            // 已在跑则适配器内部直接跳过。失败只记 trace，不阻断整串（窗口可能本来就在）。
+            if (prepared.insert(step.exec_id).second) {
+                mj::Value pr;
+                if (!w->call("prepare", mj::Value::object(), 360000, pr)) {
+                    std::string why = pr.get_str("error", "");
+                    util::trace("[prep] " + step.exec_id + " skipped " + why);
+                }
+            }
             int64_t tid = run_on_executor(step.exec_id, step.task, step.params);
             if (tid <= 0) {
                 status = "failed";
                 break;
-            }
-            ExecutorEntry e;
+            }            ExecutorEntry e;
             if (get_executor(step.exec_id, e) && !e.account_id.empty()
                 && (step.task == "Award" || step.task == "DailyRewards")) {
                 accounts_->mark_daily_done(e.account_id);

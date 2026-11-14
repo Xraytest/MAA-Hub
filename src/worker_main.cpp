@@ -123,9 +123,16 @@ int worker_main(const std::string& kind, const mj::Value& cfg) {
                 r.set("task_id", tid);
                 r.set("app", status_to_json(adapter->status(), cfg));
                 reply(ok, std::move(r));
+            } else if (cmd == "prepare") {
+                // MaaEnd 的 pretask（LaunchGamePC 等）可能跑几分钟：拉起启动器、等游戏起来
+                std::string err;
+                bool ok = adapter->prepare(req["params"], err);
+                mj::Value r = mj::Value::object();
+                if (!ok) r.set("error", err);
+                r.set("app", status_to_json(adapter->status(), cfg));
+                reply(ok, std::move(r));
             } else if (cmd == "stop") {
-                reply(adapter->stop(), status_to_json(adapter->status(), cfg));
-            } else if (cmd == "status") {
+                reply(adapter->stop(), status_to_json(adapter->status(), cfg));            } else if (cmd == "status") {
                 reply(true, status_to_json(adapter->status(), cfg));
             } else if (cmd == "is_connected") {
                 reply(adapter->is_connected(), mj::Value::object());

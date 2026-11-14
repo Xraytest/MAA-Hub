@@ -342,6 +342,34 @@ public:
         }
         all_opts_ = all_opts;
         routes_.clear();
+        pretasks_.clear();
+        // pretask 单独建表：它是 agent 子进程（exec + args），不是 pipeline 节点。
+        // 以前按普通任务投给 MaaTaskerPostTask，LaunchGamePC 会在 4s 内直接 failed。
+        for (auto& d : docs) {
+            auto* pt = d.second.find("pretask");
+            if (!pt) continue;
+            std::vector<const mj::Value*> items;
+            if (pt->is_array())
+                for (auto& e : pt->items()) items.push_back(&e);
+            else if (pt->is_object())
+                items.push_back(pt);
+            for (const mj::Value* e : items) {
+                const std::string nm = e->get_str("name", "");
+                if (nm.empty() || pretasks_.count(nm)) continue;
+                PreTask p;
+                p.exec = e->get_str("exec", "");
+                if (p.exec.empty()) continue;
+                if (auto* a = e->find("args"); a && a->is_array())
+                    for (auto& x : a->items()) p.args.push_back(x.as_string());
+                if (auto* c = e->find("controller"); c && c->is_array())
+                    for (auto& x : c->items()) p.controllers.push_back(x.as_string());
+                if (auto* o = e->find("option"); o && o->is_array())
+                    for (auto& x : o->items()) if (x.is_string()) p.opts.push_back(x.as_string());
+                // 只建表不进 catalog：pretask 是序列自动执行的准备步骤，
+                // 不是可勾选任务；塞进列表会让 devices/tasks 的任务数虚高。
+                pretasks_[nm] = p;
+            }
+        }
 
         std::vector<std::string> seen;
         for (auto& d : docs) {
@@ -412,6 +440,15 @@ public:
         std::string entry;
         std::vector<std::string> opts;
         mj::Value base = mj::Value::object();
+    };
+
+    // pretask：interface 里 exec + args 描述的 agent 子进程步骤（如 LaunchGamePC）。
+    // 它不是 pipeline 节点，投给 MaaTaskerPostTask 只会秒失败。
+    struct PreTask {
+        std::string exec;                    // 相对 install_dir，如 agent/go-service
+        std::vector<std::string> args;       // 如 --pretask LaunchGamePC
+        std::vector<std::string> controllers;
+        std::vector<std::string> opts;
     };
 
     static std::string scalar_text(const mj::Value& v) {
@@ -895,6 +932,19 @@ public:
             st_.last_error = "game window not found (class=" + cls + ", title~/" + title + "/). 请先启动终末地客户端。";
             return false;
         }
+        // 客户区必须与 pipeline 基准尺寸一致。游戏被拉成 1280x768 这类非 16:9
+        // 尺寸后，UI 图标相对模板整体缩放，模板匹配会静默失败——DailyRewards
+        // 就是在这里空转的（WorldMenu 图标在 ROI 内却匹配不上）。
+        std::string fit = cfg_.get_path_str("connect.fit_window", "1280x720");
+        if (fit != "off" && fit != "none") {
+            const size_t xp = fit.find('x');
+            const int fw = atoi(fit.c_str());
+            const int fh = xp == std::string::npos ? 0 : atoi(fit.c_str() + xp + 1);
+            if (fw > 0 && fh > 0 && util::fit_client_size(wi.hwnd, fw, fh)) {
+                util::trace("maaend fit client=" + std::to_string(fw) + "x" + std::to_string(fh));
+                Sleep(500);   // 让渲染尺寸跟上，否则首帧仍是旧尺寸
+            }
+        }
         uint64_t sc = method_value(cfg_, "connect.screencap_method", 32, screencap_names());
         uint64_t mm = method_value(cfg_, "connect.mouse_method", 1, input_names());
         uint64_t km = method_value(cfg_, "connect.keyboard_method", 1, input_names());
@@ -984,7 +1034,76 @@ public:
         return true;
     }
 
+    // pretask 走 CreateProcess：agent 子进程自己去拉启动器/进游戏，退出码 0 才算成功。
+    // 它不接受 pipeline override，所以不能混进 tasker 的任务队列。
+    bool run_pretask(const std::string& name, std::string& err) {
+        auto it = pretasks_.find(name);
+        if (it == pretasks_.end()) { err = "unknown pretask " + name; return false; }
+        const PreTask& p = it->second;
+        std::string exe = st_.install_dir + "\\" + p.exec;
+        std::replace(exe.begin(), exe.end(), '/', '\\');
+        if (exe.size() < 4 || exe.substr(exe.size() - 4) != ".exe") exe += ".exe";
+        std::string cmd = "\"" + exe + "\"";
+        for (const auto& a : p.args)
+            cmd += (a.find(' ') == std::string::npos) ? (" " + a) : (" \"" + a + "\"");
+        util::trace("maaend pretask " + name + " cmd=" + cmd);
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi{};
+        std::wstring wcmd = util::utf8_to_wide(cmd);
+        std::vector<wchar_t> buf(wcmd.begin(), wcmd.end());
+        buf.push_back(L'\0');
+        std::wstring wdir = util::utf8_to_wide(st_.install_dir);
+        if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                            nullptr, wdir.c_str(), &si, &pi)) {
+            err = "CreateProcess pretask failed err=" + std::to_string(GetLastError());
+            return false;
+        }
+        const double t0 = util::now_sec();
+        const DWORD w = WaitForSingleObject(pi.hProcess, 300000);
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        util::trace("maaend pretask " + name + " wait=" + std::to_string((int)w)
+                    + " code=" + std::to_string((int)code)
+                    + " sec=" + std::to_string((int)(util::now_sec() - t0)));
+        if (w != WAIT_OBJECT_0) { err = "pretask timeout"; return false; }
+        if (code != 0) { err = "pretask exit=" + std::to_string((int)code); return false; }
+        return true;
+    }
+
+    // 任务序列的第一段：游戏没起来才按 pretask 拉起。
+    // 语义是"确保可执行现场"，游戏已在跑就跳过，不做无谓重启。
+    bool prepare(const mj::Value& params, std::string& err) override {
+        (void)params;
+        std::string want = cfg_.get_path_str("pretask.name", "LaunchGamePC");
+        if (want.empty() || want == "off" || want == "none") return true;
+        if (!pretasks_.count(want)) { err = "pretask 未定义：" + want; return false; }
+        std::string cls = cfg_.get_str("game_window_class", "UnityWndClass");
+        std::string title = cfg_.get_str("game_window_title_regex", "Endfield");
+        util::WindowInfo wi;
+        if (util::find_window(cls, title, wi)) {
+            util::trace("maaend prepare skip: game window already present");
+            return true;
+        }
+        util::trace("maaend prepare: game window missing -> " + want);
+        return run_pretask(want, err);
+    }
+
     bool run_task(const std::string& task, const mj::Value& params, int64_t& out) override {
+        // pretask 名直接投进来时同样走子进程，避免"任务链里选了 LaunchGamePC 就必失败"
+        if (pretasks_.count(task)) {
+            std::string err;
+            const bool ok = run_pretask(task, err);
+            st_.run = ok ? "idle" : "failed";
+            st_.last_error = ok ? std::string() : (task + ": " + err);
+            if (ok) out = 1;
+            return ok;
+        }
         out = 0;
         if (!tasker_) { st_.last_error = "not loaded"; return false; }
         if (!is_connected()) { st_.last_error = "not connected"; return false; }
@@ -1231,6 +1350,7 @@ private:
     std::vector<mj::Value> catalog_;
     mj::Value all_opts_ = mj::Value::object();          // 合并后的 option 定义表
     std::map<std::string, TaskRoute> routes_;           // 任务名 → entry 节点 + 默认 override
+    std::map<std::string, PreTask> pretasks_;           // pretask 名 → agent 子进程调用方式
 
 public:
     static MaaEndAdapter* g_instance;
