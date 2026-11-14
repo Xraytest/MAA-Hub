@@ -156,21 +156,21 @@ public:
 
     bool get(const std::string& id, CoreInfo& out) const {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& c : cores_) {
-            if (c.id == id) { out = c; return true; }
-        }
+        auto it = std::find_if(cores_.begin(), cores_.end(), [&](const CoreInfo& c) { return c.id == id; });
+        if (it != cores_.end()) { out = *it; return true; }
         return false;
     }
 
     CoreInfo default_core(const std::string& kind) const {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& c : cores_) {
-            if (c.kind == kind && c.is_default) return c;
-        }
-        for (auto& c : cores_) {
-            if (c.kind == kind) return c;
-        }
-        return CoreInfo{};
+        auto it = std::find_if(cores_.begin(), cores_.end(), [&](const CoreInfo& c) {
+            return c.kind == kind && c.is_default;
+        });
+        if (it != cores_.end()) return *it;
+        it = std::find_if(cores_.begin(), cores_.end(), [&](const CoreInfo& c) {
+            return c.kind == kind;
+        });
+        return it != cores_.end() ? *it : CoreInfo{};
     }
 
     // ---------------------------------------------------------------- 导入（一次性迁移）
@@ -183,11 +183,8 @@ public:
         // 目标已存在则加后缀
         {
             std::lock_guard<std::mutex> lk(mtx_);
-            for (auto& x : cores_) {
-                if (x.path == dest) {
-                    dest = cores_root_ + "\\" + kind + "-" + version + "-" + util::random_hex(4);
-                    break;
-                }
+            if (std::any_of(cores_.begin(), cores_.end(), [&](const CoreInfo& x) { return x.path == dest; })) {
+                dest = cores_root_ + "\\" + kind + "-" + version + "-" + util::random_hex(4);
             }
         }
         if (!copy_tree(src_path, dest)) return "";
@@ -201,10 +198,9 @@ public:
         c.version = version;
         {
             std::lock_guard<std::mutex> lk(mtx_);
-            bool has_default = false;
-            for (auto& x : cores_) {
-                if (x.kind == kind && x.is_default) has_default = true;
-            }
+            bool has_default = std::any_of(cores_.begin(), cores_.end(), [&](const CoreInfo& x) {
+                return x.kind == kind && x.is_default;
+            });
             c.is_default = !has_default;
             cores_.push_back(c);
         }
@@ -214,29 +210,24 @@ public:
 
     bool remove(const std::string& id) {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto it = cores_.begin(); it != cores_.end(); ++it) {
-            if (it->id != id) continue;
-            std::string kind = it->kind;
-            bool was_default = it->is_default;
-            cores_.erase(it);
-            if (was_default) {
-                for (auto& x : cores_) {
-                    if (x.kind == kind) { x.is_default = true; break; }
-                }
-            }
-            save();
-            return true;
+        auto it = std::find_if(cores_.begin(), cores_.end(), [&](const CoreInfo& c) { return c.id == id; });
+        if (it == cores_.end()) return false;
+        std::string kind = it->kind;
+        bool was_default = it->is_default;
+        cores_.erase(it);
+        if (was_default) {
+            auto def_it = std::find_if(cores_.begin(), cores_.end(), [&](const CoreInfo& x) { return x.kind == kind; });
+            if (def_it != cores_.end()) def_it->is_default = true;
         }
-        return false;
+        save();
+        return true;
     }
 
     bool set_default(const std::string& id) {
         std::lock_guard<std::mutex> lk(mtx_);
-        std::string kind;
-        for (auto& c : cores_) {
-            if (c.id == id) kind = c.kind;
-        }
-        if (kind.empty()) return false;
+        auto it = std::find_if(cores_.begin(), cores_.end(), [&](const CoreInfo& c) { return c.id == id; });
+        if (it == cores_.end()) return false;
+        std::string kind = it->kind;
         for (auto& c : cores_) {
             if (c.kind == kind) c.is_default = (c.id == id);
         }
@@ -551,12 +542,12 @@ public:
         std::string reuse_id;
         {
             std::lock_guard<std::mutex> lk(self.mtx_);
-            for (auto& x : self.cores_) {
-                if (x.kind != kind) continue;
-                bool same = (!release_tag.empty() && x.release_tag == release_tag)
-                         || (!version.empty() && x.version == version);
-                if (same) { reuse_id = x.id; break; }
-            }
+            auto it = std::find_if(self.cores_.begin(), self.cores_.end(), [&](const CoreInfo& x) {
+                if (x.kind != kind) return false;
+                return (!release_tag.empty() && x.release_tag == release_tag)
+                    || (!version.empty() && x.version == version);
+            });
+            if (it != self.cores_.end()) reuse_id = it->id;
         }
         if (!reuse_id.empty()) {
             // 回填 release_tag：MaaEnd 的 release tag(v3.0.0) 与包内 interface.json
@@ -565,9 +556,10 @@ public:
             if (!release_tag.empty()) {
                 {
                     std::lock_guard<std::mutex> lk(self.mtx_);
-                    for (auto& x : self.cores_) {
-                        if (x.id == reuse_id) { x.release_tag = release_tag; break; }
-                    }
+                    auto it = std::find_if(self.cores_.begin(), self.cores_.end(), [&](const CoreInfo& x) {
+                        return x.id == reuse_id;
+                    });
+                    if (it != self.cores_.end()) it->release_tag = release_tag;
                 }
                 self.save();
             }
@@ -583,12 +575,9 @@ public:
                            + (version.empty() ? "unknown" : version);
         {
             std::lock_guard<std::mutex> lk(self.mtx_);
-            for (auto& x : self.cores_) {
-                if (x.path == dest) {
-                    dest = self.cores_root_ + "\\" + kind + "-"
-                           + (version.empty() ? "unknown" : version) + "-" + util::random_hex(4);
-                    break;
-                }
+            if (std::any_of(self.cores_.begin(), self.cores_.end(), [&](const CoreInfo& x) { return x.path == dest; })) {
+                dest = self.cores_root_ + "\\" + kind + "-"
+                       + (version.empty() ? "unknown" : version) + "-" + util::random_hex(4);
             }
         }
         // 先清理可能残留的同名目标
@@ -775,10 +764,9 @@ private:
             c.name = std::string(kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + " " + c.version;
             c.source = "download";
             c.created_at = util::now_sec();
-            bool has_same_kind = false;
-            for (auto& x : cores_) {
-                if (x.kind == kind) has_same_kind = true;
-            }
+            bool has_same_kind = std::any_of(cores_.begin(), cores_.end(), [&](const CoreInfo& x) {
+                return x.kind == kind;
+            });
             c.is_default = !has_same_kind;
             cores_.push_back(c);
         }

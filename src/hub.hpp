@@ -790,7 +790,8 @@ public:
         std::string status = "done";
         {
             std::lock_guard<std::mutex> lk(plans_mtx_);
-            for (auto& p : plans_) if (p.id == plan.id) { status = p.status; break; }
+            auto it = std::find_if(plans_.begin(), plans_.end(), [&](const Plan& p) { return p.id == plan.id; });
+            if (it != plans_.end()) status = it->status;
         }
         return status;
     }
@@ -940,17 +941,13 @@ public:
         Plan plan;
         {
             std::lock_guard<std::mutex> lk(plans_mtx_);
-            for (auto& p : plans_) {
-                if (p.id == plan_id) { plan = p; break; }
+            auto it = std::find_if(plans_.begin(), plans_.end(), [&](const Plan& p) { return p.id == plan_id; });
+            if (it != plans_.end()) {
+                plan = *it;
+                it->status = "confirmed";
             }
         }
         if (plan.id.empty()) return false;
-        {
-            std::lock_guard<std::mutex> lk(plans_mtx_);
-            for (auto& p : plans_) {
-                if (p.id == plan_id) p.status = "confirmed";
-            }
-        }
         stop_flag_ = false;
         exec_thread_ = std::thread([this, plan] { exec_worker(plan); });
         return true;
@@ -973,8 +970,10 @@ public:
                             const std::string& error = std::string()) {
         {
             std::lock_guard<std::mutex> lk(plans_mtx_);
-            for (auto& p : plans_) {
-                if (p.id == id) { p.status = status; p.error = error; break; }
+            auto it = std::find_if(plans_.begin(), plans_.end(), [&](const Plan& p) { return p.id == id; });
+            if (it != plans_.end()) {
+                it->status = status;
+                it->error = error;
             }
         }
         schedule_save();

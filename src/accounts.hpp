@@ -1,5 +1,6 @@
 // 多账号管理（与 Python 版 accounts.py 行为一致）
 #pragma once
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -81,9 +82,8 @@ public:
 
     bool get(const std::string& id, Account& out) const {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& a : accounts_) {
-            if (a.id == id) { out = a; return true; }
-        }
+        auto it = std::find_if(accounts_.begin(), accounts_.end(), [&](const Account& a) { return a.id == id; });
+        if (it != accounts_.end()) { out = *it; return true; }
         return false;
     }
 
@@ -103,10 +103,9 @@ public:
             std::lock_guard<std::mutex> lk(mtx_);
             accounts_.push_back(a);
             // 该游戏没有有效当前账号时，首个账号自动设为当前
-            bool exists = false;
-            for (auto& x : accounts_) {
-                if (x.id == active_[game]) { exists = true; break; }
-            }
+            bool exists = std::any_of(accounts_.begin(), accounts_.end(), [&](const Account& x) {
+                return x.id == active_[game];
+            });
             if (!exists) active_[game] = a.id;
         }
         save();
@@ -115,45 +114,44 @@ public:
 
     bool update(const std::string& id, const mj::Value& patch) {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& a : accounts_) {
-            if (a.id != id) continue;
-            if (patch.has("label")) a.label = patch.get_str("label", a.label);
-            if (patch.has("identifier")) a.identifier = patch.get_str("identifier", a.identifier);
-            if (patch.has("match_mode")) a.match_mode = patch.get_str("match_mode", a.match_mode);
-            if (patch.has("server")) a.server = patch.get_str("server", a.server);
-            if (patch.has("enabled")) a.enabled = patch.get_bool("enabled", a.enabled);
-            if (patch.has("notes")) a.notes = patch.get_str("notes", a.notes);
-            save();
-            return true;
-        }
-        return false;
+        auto it = std::find_if(accounts_.begin(), accounts_.end(), [&](const Account& a) { return a.id == id; });
+        if (it == accounts_.end()) return false;
+        Account& a = *it;
+        if (patch.has("label")) a.label = patch.get_str("label", a.label);
+        if (patch.has("identifier")) a.identifier = patch.get_str("identifier", a.identifier);
+        if (patch.has("match_mode")) a.match_mode = patch.get_str("match_mode", a.match_mode);
+        if (patch.has("server")) a.server = patch.get_str("server", a.server);
+        if (patch.has("enabled")) a.enabled = patch.get_bool("enabled", a.enabled);
+        if (patch.has("notes")) a.notes = patch.get_str("notes", a.notes);
+        save();
+        return true;
     }
 
     bool remove(const std::string& id) {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto it = accounts_.begin(); it != accounts_.end(); ++it) {
-            if (it->id != id) continue;
-            std::string game = it->game;
-            accounts_.erase(it);
-            if (active_[game] == id) {
-                active_[game] = "";
-                for (auto& x : accounts_) {
-                    if (x.game == game && x.enabled) { active_[game] = x.id; break; }
-                }
-            }
-            save();
-            return true;
+        auto it = std::find_if(accounts_.begin(), accounts_.end(), [&](const Account& a) { return a.id == id; });
+        if (it == accounts_.end()) return false;
+        std::string game = it->game;
+        accounts_.erase(it);
+        if (active_[game] == id) {
+            active_[game] = "";
+            auto next_it = std::find_if(accounts_.begin(), accounts_.end(), [&](const Account& x) {
+                return x.game == game && x.enabled;
+            });
+            if (next_it != accounts_.end()) active_[game] = next_it->id;
         }
-        return false;
+        save();
+        return true;
     }
 
     bool active(const std::string& game, Account& out) const {
         std::lock_guard<std::mutex> lk(mtx_);
         auto it = active_.find(game);
         if (it == active_.end() || it->second.empty()) return false;
-        for (auto& a : accounts_) {
-            if (a.id == it->second) { out = a; return true; }
-        }
+        auto acc_it = std::find_if(accounts_.begin(), accounts_.end(), [&](const Account& a) {
+            return a.id == it->second;
+        });
+        if (acc_it != accounts_.end()) { out = *acc_it; return true; }
         return false;
     }
 
@@ -168,24 +166,22 @@ public:
 
     void mark_run(const std::string& id, const std::string& error = "") {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& a : accounts_) {
-            if (a.id != id) continue;
-            a.last_run_at = util::now_sec();
-            a.total_runs++;
-            a.last_error = error;
-            break;
+        auto it = std::find_if(accounts_.begin(), accounts_.end(), [&](const Account& a) { return a.id == id; });
+        if (it != accounts_.end()) {
+            it->last_run_at = util::now_sec();
+            it->total_runs++;
+            it->last_error = error;
+            save();
         }
-        save();
     }
 
     void mark_daily_done(const std::string& id, const std::string& date = "") {
         std::lock_guard<std::mutex> lk(mtx_);
-        for (auto& a : accounts_) {
-            if (a.id != id) continue;
-            a.daily_done_date = date.empty() ? util::today_str() : date;
-            break;
+        auto it = std::find_if(accounts_.begin(), accounts_.end(), [&](const Account& a) { return a.id == id; });
+        if (it != accounts_.end()) {
+            it->daily_done_date = date.empty() ? util::today_str() : date;
+            save();
         }
-        save();
     }
 
     // 账号注入：MAA StartUp.account_name / MaaEnd AccountSwitch.pipeline_override
