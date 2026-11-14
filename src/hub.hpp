@@ -458,8 +458,9 @@ public:
                     ct = v->as_string();
                 }
             }
-            bool known = false;
-            for (auto* k : kClients) if (ct == k) { known = true; break; }
+            bool known = std::any_of(std::begin(kClients), std::end(kClients), [&](const char* k) {
+                return ct == k;
+            });
             if (!known) ct = "Official";
             out.set("client_type", ct);
         }
@@ -473,16 +474,18 @@ public:
                                    const mj::Value& in) {
         mj::Value out = in.is_object() ? in : mj::Value::object();
         if (!catalog.is_array()) return out;
-        for (auto& t : catalog.items()) {
-            if (t.get_str("name", "") != task) continue;
-            auto* ps = t.find("params");
-            if (!ps || !ps->is_array()) return out;
-            for (auto& p : ps->items()) {
-                std::string key = p.get_str("name", "");
-                if (key.empty() || out.has(key) || !p.has("default")) continue;
-                out.set(key, p["default"]);
+        auto it = std::find_if(catalog.items().begin(), catalog.items().end(), [&](const mj::Value& t) {
+            return t.get_str("name", "") == task;
+        });
+        if (it != catalog.items().end()) {
+            auto* ps = it->find("params");
+            if (ps && ps->is_array()) {
+                for (auto& p : ps->items()) {
+                    std::string key = p.get_str("name", "");
+                    if (key.empty() || out.has(key) || !p.has("default")) continue;
+                    out.set(key, p["default"]);
+                }
             }
-            return out;
         }
         return out;
     }
@@ -749,12 +752,10 @@ public:
         }
         if (kind == "maaend") {
             const std::string last = "CloseGamePC";
-            for (size_t i = 0; i < tasks.size(); ++i) {
-                if (tasks[i] == last && i < tasks.size() - 1) {  // 存在且不在末位 -> 移到末尾
-                    tasks.erase(tasks.begin() + i);
-                    tasks.push_back(last);
-                    break;
-                }
+            auto it = std::find(tasks.begin(), tasks.end(), last);
+            if (it != tasks.end() && it != tasks.end() - 1) {  // 存在且不在末位 -> 移到末尾
+                tasks.erase(it);
+                tasks.push_back(last);
             }
         }
         return tasks;
@@ -1063,11 +1064,12 @@ public:
     // 为每个已安装核心类型创建默认执行器（无核心时不创建，由 UI 引导拉取）
     void ensure_default_executors() {
         std::vector<ExecutorEntry> existing = executors();
-        bool has_maa = false, has_end = false;
-        for (auto& e : existing) {
-            if (e.kind == "maa") has_maa = true;
-            if (e.kind == "maaend") has_end = true;
-        }
+        bool has_maa = std::any_of(existing.begin(), existing.end(), [](const ExecutorEntry& e) {
+            return e.kind == "maa";
+        });
+        bool has_end = std::any_of(existing.begin(), existing.end(), [](const ExecutorEntry& e) {
+            return e.kind == "maaend";
+        });
         if (!has_maa && !cores_->default_core("maa").id.empty()) {
             create_executor("maa", "MAA 默认实例");
         }
@@ -1205,9 +1207,9 @@ private:
         // 这里按 steps 涉及的执行器统一收尾，调度器 tick 才能靠 running_task_of
         // 判断"忙"，否则上一串跑完后 executor 会被永久视作忙。
         for (size_t i = 0; i < plan.steps.size(); ++i) {
-            bool last = true;
-            for (size_t j = i + 1; j < plan.steps.size(); ++j)
-                if (plan.steps[j].exec_id == plan.steps[i].exec_id) { last = false; break; }
+            bool last = std::none_of(plan.steps.begin() + i + 1, plan.steps.end(), [&](const PlanStep& next) {
+                return next.exec_id == plan.steps[i].exec_id;
+            });
             if (last) set_running_task(plan.steps[i].exec_id, "");
         }
     }
