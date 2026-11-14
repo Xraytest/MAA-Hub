@@ -452,6 +452,34 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 
 **部署（13:15:00 完成）**：六阶段全过 —— A 前置校验（live `1,453,056 B / 222D6326…`、新件 `1,453,568 B / BFD93D09…`）→ B 备份 `_r21scratch\backup\MaaHub-1453056-20261114-131453.exe`（sha 校验通过）→ C 停 7 进程 `REMAINING=0` → D 安装后二次 sha → E 拉起 `rc=0 pid=255012` → F 复核 **`PROCS=7`、`STATE_JSON=9`、trace 1,001,302 B@13:15:00**、6 条 `spawn_worker load_ok=1`。
 
+## 二·补16 r22（13:18–13:21）：`main.cpp` CLI 匹配与自检逻辑标准算法重构（`std::find_if` / `std::all_of`）
+
+紧接 r20/r21，本轮针对 CLI 顶层入口 `src/main.cpp` 中的执行器匹配逻辑与两处自检判断进行了现代标准算法简洁化重构：
+
+1. **`run_cli` 中的 `resolve` 查找闭包**：
+   - 原代码使用手写 `for (auto& e : execs) if (e.id == key) return e.id;`，随后的前缀/标签模糊匹配也是手写 `for` 循环并在循环内部多次判断 `if (hits.empty()) hits = e.id;`；
+   - 重构为：精确匹配改用 `std::find_if`；模糊匹配改用单次 `std::find_if` 并将 `kind == key || rfind == 0 || find(key) != npos` 统一成单条自说明谓词，消灭局部 `hits` 变量与重复条件跳转。
+2. **`set-connect` 执行器回显查找**：
+   - 原先更新完连接参数后通过 `for (auto& e : execs2) if (e.id == id) ...` 遍历打印；
+   - 重构为使用 `std::find_if` 查找对应条目并格式化输出，未找到时平稳退出。
+3. **`--check` 自检模式检查项收敛**：
+   - 提取 `all_ver_ok` 变量并在遍历执行器时明确累积版本检查状态，最终 `ok = !execs.empty() && all_ver_ok;` 判定清晰。
+4. **`--self-test` 自检模式（全部执行器核心加载判断）**：
+   - 原代码在 `for (auto& e : execs)` 中判断 `if (st.get_str("version", "").empty()) all_loaded = false;`；
+   - 重构为标准的集合谓词 `std::all_of`，直接表达「是否所有执行器的版本均非空」，消除手动循环与布尔状态跟踪。
+5. **依赖补齐**：
+   - `src/main.cpp` 显式 `#include <algorithm>`。
+
+| 门 | 结果（门 2/3/4 全部在远端 WorkCenter 执行；本机只编译与文本比对） |
+|---|---|
+| 门1 编译 | `build.bat release` **EXIT=0、0 error、13 warning**（`C4996×6 + C4244×7`）；exe 1,454,080 B / SHA256 `0737F21A…` |
+| 门2 探针 | `probe_norm.exe` 输出 **1315 B 无 BOM，与所有前序接受体逐字节 IDENTICAL**（md5 `3E1D010EB1BF183798FBCE4EC448F275`） |
+| 门3 导入 | 三配置独立沙箱 maa1/maa3/maa5 各 `exit=0`、`entries=6` ⇒ `TOTAL=18`；18 条载荷与 r21 全等 `DIFF=0` |
+| 门4 差分（形态 B） | 旧 = 部署中的 r21（1,453,568 B / `BFD93D09…`）vs 新 = r22（1,454,080 B / `0737F21A…`），**7 例全部 `SAME=True`、`MISMATCHES=0`**；运行后进程保持 7 个，live 服务平稳 |
+| 体积与行数 | 源码 13,982 行；exe 1,454,080 B（微增 512 B，符合用户不以体积为首要目标的原则） |
+
+**部署（13:20:01 完成）**：六阶段全过 —— A 前置校验（live `1,453,568 B / BFD93D09…`、新件 `1,454,080 B / 0737F21A…`）→ B 备份 `_r22scratch\backup\MaaHub-1453568-20261114-131954.exe`（sha 校验通过）→ C 停 7 进程 `REMAINING=0` → D 安装后二次 sha → E 拉起 `rc=0 pid=281776` → F 复核 **`PROCS=7`、`STATE_JSON=9`、trace 1,004,194 B@13:20:01**、6 条 `spawn_worker load_ok=1`。
+
 ## 三、纪律性排除（明确决定不改的，及理由）
 
 | 项 | 位置 | 不改理由 |
@@ -549,6 +577,8 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 | **r19 门控证据（远端）** | `evidence\r19-g2-probe.txt`（1,315 B 无 BOM，md5 `3E1D010E…`） / `evidence\r19-gate3.txt`（15,194 B，`TOTAL=18`，载荷与 r18 `DIFF=0`） / `evidence\r19-gate4.txt`（10,592 B，`OLD_EXE=1463296` vs `NEW_EXE=1455104`，7 例 `SAME=True`） / `evidence\r19-swap.txt`（5,097 B，六阶段全过） | r19 四门：门1 EXIT=0 / 0 err / 13 warn（改开关未动警告集）；门2 逐字节 IDENTICAL；门3 十八条全等；门4 形态 B 七例零 mismatch |
 | **r20 门控证据（远端）** | `evidence\r20-g2-probe.txt`（1,315 B 无 BOM，md5 `3E1D010E…`） / `evidence\r20-gate3.txt`（15,194 B，`TOTAL=18`，载荷与 r19 `DIFF=0`） / `evidence\r20-gate4.txt`（10,652 B，`OLD_EXE=1455104` vs `NEW_EXE=1453056`，7 例 `SAME=True`） / `evidence\r20-swap.txt`（5,099 B，六阶段全过） | r20 四门：门1 EXIT=0 / 0 err / 13 warn；门2 逐字节 IDENTICAL；门3 十八条全等；门4 形态 B 七例零 mismatch |
 | **r21 门控证据（远端）** | `evidence\r21-g2-probe.txt`（1,315 B 无 BOM，md5 `3E1D010E…`） / `evidence\r21-gate3.txt`（15,194 B，`TOTAL=18`，载荷与 r20 `DIFF=0`） / `evidence\r21-gate4.txt`（10,652 B，`OLD_EXE=1453056` vs `NEW_EXE=1453568`，7 例 `SAME=True`） / `evidence\r21-swap.txt`（5,103 B，六阶段全过） | r21 四门：门1 EXIT=0 / 0 err / 13 warn；门2 逐字节 IDENTICAL；门3 十八条全等；门4 形态 B 七例零 mismatch |
+| **r22 门控证据（远端）** | `evidence\r22-g2-probe.txt`（1,315 B 无 BOM，md5 `3E1D010E…`） / `evidence\r22-gate3.txt`（15,194 B，`TOTAL=18`，载荷与 r21 `DIFF=0`） / `evidence\r22-gate4.txt`（10,652 B，`OLD_EXE=1453568` vs `NEW_EXE=1454080`，7 例 `SAME=True`） / `evidence\r22-swap.txt`（5,103 B，六阶段全过） | r22 四门：门1 EXIT=0 / 0 err / 13 warn；门2 逐字节 IDENTICAL；门3 十八条全等；门4 形态 B 七例零 mismatch |
+| **r22 二进制快照** | `_tmp\maahub-day1\evidence\accepted-hub\MaaHub-r22-1454080-20261114-131835.exe` + 远端 `_r22scratch\backup\MaaHub-1453568-20261114-131954.exe`（上一代 r21） | r22 exe = 1,454,080 B / SHA256 `0737F21AD180332ABB4BFB00E48A199FF33FA3FE2F72C609E69BA496B7B48896` |
 | **r21 二进制快照** | `_tmp\maahub-day1\evidence\accepted-hub\MaaHub-r21-1453568-20261114-131335.exe` + 远端 `_r21scratch\backup\MaaHub-1453056-20261114-131453.exe`（上一代 r20） | r21 exe = 1,453,568 B / SHA256 `BFD93D095D91293C8B67E11466B1D39F86E0167E867B9D304A3E659EFBE862E0` |
 | **r20 二进制快照** | `_tmp\maahub-day1\evidence\accepted-hub\MaaHub-r20-1453056-20261114-130813.exe` + 远端 `_r20scratch\backup\MaaHub-1455104-20261114-130932.exe`（上一代 r19） | r20 exe = 1,453,056 B / SHA256 `222D63265DC5B0A9704D64FFDA981F50C91F81F2261643FB9FDD00E91217B766` |
 | **r19 旋钮试验台** | `_tmp\maahub-day1\r19\flagtest.bat`（与正式 release 逐字相同、只加候选开关，产物落 `build\flagtest\`，**不覆盖** `build\MaaHub.exe`）+ `build\flagtest\{base,gr,icf,gricf,gr_zc,gr_gygw}.exe` | 实测：base 1,463,296 / **`/GR-` 1,455,104** / ICF、REF、`/Zc:inline`、`/Gy`、`/Gw` 全部 0 B |
@@ -572,10 +602,10 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 
 ## 六、当前状态
 
-- `build\MaaHub.exe` = **1,453,568 B**（13:13 r21 构建，SHA256 `BFD93D09…`；r13/r14 1,470,464 B、r15 1,467,392 B、r16 1,465,856 B、r17 1,463,296 B、r18 1,463,296 B、r19 1,455,104 B、r20 1,453,056 B）。`build.bat release` 干净通过（EXIT=0 / 13 警告 / 0 错误）。累计轻量化与重构：LTCG −60,928 B、标签去重 −1,024 B、random_hex 合并 −6,656 B、URL 拆分 −3,072 B、checked-run 类外合并 −1,024 B、r13 0 B、r14 0 B、r15 −3,072 B、r16 −1,536 B、r17 −2,560 B、r18 −0 B、r19 `/GR-` −8,192 B、r20 算法简洁化 −2,048 B、**r21 调度算法重构 +512 B**。
-- 源码行数/字节（r21 后实测，含空行总行数）：全树 **13,979 行**。`util.hpp` 547 / 21,785 B、`hub.hpp` **1504 / 65,016 B**、`planner.hpp` 438 / 19,921 B、`accounts.hpp` 262 / 10,988 B、`core_manager.hpp` 950 / 45,493 B、`main.cpp` 972 / 45,727 B、`worker_main.cpp` 176 / 7,066 B、`worker_main.hpp` 7 / 139 B、`config_import.hpp` 926 / 45,263 B、`gui.hpp` 920 / 44,377 B、`task_panels.hpp` 898 / 45,969 B、`worker_client.hpp` 194 / 7,316 B、`app_window.hpp` 292 / 13,511 B、`settings.hpp` 183 / 7,886 B、`json.hpp` 455 / 15,590 B、`app_window.cpp` 3439 / 166,476 B、`adapters\adapter.hpp` 88 / 2,922 B、`adapters\maa_adapter.hpp` 486 / 22,376 B、`adapters\maaend_adapter.hpp` 1242 / 57,971 B。
+- `build\MaaHub.exe` = **1,454,080 B**（13:18 r22 构建，SHA256 `0737F21A…`；r13/r14 1,470,464 B、r15 1,467,392 B、r16 1,465,856 B、r17 1,463,296 B、r18 1,463,296 B、r19 1,455,104 B、r20 1,453,056 B、r21 1,453,568 B）。`build.bat release` 干净通过（EXIT=0 / 13 警告 / 0 错误）。累计轻量化与重构：LTCG −60,928 B、标签去重 −1,024 B、random_hex 合并 −6,656 B、URL 拆分 −3,072 B、checked-run 类外合并 −1,024 B、r13 0 B、r14 0 B、r15 −3,072 B、r16 −1,536 B、r17 −2,560 B、r18 −0 B、r19 `/GR-` −8,192 B、r20 算法简洁化 −2,048 B、r21 调度重构 +512 B、**r22 main 算法重构 +512 B**。
+- 源码行数/字节（r22 后实测，含空行总行数）：全树 **13,982 行**。`util.hpp` 547 / 21,785 B、`hub.hpp` 1504 / 65,016 B、`planner.hpp` 438 / 19,921 B、`accounts.hpp` 262 / 10,988 B、`core_manager.hpp` 950 / 45,493 B、`main.cpp` **975 / 46,009 B**、`worker_main.cpp` 176 / 7,066 B、`worker_main.hpp` 7 / 139 B、`config_import.hpp` 926 / 45,263 B、`gui.hpp` 920 / 44,377 B、`task_panels.hpp` 898 / 45,969 B、`worker_client.hpp` 194 / 7,316 B、`app_window.hpp` 292 / 13,511 B、`settings.hpp` 183 / 7,886 B、`json.hpp` 455 / 15,590 B、`app_window.cpp` 3439 / 166,476 B、`adapters\adapter.hpp` 88 / 2,922 B、`adapters\maa_adapter.hpp` 486 / 22,376 B、`adapters\maaend_adapter.hpp` 1242 / 57,971 B。
 - `assets\MaaCore.dll` 未被本轮触碰：56,198,144 B，MD5 `6701554378F11708A9CF452621F06619`。
 - **验收门已从三重升级为四重，且门 4 有两个形态**：编译 + 探针逐字节 + 独立沙箱导入 18 条 + 差分测试。门 4 形态 A = 单函数差分（`parse_url_diff` 类，验证搬移/重写的函数体）；形态 B = **双 exe CLI 差分**（r14 新增，旧二进制 vs 新二进制各建沙箱、各拷同一份 state，逐例比 EXIT + 完整 stdout，验证改动落在分发路径/UI 侧时仍能给出可执行断言）。r15 用一次 75 处的大批改动把这套门走完（A/B 均 0 mismatch），说明门的粒度足以覆盖"批量删除"这种最难用肉眼确认的变更。门 4 的引入是对"回归门不执行被改代码"这一证据缺口的直接补强。
-- **部署状态（2026-11-14 13:15 收尾口径）**：远端 WorkCenter（`C:\Users\xray\Documents\MaaHub\`）现在跑的是 **r21 = 1,453,568 B / SHA256 `BFD93D09…`**（hub 算法精炼版）。活 Hub **pid=255012**（+ 6 worker，全部同一构建）、`build\state\*.json` **9 个**、trace 1,001,302 B / mtime 13:15:00、6 条 `spawn_worker load_ok=1`，无 `exec-02913292d1eb`。演进链：12:55 中间构建（1,542,656 B）→ 23:14 r15 → 00:19 r16 → 00:57 r17 → 01:13 r18 → 01:21 r19 → 13:09 r20 → 13:15 r21；六级备份目录 `_r1{5,6,7,8,9,20,21}scratch\backup\` 均保留并校验过 sha256。
+- **部署状态（2026-11-14 13:20 收尾口径）**：远端 WorkCenter（`C:\Users\xray\Documents\MaaHub\`）现在跑的是 **r22 = 1,454,080 B / SHA256 `0737F21A…`**（main.cpp 算法精炼版）。活 Hub **pid=281776**（+ 6 worker，全部同一构建）、`build\state\*.json` **9 个**、trace 1,004,194 B / mtime 13:20:01、6 条 `spawn_worker load_ok=1`，无 `exec-02913292d1eb`。演进链：12:55 中间构建（1,542,656 B）→ 23:14 r15 → 00:19 r16 → 00:57 r17 → 01:13 r18 → 01:21 r19 → 13:09 r20 → 13:15 r21 → 13:20 r22；七级备份目录 `_r1{5,6,7,8,9,20,21,22}scratch\backup\` 均保留并校验过 sha256。
 - **测试一律远端执行（用户硬性纪律）**：本轮全部门 2/3/4 均在 WorkCenter 远端跑，含新增的双 exe 差分类。本机 `pwsh` 只做文件哈希/文本比对/脚本下发，**不执行任何产品程序或测试程序**（20:36 那次本地误启动的教训见 §五 事故复盘条）。
 - 长期目标保持 armed，继续迭代 review。

@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
+#include <algorithm>
 #include <cstdio>
 #include <atomic>
 #include <string>
@@ -169,14 +170,14 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
             // 只有一个执行器时可直接省略
             return execs.size() == 1 ? execs[0].id : std::string();
         }
-        for (auto& e : execs) if (e.id == key) return e.id;
-        std::string hits;
-        for (auto& e : execs) {
-            if (e.kind == key) { if (hits.empty()) hits = e.id; }
-            if (e.id.rfind(key, 0) == 0) { if (hits.empty()) hits = e.id; }
-            if (!e.label.empty() && e.label.find(key) != std::string::npos) { if (hits.empty()) hits = e.id; }
-        }
-        return hits;
+        auto exact = std::find_if(execs.begin(), execs.end(), [&](const ExecutorEntry& e) { return e.id == key; });
+        if (exact != execs.end()) return exact->id;
+        auto it = std::find_if(execs.begin(), execs.end(), [&](const ExecutorEntry& e) {
+            return e.kind == key
+                || e.id.rfind(key, 0) == 0
+                || (!e.label.empty() && e.label.find(key) != std::string::npos);
+        });
+        return it != execs.end() ? it->id : std::string();
     };
     auto show_status = [&](const std::string& id) {
         mj::Value st = hub.executor_status(id, 0.0);
@@ -305,8 +306,11 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
         }
         if (!hub.update_executor_connect(id, patch)) { printf("set failed\n"); return 1; }
         auto execs2 = hub.executors();
-        for (auto& e : execs2) if (e.id == id) printf("%s\t%s\n", e.id.c_str(),
-              mj::Value::dump(e.config.has("connect") ? e.config["connect"] : mj::Value::object()).c_str());
+        auto it = std::find_if(execs2.begin(), execs2.end(), [&](const ExecutorEntry& e) { return e.id == id; });
+        if (it != execs2.end()) {
+            printf("%s\t%s\n", it->id.c_str(),
+                   mj::Value::dump(it->config.has("connect") ? it->config["connect"] : mj::Value::object()).c_str());
+        }
         return 0;
     }
     if (cmd == "accounts") {
@@ -838,7 +842,7 @@ int main(int argc, char** argv) {
         hub.refresh_catalogs();
         auto execs = hub.executors();
         printf("执行器数量: %zu\n", execs.size());
-        bool ok = !execs.empty();
+        bool all_ver_ok = true;
         for (auto& e : execs) {
             mj::Value st = hub.executor_status(e.id);
             std::string ver = st.get_str("version", "");
@@ -848,8 +852,9 @@ int main(int argc, char** argv) {
                    e.kind.c_str(), e.label.c_str(), ver.empty() ? "-" : ver.c_str(),
                    (long long)tasks, st.get_str("conn", "unknown").c_str(),
                    err.empty() ? "" : ("err=" + err).c_str());
-            if (ver.empty()) ok = false;
+            if (ver.empty()) all_ver_ok = false;
         }
+        bool ok = !execs.empty() && all_ver_ok;
         printf(ok ? "ALL OK\n" : "CHECK FAILED\n");
         return ok ? 0 : 1;
     }
@@ -898,11 +903,9 @@ int main(int argc, char** argv) {
         hub.start_all();
         auto execs = hub.executors();
         check("默认执行器创建", !execs.empty(), std::to_string(execs.size()) + " 个");
-        bool all_loaded = true;
-        for (auto& e : execs) {
-            mj::Value st = hub.executor_status(e.id);
-            if (st.get_str("version", "").empty()) all_loaded = false;
-        }
+        bool all_loaded = std::all_of(execs.begin(), execs.end(), [&](const ExecutorEntry& e) {
+            return !hub.executor_status(e.id).get_str("version", "").empty();
+        });
         check("全部执行器加载核心", all_loaded);
 
         // 3. catalog 缓存命中（第二次调用应明显更快）
