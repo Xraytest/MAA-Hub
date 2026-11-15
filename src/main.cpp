@@ -643,10 +643,9 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
 }
 
 int main(int argc, char** argv) {
-    // GDI+ 初始化（抗锯齿圆角/线条需要；gui.hpp 的 round_rect 走 GDI+）
-    Gdiplus::GdiplusStartupInput gpsi;
-    ULONG_PTR gdiplus_token = 0;
-    Gdiplus::GdiplusStartup(&gdiplus_token, &gpsi, nullptr);
+    // GDI+ 是 GUI/离屏渲染才需要的依赖：以前在入口无条件 Startup 且从不 Shutdown，
+    // --worker/--cli/--core-version 纯控制台进程也跟着加载 gdiplus（r24 修）。
+    bool gdiplus_ready = false;
 
     SetConsoleOutputCP(CP_UTF8);
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -776,12 +775,18 @@ int main(int argc, char** argv) {
 
     // ---------------- 离屏渲染转储（无可见窗口，输出 PNG 供验证） ----------------
     if (dump_render) {
+        // r24：GDI+ 只在需要画图的模式里初始化（纯控制台路径不加载 gdiplus）
+        Gdiplus::GdiplusStartupInput gpsi;
+        ULONG_PTR gdiplus_token = 0;
+        Gdiplus::GdiplusStartup(&gdiplus_token, &gpsi, nullptr);
+        gdiplus_ready = true;
         // 进程内直接构造窗口对象但不创建 HWND：调用其页面绘制到内存 DC。
         // 需要 app_window 暴露一个纯渲染入口，这里通过 offscreen 窗口 + 内存 DC 完成。
         HINSTANCE hInst = GetModuleHandleW(nullptr);
         MaaHubWindow win(hInst, config, /*offscreen=*/true);
         if (dump_w > 0 && dump_h > 0) win.debug_set_client_size(dump_w, dump_h);
         if (!win.create()) {
+            Gdiplus::GdiplusShutdown(gdiplus_token);   // r24：早退路径也配对关闭
             printf("DUMP FAILED: create\n");
             return 1;
         }
@@ -821,6 +826,7 @@ int main(int argc, char** argv) {
         if (show_new_exec) win.debug_open_new_exec();
         Sleep(200);   // 等面板切换过渡（PANEL_ANIM_MS=140）落定，否则截到滑入中途
         win.render_to_file(page, dump_render_path);
+        Gdiplus::GdiplusShutdown(gdiplus_token);
         return 0;
     }
 
@@ -965,11 +971,19 @@ int main(int argc, char** argv) {
     }
 
     // ---------------- GUI 模式（原生窗口） ----------------
+    // r24：GDI+ 只在实际要画图的分支初始化，退出前配对 Shutdown
+    Gdiplus::GdiplusStartupInput gpsi;
+    ULONG_PTR gdiplus_token = 0;
+    Gdiplus::GdiplusStartup(&gdiplus_token, &gpsi, nullptr);
+    gdiplus_ready = true;
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     MaaHubWindow win(hInst, config, offscreen);
     if (!win.create()) {
+        Gdiplus::GdiplusShutdown(gdiplus_token);
         MessageBoxW(nullptr, L"窗口创建失败", L"MaaHub", MB_ICONERROR);
         return 1;
     }
-    return win.run();
+    int rc = win.run();
+    if (gdiplus_ready) Gdiplus::GdiplusShutdown(gdiplus_token);
+    return rc;
 }

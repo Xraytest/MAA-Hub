@@ -480,6 +480,79 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 
 **部署（13:20:01 完成）**：六阶段全过 —— A 前置校验（live `1,453,568 B / BFD93D09…`、新件 `1,454,080 B / 0737F21A…`）→ B 备份 `_r22scratch\backup\MaaHub-1453568-20261114-131954.exe`（sha 校验通过）→ C 停 7 进程 `REMAINING=0` → D 安装后二次 sha → E 拉起 `rc=0 pid=281776` → F 复核 **`PROCS=7`、`STATE_JSON=9`、trace 1,004,194 B@13:20:01**、6 条 `spawn_worker load_ok=1`。
 
+## 二·补17 r23（11-14 20:2x–20:28）：`MaaEnd` pretask 子进程 + 客户区尺寸校正（**未在本档登记过，补记**）
+
+| 项 | 位置 | 内容 |
+|---|---|---|
+| pretask 子进程 | `maaend_adapter.hpp` `run_pretask()` | `CreateProcessW` + 300s 等待，跑核心自带的前置命令 |
+| 客户区校正 | `maaend_adapter.hpp` `connect()` | 按 `connect.fit_window` 校正窗口客户区，否则模板匹配静默失败 |
+| 接口 | `adapter.hpp` / `hub.hpp` / `util.hpp` / `worker_main.cpp` | +164 / −4 行 |
+
+**登记缺口说明**：r23 的提交（`c083d22`，即 tag `v1.0.0` 指向的提交）当时只写了 commit message，没回写本档；r24 复核期间才补上这一条。诚实边界：r23 宣称的「客户区校正」在部署后的两次 Endfield 实跑（11-14 21:30、11-15 07:30）里**没有生效** —— hub trace 打了 `fit client=1280x720`，核心抓图仍是 `image.size()=[1200,720]`，`roi` 越界 444 次直至超时 `ret=false`（取证见 `docs/review-20261115-deep.md` 与 WorkCenter 上 `build\cores\maaend-v3.1.0\debug\maahub-cpp\maafw*.log`）。r24 只加了可观测性，没修这条根因。
+
+## 二·补18 r24（11-16 01:2x–02:5x）：深度 Review §二「修真实 Bug」全批（P0/P1/P2，**行为修正轮，非消重轮**）
+
+范围严格限定在报告 §二 列出的缺陷 + §六「第 1 步：修真实 Bug」；§三/§四 的横切抽层与大文件拆分不在本轮。10 个源文件，**+343 / −116 = 净 +227 行**（报告预估 ±30 行，实际多出的部分是脏标记传递链、错误分支句柄释放与注释——见文末诚实边界）。
+
+### 逐项改动
+
+| 缺陷 | 修法 | 位置 |
+|---|---|---|
+| [P0] `page_executor` 每帧「拷参数→画→全量写回→800ms 落盘」 | 参数加载改**事件驱动**（`panel_loaded_` 首用 / 切换 `exec\|task` / 导入完成 `panel_params_stale_`）；帧初快照 `panel_before` 与帧末逐键 `mj::Value::dump` 对比，只回写真变过的键 | `app_window.cpp`、`app_window.hpp` |
+| [P0] `draw_post_action` 每帧无条件 `save_post_action` | 取 `checkbox3` 的 `changed` 返回值 + `on != 旧值`，`pa_dirty` 才落盘 | `app_window.cpp` |
+| P0 配套：面板控件无条件写 `params` 会覆盖 backend 线程刚导入的值 | `PanelCtx::set_bool/set_once/set_int/set_str/touch` 加 `bool dirty=true` 形参；`pc_check/pc_number/pc_text/pc_radio/pc_select` 只在值变化时 dirty | `task_panels.hpp` |
+| [P1] `exec_thread_` 直接赋值 → `std::terminate()` | 赋值前先 `if (joinable()) detach()` | `hub.hpp` |
+| [P1] `last_tp_save_`/`last_save_` 裸 `uint64_t` 跨线程读写 | 前者整体收进 `tp_mtx_`（含节流判定），被窗口挡住的尾写记 `tp_pending_`，超 60s 强制落盘兜底；后者 `std::atomic` + `compare_exchange_strong`（CAS 失败者直接返回） | `hub.hpp` |
+| [P1] 快照与写盘不同锁 → `.tmp` 撞车后退化为非原子直写 | `save_task_params_locked()`（dump+write 同锁）；`save_state()` 加 `save_mtx_` 全程串行 | `hub.hpp` |
+| [P1] 退出丢尾 | `~Hub()` 在 worker 全部停止后，`tp_pending_` 为真才 `flush_task_params()`（无尾写时不拖慢关闭） | `hub.hpp` |
+| [P1] `core_msg_` 跨线程裸读写 | `msg_mtx_` 保护 `set_notice()` 与两处读取（读取先本地拷贝再画） | `app_window.cpp/hpp` |
+| [P1] DLL 搜索顺序颠倒 + PATH 永久污染 | `SetDefaultDllDirectories` + `AddDllDirectory` 移到 `LoadLibrary(Ex)W` **之前**（`std::call_once`），删掉两处 PATH 拼接块；失败路径 `RemoveDllDirectory(cookie_)` | `maa_adapter.hpp`、`maaend_adapter.hpp` |
+| [P1] `MaaControllerDestroy` 零调用点 | `connect()` 入口与每条失败分支销毁；`disconnect()`/`unload()` 实销毁 | `maaend_adapter.hpp` |
+| [P1] `disconnect()` 只翻状态旗标 | maa：`AsstStop`（AsstApi 无按连接断开，注释写明实例由 `unload()` 销毁）；maaend：销毁控制器 | 两个 adapter |
+| [P1] attach 轮询失败仍干等 15s | `answered` 标志，`ret=false` 也早退；文案区分 `attach rejected by MaaCore` / `attach callback timeout (15s, no AsyncCallInfo)`；关联键同时匹配 `taskid`/`call_id`/`callid` | `maa_adapter.hpp` |
+| [P1] `pull_core` 中途失败遗留 GB 级 `.tmp` | 作用域守卫 `TmpClean`（成功/复用路径 `keep=true`，其余早退一律 `remove_tree`）；`remove_tree` 检查并 trace `SHFileOperationW` 返回值 | `core_manager.hpp` |
+| [P1] `LlmPlanner::chat` 无代理/无状态码/错误信息拿不到 | 复刻 `CoreManager::open_session` 代理与账密逻辑（新增 `AppSettings* settings_`，由 `load_llm_config` 存入 `llm_proxy_`）；`WINHTTP_QUERY_STATUS_CODE` 非 2xx 早退；`get_path_str("error.message","")` → `get_str("error","")` → 兜底三级取错 | `planner.hpp`、`hub.hpp` |
+| [P2] 两处时间列画当前时钟 | 新增 `util::fmt_time(double epoch)`；账号「最近运行」用 `last_run_at`，计划历史用 `p.get_int("ts")` | `util.hpp`、`app_window.cpp` |
+| [P2] 设置页提示盖住「导入配置」按钮 | 提示起点 `content.left+156` → `+312`（按钮止于 +296） | `app_window.cpp` |
+| [P2] i18n 缓存锁死首次目录 | 三处 `static bool loaded` → `static std::string loaded_dir` 与 `label_dir_ref()` 比较，换目录即清缓存重读 | `maaend_adapter.hpp` |
+| P2 无人机错位（报告 §二.5） | **经复核证伪**：`task_panels.hpp:413` 的中文标签是设施名（官方 UI 文案），`kDrones` 是核心枚举，两者按 `drones_idx` 下标对应，无错位。仅加 `static_assert(kDroneCount == …)` + 下标→枚举对照注释锁定 | `hub.hpp` |
+| 附带 | GDI+ 不再在入口无条件 `GdiplusStartup`：改 `gdiplus_ready` 标志，仅 `--dump-render` 与 GUI 分支初始化，并与 `GdiplusShutdown` 配对（含 `create()` 失败早退路径） | `main.cpp` |
+
+### 验收门（本轮口径调整）
+
+| 门 | 内容 | 结果 |
+|---|---|---|
+| ① 编译 | `cmd /c build.bat release` | **EXIT=0**，0 error；warning **13 条与基线同集合**（C4996×6 + C4244×7），站点仅 `app_window.cpp:2061→2064` 行号漂移 |
+| ② 规范化差分 | 新旧双 exe 各建沙盒，对全部 5 个执行器跑 `--cli override <exec> *`，比 rc + 完整 stdout | **0 diffs / 5** |
+| ③ 功能 | `--check`、`--self-test`（18 项 ALL OK）、`--startup-bench`（first_paint=9ms，BENCH PASS） | 全部 rc=0 |
+| ④ 渲染确定性 | 6 个页面各 `--dump-render` 两遍（新×2、旧×2） | 全部 `determinism=True` |
+| ④′ 跨 exe 归因 | 4 个 cross 差异逐一定位（见下） | 全部有解释，无未归因差异 |
+
+历史门（`probe_norm.exe` 逐字节 golden、`iso_import` 18 条导入）本轮**不可复用**：两者依赖 `D:\Application\MAA`/`D:\Application\MaaEnd` 这两个本机已不存在的安装目录，故门②改用双 exe `--cli override` 差分承担等价职责（同一条 `normalize_task_params` 路径），门③用 `--check/--self-test` 承担导入+编排断言。
+
+### 跨 exe 渲染差异归因（诚实边界）
+
+| 页面 | cross 结果 | 归因与二次验证 |
+|---|---|---|
+| executor(Infrast)/accounts/planner/events | 新=旧，逐字节相同 | 无变更 |
+| cores | 差 314 像素，bbox x[495..549] y[93..103]（单行文本） | **沙盒目录名进了画面**：把新旧 exe 拷进**同一**沙盒目录后逐字节相同（`same-box same=True`）；再把该目录改名，新 exe 自己两份结果就不同 → 是路径文本，不是绘制逻辑 |
+| settings | gate 里新≠旧 | **gate3 副作用**：门③只在 `sandbox-new` 跑（写脏了它的 settings），同盒对照实验中两 exe 逐字节相同 |
+
+### 行为级正向证据（P0 与 P2 时间列）
+
+- **P0 每帧写盘**：同一沙盒连续 3 次 `--dump-render executor Infrast`，观察 `state\task-params.json` 的 mtime 跳变 —— 新 exe `[1, 0, 0]`（首帧后零重写），旧 exe `[1, 1, 1]`（每次都重写同内容）。这是 P0 判别的直接行为证据，比代码 diff 更硬。
+- **时间列**：注入固定 `last_run_at=1763000000` 后，新 exe 跨 1.4s 两次渲染**逐字节相同**（画条目时间），旧 exe 两次渲染**不同**（画当前时钟）；`new-vs-old=False` 符合预期。
+- **退出尾写**：新 exe 首次打开面板会把 catalog 默认值落盘（Infrast 从 1 键补到 12 键，`drones="_NotUse"`/`facility=[]`/`mode=0`/`facility_0..7=false` 全为核心合法默认值），旧 exe 在 dump-render 退出路径上把这些写在节流窗口里丢掉 —— 即 r24 顺带修正了「默认值不落盘」这个反向缺陷，非回归。
+
+### 已知未闭合（本轮不宣称修好）
+
+1. **attach 关联键未实测**：`AsstAsyncAttachWindow` 的事件匹配现在同时接受 `taskid`/`call_id`/`callid`，因为本仓没有任何 AsyncCallInfo 抓包能证明真名（`_cmp` 里只有 `taskid` 的 TaskChain 样本）。需要一次真机 `--cli connect` 才能收敛到单键。
+2. **`MaaControllerGetResolution` 返回值**：现在捕获并在 `0x0` 时 trace `(GetResolution failed)`，但这只是可观测性。Endfield 上 `image.size()=[1200,720]` 与 `fit client=1280x720` 不一致这条**根因未修**。
+3. **`post_action_` / `auto_reload_` 仍是空转 UI**：本轮只停止它们每帧写盘，没有补后端执行，也没有移除入口（属产品决策，报告 §五.1/§六第 4 步）。
+4. **`unload()` 的 `MaaStringBuffer` 泄漏、未使用的 14 个 FFI 成员、§三/§四 抽层与拆分**：均按纪律排除留给后续轮。
+5. 报告 §二.3 里 `tmp-<hex>` / `_download` 的命名不成立（真实为固定 `cores\.tmp`）；§二.2 的 `LoadLibrary` 顺序问题严重度被高估（`LOAD_WITH_ALTERED_SEARCH_PATH` 已覆盖同目录静态导入，真正受影响的是 `LoadLibraryW` 回退路径与缺失的 `SetDefaultDllDirectories`），但修法一致，仍按正确顺序改了。
+
+构建产物：`build\MaaHub.exe` = **1,475,584 B**（02:47 最终构建，SHA256 `532E61D3…`；与本轮早先一次同尺寸构建 `E6A687B9…` 仅差链接器时间戳，见 §六 的 6 字节结论）。
 ## 三、纪律性排除（明确决定不改的，及理由）
 
 | 项 | 位置 | 不改理由 |
@@ -602,10 +675,11 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 
 ## 六、当前状态
 
-- `build\MaaHub.exe` = **1,454,080 B**（13:18 r22 构建，SHA256 `0737F21A…`；r13/r14 1,470,464 B、r15 1,467,392 B、r16 1,465,856 B、r17 1,463,296 B、r18 1,463,296 B、r19 1,455,104 B、r20 1,453,056 B、r21 1,453,568 B）。`build.bat release` 干净通过（EXIT=0 / 13 警告 / 0 错误）。累计轻量化与重构：LTCG −60,928 B、标签去重 −1,024 B、random_hex 合并 −6,656 B、URL 拆分 −3,072 B、checked-run 类外合并 −1,024 B、r13 0 B、r14 0 B、r15 −3,072 B、r16 −1,536 B、r17 −2,560 B、r18 −0 B、r19 `/GR-` −8,192 B、r20 算法简洁化 −2,048 B、r21 调度重构 +512 B、**r22 main 算法重构 +512 B**。
-- 源码行数/字节（r22 后实测，含空行总行数）：全树 **13,982 行**。`util.hpp` 547 / 21,785 B、`hub.hpp` 1504 / 65,016 B、`planner.hpp` 438 / 19,921 B、`accounts.hpp` 262 / 10,988 B、`core_manager.hpp` 950 / 45,493 B、`main.cpp` **975 / 46,009 B**、`worker_main.cpp` 176 / 7,066 B、`worker_main.hpp` 7 / 139 B、`config_import.hpp` 926 / 45,263 B、`gui.hpp` 920 / 44,377 B、`task_panels.hpp` 898 / 45,969 B、`worker_client.hpp` 194 / 7,316 B、`app_window.hpp` 292 / 13,511 B、`settings.hpp` 183 / 7,886 B、`json.hpp` 455 / 15,590 B、`app_window.cpp` 3439 / 166,476 B、`adapters\adapter.hpp` 88 / 2,922 B、`adapters\maa_adapter.hpp` 486 / 22,376 B、`adapters\maaend_adapter.hpp` 1242 / 57,971 B。
+- `build\MaaHub.exe` = **1,475,584 B**（11-16 02:47 r24 构建，SHA256 `532E61D3…`；同日 01:57 的同内容中间构建 1,475,584 B / `E6A687B9…`，两者只差链接器写入的 PE TimeDateStamp 与调试目录时间戳共 6 字节——见本条末尾。链：r13/r14 1,470,464 B、r15 1,467,392 B、r16 1,465,856 B、r17 1,463,296 B、r18 1,463,296 B、r19 1,455,104 B、r20 1,453,056 B、r21 1,453,568 B、r22 1,454,080 B、r23 1,467,904 B（= tag `v1.0.0` 资产，发布件与本地件同样只差这 6 字节）、**r24 1,475,584 B**）。`build.bat release` 干净通过（EXIT=0 / 13 警告 / 0 错误，警告集合与基线逐条相同，仅 `app_window.cpp` 站点行号 2061→2064 漂移）。r24 是**行为修正轮**，体积增加 7.6 KB 来自新增的脏标记链、错误分支句柄释放与节流兜底逻辑，不计入轻量化累计收益。
+- 源码行数/字节（r24 后实测，含空行总行数）：全树 **14,369 行 / 670,321 B**（r22 后为 13,982 行；r23 +160/−4 未登记，r24 +343/−116）。`util.hpp` 575 / 23,174 B、`hub.hpp` 1566 / 69,371 B、`planner.hpp` 485 / 22,634 B、`accounts.hpp` 262 / 10,988 B、`core_manager.hpp` 963 / 46,305 B、`main.cpp` 989 / 46,828 B、`worker_main.cpp` 183 / 7,534 B、`worker_main.hpp` 7 / 146 B、`config_import.hpp` 926 / 45,263 B、`app_window.cpp` 3,466 / 168,087 B、`app_window.hpp` 297 / 13,988 B、`task_panels.hpp` 917 / 46,966 B、`maaend_adapter.hpp` 1,386 / 66,892 B、`maa_adapter.hpp` 499 / 23,633 B、`adapter.hpp` 96 / 3,343 B、`gui.hpp` 920 / 44,377 B、`json.hpp` 455 / 15,590 B、`settings.hpp` 183 / 7,886 B、`worker_client.hpp` 194 / 7,316 B。
 - `assets\MaaCore.dll` 未被本轮触碰：56,198,144 B，MD5 `6701554378F11708A9CF452621F06619`。
 - **验收门已从三重升级为四重，且门 4 有两个形态**：编译 + 探针逐字节 + 独立沙箱导入 18 条 + 差分测试。门 4 形态 A = 单函数差分（`parse_url_diff` 类，验证搬移/重写的函数体）；形态 B = **双 exe CLI 差分**（r14 新增，旧二进制 vs 新二进制各建沙箱、各拷同一份 state，逐例比 EXIT + 完整 stdout，验证改动落在分发路径/UI 侧时仍能给出可执行断言）。r15 用一次 75 处的大批改动把这套门走完（A/B 均 0 mismatch），说明门的粒度足以覆盖"批量删除"这种最难用肉眼确认的变更。门 4 的引入是对"回归门不执行被改代码"这一证据缺口的直接补强。
-- **部署状态（2026-11-14 13:20 收尾口径）**：远端 WorkCenter（`C:\Users\xray\Documents\MaaHub\`）现在跑的是 **r22 = 1,454,080 B / SHA256 `0737F21A…`**（main.cpp 算法精炼版）。活 Hub **pid=281776**（+ 6 worker，全部同一构建）、`build\state\*.json` **9 个**、trace 1,004,194 B / mtime 13:20:01、6 条 `spawn_worker load_ok=1`，无 `exec-02913292d1eb`。演进链：12:55 中间构建（1,542,656 B）→ 23:14 r15 → 00:19 r16 → 00:57 r17 → 01:13 r18 → 01:21 r19 → 13:09 r20 → 13:15 r21 → 13:20 r22；七级备份目录 `_r1{5,6,7,8,9,20,21,22}scratch\backup\` 均保留并校验过 sha256。
+- **部署状态（2026-11-16 02:5x 口径）**：远端 WorkCenter（`C:\Users\xray\Documents\MaaHub\build\MaaHub.exe`）仍在跑 **r23/v1.0.0 = 1,467,904 B / SHA256 `EF7027C8…`**（进程启动于 11-14 20:30:57，与发布资产同哈希）。r24 **未部署**：Endfield 的 `AutoEcoFarmTask` 两次实跑仍是 `ret=false`（根因未修），按纪律不做部署/推送/发 release。
+- **本轮（r24）验收门口径变更**：历史门 `probe_norm.exe` 逐字节 golden 与 `iso_import` 18 条依赖本机已不存在的 `D:\Application\MAA`/`D:\Application\MaaEnd`，改由双 exe `--cli override` 差分（门②）+ `--check/--self-test`（门③）+ 双 exe 双跑渲染确定性（门④）承担；门④的 cross-exe 差异必须逐一定位到像素 bbox 或同盒对照复测，不允许「同尺寸不同内容」悬空。
 - **测试一律远端执行（用户硬性纪律）**：本轮全部门 2/3/4 均在 WorkCenter 远端跑，含新增的双 exe 差分类。本机 `pwsh` 只做文件哈希/文本比对/脚本下发，**不执行任何产品程序或测试程序**（20:36 那次本地误启动的教训见 §五 事故复盘条）。
 - 长期目标保持 armed，继续迭代 review。

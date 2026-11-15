@@ -22,6 +22,9 @@ struct PanelCtx {
     const std::string& exec_id;
     const std::string& task;
     bool advanced = false;   // 官方「常规设置 / 高级设置」两页：同一面板只画其中一页
+    // r24：dirty 感知写入。控件没被操作时不再回写 params，避免用帧初值覆盖
+    // 外部（backend 导入线程）刚写入 Hub 的参数；未改动帧由调用方对比
+    // before/params 决定零持久化写回。
 
     // 便捷读取
     bool get_bool(const std::string& k, bool def = false) const {
@@ -30,12 +33,15 @@ struct PanelCtx {
         const mj::Value& v = it->second;
         return (v.is_bool() || v.is_number()) ? v.as_bool() : def;
     }
-    void set_bool(const std::string& k, bool v) { params[k] = mj::Value(v); }
+    void set_bool(const std::string& k, bool v, bool dirty = true) {
+        if (dirty) params[k] = mj::Value(v);
+    }
     bool get_once(const std::string& k) const {
         auto it = params.find(std::string("__once_") + k);
         return it != params.end() && it->second.as_bool();
     }
-    void set_once(const std::string& k, bool v) {
+    void set_once(const std::string& k, bool v, bool dirty = true) {
+        if (!dirty) return;
         if (v) params[std::string("__once_") + k] = mj::Value(true);
         else params.erase(std::string("__once_") + k);
     }
@@ -45,14 +51,23 @@ struct PanelCtx {
         const mj::Value& v = it->second;
         return v.is_number() ? (int)v.as_int() : def;
     }
-    void set_int(const std::string& k, int v) { params[k] = mj::Value((int64_t)v); }
+    void set_int(const std::string& k, int v, bool dirty = true) {
+        if (dirty) params[k] = mj::Value((int64_t)v);
+    }
     std::string get_str(const std::string& k, const std::string& def = "") const {
         auto it = params.find(k);
         if (it == params.end()) return def;
         const mj::Value& v = it->second;
         return v.is_string() ? v.as_string() : def;
     }
-    void set_str(const std::string& k, const std::string& v) { params[k] = mj::Value(v); }
+    void set_str(const std::string& k, const std::string& v, bool dirty = true) {
+        if (dirty) params[k] = mj::Value(v);
+    }
+    // 绕过 set_* 的写入若也要参与脏判定，可用此入口（dirty=false 时不改 params）
+    bool touch(const std::string& k, const mj::Value& v, bool dirty = true) {
+        if (dirty) params[k] = v;
+        return dirty;
+    }
 
     // 用官方 catalog 声明的 default 预填充尚未设置的参数
     // （官方面板打开时就应显示默认值，而不是空白/0）
@@ -82,9 +97,11 @@ inline void pc_check(PanelCtx& c, const std::string& key, const std::wstring& la
     // 官方 CheckBox 规格：Height=30 Margin=6
     RECT r{ c.x, c.y + 3, c.right, c.y + 3 + 24 };
     int lines = 1;
-    c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st, &lines);
-    c.set_bool(key, st == CheckState::On);
-    c.set_once(key, st == CheckState::Once);
+    bool chg = c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), r, label, st, &lines);
+    // r24：勾选真正变化才写 params——每帧无条件写会把 backend 线程（配置导入）
+    // 刚写入的值用帧初旧缓存覆盖回去
+    c.set_bool(key, st == CheckState::On, chg);
+    c.set_once(key, st == CheckState::Once, chg);
     // 官方 CheckBox Margin="0,10"：控件 20px 高 + 上下各 10px = 40px 节奏，
     // 但有 tip 时官方把 tip 压在控件下方同一节奏内，故整体按 26px 步进；
     // 窄列下长标签换行时再加一行高度，避免压住下一项
@@ -104,8 +121,9 @@ inline void pc_number(PanelCtx& c, const std::string& key, const std::wstring& l
     const int LBL = 108;
     c.g.text_clipped({ c.x, c.y, c.x + LBL - 8, c.y + 24 }, label, c.g.theme.dim, c.g.font_small);
     RECT r{ c.x + LBL, c.y, c.right, c.y + 24 };
+    int before = v;
     c.g.number_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, L"", v, step, lo, hi);
-    c.set_int(key, v);
+    c.set_int(key, v, v != before);
     c.y += 36;
 }
 
@@ -116,9 +134,10 @@ inline void pc_text(PanelCtx& c, const std::string& key, const std::wstring& lab
     const int LBL = 108;
     c.g.text_clipped({ c.x, c.y, c.x + LBL - 8, c.y + 24 }, label, c.g.theme.dim, c.g.font_small);
     RECT r{ c.x + LBL, c.y, c.right, c.y + 24 };
+    std::string before = v;
     c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, v,
                    hint.empty() ? nullptr : hint.c_str());
-    c.set_str(key, v);
+    c.set_str(key, v, v != before);
     c.y += 36;
 }
 
@@ -129,7 +148,7 @@ inline void pc_radio(PanelCtx& c, const std::string& key,
     RECT r{ c.x, c.y, c.right, c.y + 24 };
     int hit = c.g.option_strip((c.exec_id + ":" + c.task + ":" + key).c_str(), r, opts, cur);
     if (hit >= 0) cur = hit;
-    c.set_int(key, cur);
+    c.set_int(key, cur, cur != c.get_int(key, def));
     c.y += 36;
 }
 
@@ -148,7 +167,7 @@ inline int pc_select(PanelCtx& c, const std::string& key,
     int hit = tight ? c.g.combo(id.c_str(), r, opts, cur)
                     : c.g.option_strip(id.c_str(), r, opts, cur);
     if (hit >= 0) cur = hit;
-    c.set_int(key, cur);
+    c.set_int(key, cur, cur != c.get_int(key, def));
     c.y += 36;
     return cur;
 }

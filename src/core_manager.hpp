@@ -140,7 +140,8 @@ public:
         op.wFunc = FO_DELETE;
         op.pFrom = buf.data();
         op.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_SILENT;
-        SHFileOperationW(&op);
+    const int fop_rc = SHFileOperationW(&op);   // r24：失败不再无声吞掉
+    if (fop_rc) util::trace("remove_tree rc=" + std::to_string(fop_rc) + " path=" + path);
     }
 
 
@@ -485,6 +486,16 @@ public:
         remove_tree(tmp);
         util::ensure_dir(tmp);
         std::string zip = tmp + "\\core.zip";
+        // r24：下载中断/哈希失败/tar 失败/找不到核心目录/移入失败等所有提前 return
+        // 都会把 GB 级垃圾永久留在 .tmp——作用域守卫兜底，成功路径置 tmp_clean.keep。
+        struct TmpClean {
+            bool keep = false;
+            std::string p;
+            ~TmpClean() {
+                if (!keep && GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    remove_tree(p);
+            }
+        } tmp_clean{ false, tmp };
         if (!http_download(url, zip, progress, settings)) {
             set_stage("下载失败");
             return "";
@@ -568,6 +579,7 @@ public:
             if (progress) *progress = 100;
             set_stage("已是最新（复用现有核心）");
             remove_tree(default_cores_root() + "\\.tmp");
+            tmp_clean.keep = true;   // 已清理，守卫不再重复动手
             return reuse_id;
         }
 
@@ -610,6 +622,7 @@ public:
         set_stage("完成");
         // 清掉 .tmp（zip + 解包副本，通常 >1GB），避免白占磁盘
         remove_tree(default_cores_root() + "\\.tmp");
+        tmp_clean.keep = true;   // 已清理，守卫不再重复动手
         return c.id;
     }
 

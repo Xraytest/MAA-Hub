@@ -326,6 +326,19 @@ inline std::string now_str() {
     return buf;
 }
 
+// 把 epoch 秒格式化为本地时间 "YYYY-MM-DD HH:MM:SS"（r24：表格里的「最近运行/时间」
+// 列原先直接画 util::now_str()，显示的是当前时钟而不是条目自身的时间戳）
+inline std::string fmt_time(double ts) {
+    if (ts <= 0) return "";
+    time_t t = (time_t)ts;
+    tm lt{};
+    localtime_s(&lt, &t);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+             lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
+    return buf;
+}
+
 inline std::string today_str() {
     time_t t = time(nullptr);
     tm lt{};

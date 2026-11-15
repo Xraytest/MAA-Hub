@@ -174,6 +174,16 @@ public:
         }
         for (auto& t : stops) t.join();
         util::trace("hub dtor workers stopped");
+        // r24：800ms 节流窗口内被挡住、尚未落盘的 task-params 尾写在退出前 flush
+        //（防退出丢尾）。worker 已全部停止，这里只剩确定性的收尾写，不再拖慢关闭。
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            if (tp_pending_) tp_needs_flush_ = true;
+        }
+        if (tp_needs_flush_) {
+            util::trace("hub dtor flush task-params");
+            flush_task_params();
+        }
         util::trace("hub dtor end");
     }
 
@@ -384,6 +394,12 @@ public:
             // 加工站=PureGold 会客室=OriginStone）
             // 只有面板/导入真正写过 drones_idx 才映射；否则保留已存在的 drones 字符串
             // （fill_defaults 补的默认值、或 TaskQueue 直写场景），不再无条件覆盖
+            // r24 防漂移：下标语义被 task_panels 的 drones_idx 单选按顺序引用——
+            // 0=不使用 1=贸易站(Money) 2=制造站(SyntheticJade) 3=发电站(CombatRecord)
+            // 4=办公室(Chip) 5=加工站(PureGold) 6=会客室(OriginStone，官方即会客室产出)
+            // 两处必须同序；改表先改这里，数量不一致直接编译失败。
+            static_assert(kDroneCount == sizeof(kDrones) / sizeof(kDrones[0]),
+                          "kDrones 表与 kDroneCount 数量不一致");
             if (in.find("drones_idx")) {
                 int d = (int)num("drones_idx", 0);
                 if (d < 0 || d >= (int)kDroneCount) d = 0;
@@ -712,7 +728,7 @@ public:
             HeuristicPlanner hp;
             plan = hp.plan(goal, snap, catalog);
         } else {
-            LlmPlanner lp(llm_cfg_, HeuristicPlanner{});
+            LlmPlanner lp(llm_cfg_, HeuristicPlanner{}, &llm_proxy_);
             plan = lp.plan(goal, snap, catalog, accounts_json());
         }
         {
@@ -951,6 +967,8 @@ public:
         }
         if (plan.id.empty()) return false;
         stop_flag_ = false;
+        // r24：exec_worker 结束后线程对象仍 joinable，直接赋值 = std::terminate()
+        if (exec_thread_.joinable()) exec_thread_.detach();
         exec_thread_ = std::thread([this, plan] { exec_worker(plan); });
         return true;
     }
@@ -1032,7 +1050,11 @@ public:
                         const std::string& key, const mj::Value& value) {
         {
             std::lock_guard<std::mutex> lk(tp_mtx_);
-            task_params_[exec_id][task][key] = value;
+            auto& slot = task_params_[exec_id][task][key];
+            // r24：同值直接返回。UI 每帧写回不再把节流打满，task-params.json
+            // 只在参数真正变化后（≤800ms 节流）落盘一次。
+            if (mj::Value::dump(slot) == mj::Value::dump(value)) return;
+            slot = value;
         }
         schedule_save_task_params();
     }
@@ -1093,8 +1115,10 @@ public:
     // 绕过 800ms 节流立即落盘：批量导入后进程可能很快退出，
     // 节流窗口内的尾部写入不能丢
     void flush_task_params() {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
         last_tp_save_ = GetTickCount64();
-        save_task_params();
+        tp_pending_ = false;
+        save_task_params_locked();
     }
 
 private:
@@ -1382,25 +1406,43 @@ private:
     }
 
     void schedule_save_task_params() {
-        uint64_t now = GetTickCount64();
-        if (now - last_tp_save_ < 800) return;
+        // r24：节流状态整体收进 tp_mtx_（消除时间戳数据竞争）。被 800ms 窗口挡住的
+        // 尾写记 tp_pending_，交给下一次放行或 Hub 析构兜底，不静默丢弃。
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        const uint64_t now = GetTickCount64();
+        if (now - last_tp_save_ < 800) {
+            tp_pending_ = true;
+            // 兜底：持续高频写时也不让磁盘视图落后超过 60s
+            if (last_tp_save_ && now - last_tp_save_ > 60000) {
+                last_tp_save_ = now;
+                tp_pending_ = false;
+                save_task_params_locked();
+            }
+            return;
+        }
         last_tp_save_ = now;
-        save_task_params();
+        tp_pending_ = false;
+        save_task_params_locked();
     }
 
     void save_task_params() {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        save_task_params_locked();
+    }
+
+    // 必须持 tp_mtx_ 调用：dump 与落盘都在锁内（r24），并发节流判据也在同锁下，
+    // task-params.json 不会再被两条线程交错写坏。调用方（schedule/flush）都先过
+    // 时间门槛，落盘内部不会再触发节流，无递归加锁风险。
+    void save_task_params_locked() {
         mj::Value v = mj::Value::object();
-        {
-            std::lock_guard<std::mutex> lk(tp_mtx_);
-            for (auto& e : task_params_) {
-                mj::Value tasks = mj::Value::object();
-                for (auto& t : e.second) {
-                    mj::Value kv_obj = mj::Value::object();
-                    for (auto& kv : t.second) kv_obj.set(kv.first, kv.second);
-                    tasks.set(t.first, std::move(kv_obj));
-                }
-                v.set(e.first, std::move(tasks));
+        for (auto& e : task_params_) {
+            mj::Value tasks = mj::Value::object();
+            for (auto& t : e.second) {
+                mj::Value kv_obj = mj::Value::object();
+                for (auto& kv : t.second) kv_obj.set(kv.first, kv.second);
+                tasks.set(t.first, std::move(kv_obj));
             }
+            v.set(e.first, std::move(tasks));
         }
         util::write_file(util::exe_dir() + "\\state\\task-params.json",
                          mj::Value::dump_pretty(v));
@@ -1441,6 +1483,7 @@ private:
     // temperature / max_tokens / timeout_sec 不在 AppSettings 里，继续读 config.json。
     void load_llm_config() {
         AppSettings st = settings_->get();
+        llm_proxy_ = st;   // r24：把 HTTP/SOCKS5 代理设置一并交给 LlmPlanner::chat
         if (!st.llm_base_url.empty()) llm_cfg_.base_url = st.llm_base_url;
         llm_cfg_.api_key = st.llm_api_key;
         if (!st.llm_model.empty()) llm_cfg_.model = st.llm_model;
@@ -1454,13 +1497,18 @@ private:
     }
 
     void schedule_save() {
-        uint64_t now = GetTickCount64();
-        if (now - last_save_ < 1000) return;
-        last_save_ = now;
+        // r24：last_save_ 改原子；compare-exchange 保证只有一个线程进入落盘
+        const uint64_t now = GetTickCount64();
+        uint64_t prev = last_save_.load(std::memory_order_relaxed);
+        if (now - prev < 1000) return;
+        if (!last_save_.compare_exchange_strong(prev, now)) return;   // 有并发者已接管本轮
         save_state();
     }
 
     void save_state() {
+        // r24：快照与落盘同锁。worker 回调线程可能有多路（每执行器一条 reader）
+        // 并发调用；util::write_file 的 .tmp 撞车时会退化成非原子直写。
+        std::lock_guard<std::mutex> lk(save_mtx_);
         mj::Value v = mj::Value::object();
         v.set("updated_at", util::now_sec());
         v.set("plans", plans(50));
@@ -1479,6 +1527,7 @@ private:
     std::unique_ptr<CoreManager> cores_;
     std::unique_ptr<SettingsStore> settings_;
     LlmPlanner::Config llm_cfg_;
+    AppSettings llm_proxy_;   // r24：chat 需要复用的代理/凭据快照
 
     mutable std::mutex mtx_;
     std::map<std::string, ExecutorEntry> executors_;
@@ -1493,14 +1542,17 @@ private:
     mutable std::mutex tp_mtx_;
     std::map<std::string, std::map<std::string, std::map<std::string, mj::Value>>>
         task_params_;   // exec_id -> task -> key -> value
-    uint64_t last_tp_save_ = 0;
+    uint64_t last_tp_save_ = 0;   // r24：仅在 tp_mtx_ 内读写
+    bool tp_pending_ = false;     // r24：节流窗口内待落盘的尾写（tp_mtx_ 保护）
+    bool tp_needs_flush_ = false; // r24：析构兜底标志（tp_mtx_ 保护）
 
     std::mutex plans_mtx_;
     std::vector<Plan> plans_;
     std::atomic<bool> stop_flag_{ false };
     std::atomic<bool> stopping_{ false };
-    std::thread exec_thread_;
-    uint64_t last_save_ = 0;
+    std::thread exec_thread_;   // r24：赋值前必须 detach 旧线程，否则 std::terminate
+    std::atomic<uint64_t> last_save_{ 0 };   // r24：worker 回调/执行/backend 三线并发节流
+    std::mutex save_mtx_;   // r24：序列化 state.json 的快照+落盘，防并发交错写
 
     // 调度器（构造起线程，析构 stopping_ + 有界等待回收）
     std::thread sched_thread_;

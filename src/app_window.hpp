@@ -187,6 +187,10 @@ private:
     std::map<std::string, std::map<std::string, TaskUiState>> task_ui_;
     // 首次打开某执行器时按官方预设初始化勾选
     std::map<std::string, bool> task_ui_seeded_;
+    // 任务面板参数同步控制（r24 P0：不再每帧从 Hub 拷贝参数并写回 task-params.json）
+    std::string panel_synced_key_;      // 上次同步的 "exec|task"
+    std::set<std::string> panel_loaded_; // 已从 Hub 同步过参数的 (exec,task)
+    bool panel_params_stale_ = true;    // 导入配置等外部写入后置脏，下一帧重新加载
     std::map<std::string, float> scroll_;
     // 滚动区内容高度（上一帧实测；scroll_ 的键一一对应）
     std::map<std::string, int> content_h_;
@@ -256,6 +260,7 @@ private:
     std::string last_plan_json_;
     // 核心
     std::string core_msg_;
+    std::mutex msg_mtx_;   // 保护 core_msg_：backend/post_action 线程写，UI 绘制线程读
     UpdateInfo update_info_;
     std::mutex upd_mtx_;   // 保护 update_info_ / has_update_info_（backend 写、UI 读）
     bool has_update_info_ = false;

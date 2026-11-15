@@ -139,9 +139,13 @@ public:
 
     static const std::map<std::string, std::string>& locale_flat() {
         static std::map<std::string, std::string> m;
-        static bool loaded = false;
-        if (!loaded) {
-            loaded = true;
+        // r24：按 locale 目录名失效，进程内切换核心目录后重新解析（原 loaded 标志
+        // 一旦置位就永久锁在第一次的 install_dir 上）
+        static std::string loaded_dir;
+        const std::string cur_dir = label_dir_ref();
+        if (loaded_dir != cur_dir) {
+            loaded_dir = cur_dir;
+            m.clear();
             for (auto& fp : locale_files()) {
                 std::string content;
                 if (!util::read_file(fp, content)) continue;
@@ -182,14 +186,17 @@ public:
     // 键优先级：option.<key>.label > task.<task>.option.<key>.label > 空（回退 key）
     static std::string option_label(const std::string& task, const std::string& key) {
         static std::map<std::string, std::string> cache;
-        static bool loaded = false;
+        // r24：`static bool loaded` 会把标签永久锁在首次的 install_dir；改为按目录失效
+        static std::string loaded_dir;
+        const std::string cur_dir = label_dir_ref();
+        if (loaded_dir != cur_dir) {
+            loaded_dir = cur_dir;
+            cache.clear();
+            load_option_labels(cache);
+        }
         std::string ck = task + "|" + key;
         auto ci = cache.find(ck);
         if (ci != cache.end()) return ci->second;
-        if (!loaded) {
-            loaded = true;
-            load_option_labels(cache);
-        }
         auto it = cache.find(ck);
         std::string v = it == cache.end() ? "" : it->second;
         cache[ck] = v;
@@ -212,14 +219,17 @@ public:
     static std::string case_label(const std::string& task, const std::string& key,
                                   const std::string& case_name) {
         static std::map<std::string, std::string> cache;
-        static bool loaded = false;
+        // r24：`static bool loaded` 会把标签永久锁在首次的 install_dir；改为按目录失效
+        static std::string loaded_dir;
+        const std::string cur_dir = label_dir_ref();
+        if (loaded_dir != cur_dir) {
+            loaded_dir = cur_dir;
+            cache.clear();
+            load_case_labels(cache);
+        }
         std::string ck = task + "|" + key + "|" + case_name;
         auto ci = cache.find(ck);
         if (ci != cache.end()) return ci->second;
-        if (!loaded) {
-            loaded = true;
-            load_case_labels(cache);
-        }
         // 依次尝试 task 专属、通配、归一化匹配
         std::string v;
         auto it = cache.find(ck);
@@ -657,10 +667,20 @@ public:
         set_label_install_dir(st_.install_dir + "\\locales");
         std::string maafw = st_.install_dir + "\\maafw";
         std::wstring dll = util::utf8_to_wide(st_.core_dll);
+        // r24 顺序修正：原先先 LoadLibrary、成功之后才 AddDllDirectory / 改 PATH，
+        // 顺序颠倒（回退分支与间接依赖解析不到同目录 DLL），且 PATH 会永久污染进程
+        // 环境、从不还原。改为先设默认搜索策略 + 注册 maafw 目录，再加载两个 DLL。
+        static std::once_flag s_dll_dirs_once;
+        std::call_once(s_dll_dirs_once, [] {
+            SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                                     | LOAD_LIBRARY_SEARCH_USER_DIRS);
+        });
+        cookie_ = AddDllDirectory(util::utf8_to_wide(maafw).c_str());
         HMODULE h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!h) h = LoadLibraryW(dll.c_str());
         if (!h) {
             st_.error = "LoadLibrary MaaFramework failed err=" + std::to_string(GetLastError());
+            if (cookie_) { RemoveDllDirectory(cookie_); cookie_ = nullptr; }
             return false;
         }
         lib_ = h;
@@ -679,18 +699,6 @@ public:
         if (!resolve_agent_symbols()) {
             st_.error = "missing MaaAgentClient exports";
             return false;
-        }
-        // DLL 依赖解析保障
-        cookie_ = AddDllDirectory(util::utf8_to_wide(maafw).c_str());
-        {
-            std::wstring path;
-            wchar_t buf[32768];
-            DWORD n = GetEnvironmentVariableW(L"PATH", buf, 32768);
-            if (n) path.assign(buf, n);
-            std::wstring add = util::utf8_to_wide(maafw);
-            if (path.find(add) == std::wstring::npos) {
-                SetEnvironmentVariableW(L"PATH", (add + L";" + path).c_str());
-            }
         }
         // 版本
         const char* ver = fn_.MaaVersion();
@@ -761,6 +769,8 @@ public:
         }
         agent_procs_.clear();
         if (tasker_) { fn_.MaaTaskerDestroy(tasker_); tasker_ = nullptr; }
+        // r24：ctrl_（Win32 控制器）原先在任何路径都没被销毁 —— 每次连接泄漏一个
+        if (ctrl_) { fn_.MaaControllerDestroy(ctrl_); ctrl_ = nullptr; }
         if (res_) { fn_.MaaResourceDestroy(res_); res_ = nullptr; }
         if (cookie_) { RemoveDllDirectory(cookie_); cookie_ = nullptr; }
         if (lib_) { FreeLibrary(lib_); lib_ = nullptr; }
@@ -952,6 +962,8 @@ public:
         st_.screencap_method = (int64_t)sc;
         st_.mouse_method = (int64_t)mm;
         st_.keyboard_method = (int64_t)km;
+        // r24：重复 connect 直接覆盖 ctrl_ 会泄漏上一句柄（UI「连接」按钮可反复点）
+        if (ctrl_) { fn_.MaaControllerDestroy(ctrl_); ctrl_ = nullptr; }
         void* ctrl = fn_.MaaWin32ControllerCreate((void*)wi.hwnd, sc, mm, km);
         if (!ctrl) {
             st_.conn = "failed";
@@ -963,6 +975,7 @@ public:
                     + " hwnd=" + std::to_string((intptr_t)wi.hwnd));
         int64_t cid = fn_.MaaControllerPostConnection(ctrl);
         if (cid <= 0) {
+            fn_.MaaControllerDestroy(ctrl); ctrl_ = nullptr;   // r24：失败也要回收
             st_.conn = "failed";
             st_.last_error = "MaaControllerPostConnection failed";
             return false;
@@ -970,17 +983,19 @@ public:
         int st = fn_.MaaControllerWait(ctrl, cid);
         util::trace("maaend connect waited st=" + std::to_string(st));
         if (st != MAA_STATUS_SUCCEEDED) {
+            fn_.MaaControllerDestroy(ctrl); ctrl_ = nullptr;   // r24：失败也要回收
             st_.conn = "failed";
             st_.last_error = "controller connect status=" + std::to_string(st);
             return false;
         }
         if (!fn_.MaaTaskerBindController(tasker_, ctrl)) {
+            fn_.MaaControllerDestroy(ctrl); ctrl_ = nullptr;   // r24：失败也要回收
             st_.conn = "failed";
             st_.last_error = "MaaTaskerBindController failed";
             return false;
         }
         int w = 0, hgt = 0;
-        fn_.MaaControllerGetResolution(ctrl, &w, &hgt);
+        const bool rok = fn_.MaaControllerGetResolution(ctrl, &w, &hgt) != false;
         void* sb = fn_.MaaStringBufferCreate();
         std::string uuid;
         if (fn_.MaaControllerGetUuid(ctrl, sb)) uuid = strbuf_get(sb);
@@ -993,11 +1008,20 @@ public:
         st_.uuid = uuid;
         st_.conn = "connected";
         st_.last_error.clear();
-        util::trace("maaend connected res=" + std::to_string(w) + "x" + std::to_string(hgt));
+        // r24：分辨率探测失败（返回 0x0）在 Endfield 实跑里正是模板匹配失效的
+        // 前兆，原先把返回值整个丢弃，这里打进 trace 便于定位
+        util::trace("maaend connected res=" + std::to_string(w) + "x" + std::to_string(hgt)
+                    + (rok ? "" : " (GetResolution failed)"));
         return true;
     }
 
-    void disconnect() override { st_.conn = "disconnected"; }
+    void disconnect() override {
+        // r24：原实现只改状态字符串，控制器句柄一直存活。这里真正销毁；
+        // tasker_ 上绑定的引用由框架内部引用计数保活，is_connected() 随 ctrl_
+        // 置空自然变 false，后续重连会重建新的控制器。
+        if (ctrl_) { fn_.MaaControllerDestroy(ctrl_); ctrl_ = nullptr; }
+        st_.conn = "disconnected";
+    }
 
     bool is_connected() override {
         if (!ctrl_) return false;

@@ -41,28 +41,26 @@ public:
     bool load() override {
         if (!st_.available) return false;
         std::wstring dll = util::utf8_to_wide(st_.core_dll);
+        // r24 顺序修正：原先先 LoadLibrary、成功后才 AddDllDirectory/改 PATH——顺序
+        // 颠倒，且 PATH 永久污染进程环境从不还原。改为：先设默认搜索策略并注册安装
+        // 目录，再加载（参照 main.cpp core_version_mode 的既有正确做法）。
+        static std::once_flag s_dll_dirs_once;
+        std::call_once(s_dll_dirs_once, [] {
+            SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                                     | LOAD_LIBRARY_SEARCH_USER_DIRS);
+        });
+        cookie_ = AddDllDirectory(util::utf8_to_wide(st_.install_dir).c_str());
         HMODULE h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!h) h = LoadLibraryW(dll.c_str());
         if (!h) {
             st_.error = "LoadLibrary failed: " + st_.core_dll + " err=" + std::to_string(GetLastError());
+            if (cookie_) { RemoveDllDirectory(cookie_); cookie_ = nullptr; }
             return false;
         }
         lib_ = h;
         if (!resolve_symbols()) {
             st_.error = "missing AsstApi exports";
             return false;
-        }
-        // 依赖解析保障：安装目录加入 DLL 搜索路径
-        cookie_ = AddDllDirectory(util::utf8_to_wide(st_.install_dir).c_str());
-        {
-            std::wstring path;
-            wchar_t buf[32768];
-            DWORD n = GetEnvironmentVariableW(L"PATH", buf, 32768);
-            if (n) path.assign(buf, n);
-            std::wstring add = util::utf8_to_wide(st_.install_dir);
-            if (path.find(add) == std::wstring::npos) {
-                SetEnvironmentVariableW(L"PATH", (add + L";" + path).c_str());
-            }
         }
         // user_dir 必须按执行器隔离：多个 maa worker 共享同一 install_dir 时，
         // MaaCore 各自的 asst.log（同一文件名）会因独占句柄竞争而集体静默丢日志
@@ -174,21 +172,28 @@ public:
             st_.last_error = "AsstAsyncAttachWindow returned " + std::to_string(call_id);
             return false;
         }
-        // 等待 AsyncCallInfo 回执
-        bool ok = false;
-        for (int i = 0; i < 75; ++i) {   // 15s
+        // 等待 AsyncCallInfo 回执（r24：收到明确的 ret=false 立刻结束，
+        // 不再干等 75×200ms；关联键按 taskid/call_id 双口径匹配——不同 MaaCore
+        // 版本 AsyncCallInfo 的字段名不一致，单认 taskid 可能永远匹配不上）
+        bool ok = false, answered = false;
+        for (int i = 0; i < 75 && !answered; ++i) {   // 最多 15s
             {
                 std::lock_guard<std::mutex> lk(ev_mtx_);
                 for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
-                    if (it->what == "AttachWindow" && it->task_id == call_id) {
-                        auto* d = it->details.find("details");
-                        ok = d && d->get_bool("ret", false);
-                        break;
+                    if (it->what != "AttachWindow") continue;
+                    bool match = it->task_id == call_id;
+                    if (auto* dd = it->details.find("details")) {
+                        if (!match && dd->get_int("call_id", -1) == call_id) match = true;
+                        if (!match && dd->get_int("callid", -1) == call_id) match = true;
                     }
+                    if (!match) continue;
+                    auto* d = it->details.find("details");
+                    ok = d && d->get_bool("ret", false);
+                    answered = true;
+                    break;
                 }
             }
-            if (ok) break;
-            Sleep(200);
+            if (!answered) Sleep(200);
         }
         st_.ctrl_mode = "win32";
         st_.ctrl_hwnd = (int64_t)(intptr_t)wi.hwnd;
@@ -197,12 +202,20 @@ public:
             st_.last_error.clear();
         } else {
             st_.conn = "failed";
-            st_.last_error = "attach rejected by MaaCore";
+            // r24：区分「核心明确拒绝」与「15 秒无回执」（原先两者报同一句话）
+            st_.last_error = answered
+                ? "attach rejected by MaaCore"
+                : "attach callback timeout (15s, no AsyncCallInfo)";
         }
         return ok;
     }
 
-    void disconnect() override { st_.conn = "disconnected"; }
+    void disconnect() override {
+        // r24：原实现只改状态字符串。AsstApi 没有单连接断开接口，这里至少
+        // 停掉正在执行的任务链；实例统一在 unload() 里 AsstDestroy 回收。
+        if (handle_) fn_.AsstStop(handle_);
+        st_.conn = "disconnected";
+    }
 
     bool is_connected() override {
         if (!handle_) return false;

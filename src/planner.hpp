@@ -7,6 +7,7 @@
 #include <winhttp.h>
 
 #include "json.hpp"
+#include "settings.hpp"   // r24：chat 需要 AppSettings 的代理配置
 #include "util.hpp"
 
 namespace hub {
@@ -200,8 +201,9 @@ public:
         int timeout_sec = 60;
     };
 
-    LlmPlanner(Config cfg, HeuristicPlanner fallback)
-        : cfg_(std::move(cfg)), fallback_(std::move(fallback)) {}
+    // settings 可为空；非空时 chat() 复用与 CoreManager 相同的代理/凭据（r24）
+    LlmPlanner(Config cfg, HeuristicPlanner fallback, const AppSettings* settings = nullptr)
+        : cfg_(std::move(cfg)), fallback_(std::move(fallback)), settings_(settings) {}
 
     Plan plan(const std::string& goal, const mj::Value& state, const mj::Value& catalog,
               const std::vector<mj::Value>& accounts, int max_steps = 12) {
@@ -240,9 +242,29 @@ public:
 private:
     // ---------------------------------------------------------------- HTTP
     std::string chat(const std::string& user_prompt) {
-        HINTERNET session = WinHttpOpen(L"MaaHub/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        // r24：以前硬编码 AUTOMATIC_PROXY，设置里的 HTTP/SOCKS5 代理与账密
+        // 完全不生效；这里复刻 CoreManager::open_session 的代理逻辑。
+        std::wstring proxy, bypass;
+        DWORD access = WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY;
+        if (settings_ && settings_->proxy_mode != "none"
+            && !settings_->proxy_host.empty() && settings_->proxy_port > 0) {
+            proxy = settings_->winhttp_proxy();
+            bypass = settings_->winhttp_bypass();
+            access = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+        }
+        HINTERNET session = WinHttpOpen(L"MaaHub/1.0", access,
+                                        proxy.empty() ? WINHTTP_NO_PROXY_NAME : proxy.c_str(),
+                                        bypass.empty() ? WINHTTP_NO_PROXY_BYPASS : bypass.c_str(),
+                                        0);
         if (!session) { last_error_ = "WinHttpOpen failed"; return {}; }
+        if (settings_ && !settings_->proxy_user.empty()) {
+            std::wstring u = util::utf8_to_wide(settings_->proxy_user);
+            std::wstring p = util::utf8_to_wide(settings_->proxy_pass);
+            WinHttpSetOption(session, WINHTTP_OPTION_PROXY_USERNAME,
+                             (LPVOID)u.c_str(), (DWORD)(u.size() + 1) * 2);
+            WinHttpSetOption(session, WINHTTP_OPTION_PROXY_PASSWORD,
+                             (LPVOID)p.c_str(), (DWORD)(p.size() + 1) * 2);
+        }
         DWORD timeout = (DWORD)cfg_.timeout_sec * 1000;
         WinHttpSetTimeouts(session, timeout, timeout, timeout, timeout);
 
@@ -301,6 +323,20 @@ private:
             WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
             return {};
         }
+        // r24：非 2xx 不再按 JSON 静默解析
+        DWORD status_code = 0;
+        {
+            DWORD sc = 0, sz = sizeof(sc);
+            if (WinHttpQueryHeaders(req,
+                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    WINHTTP_HEADER_NAME_BY_INDEX, &sc, &sz, WINHTTP_NO_HEADER_INDEX))
+                status_code = sc;
+        }
+        if (status_code && (status_code < 200 || status_code >= 300)) {
+            last_error_ = "HTTP " + std::to_string(status_code);
+            WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
+            return {};
+        }
         std::string resp;
         char buf[8192];
         DWORD n = 0;
@@ -308,10 +344,20 @@ private:
         WinHttpCloseHandle(req); WinHttpCloseHandle(conn); WinHttpCloseHandle(session);
 
         mj::Value j;
-        if (!mj::try_parse(resp, j)) { last_error_ = "bad response json"; return {}; }
+        if (!mj::try_parse(resp, j)) {
+            last_error_ = status_code
+                ? ("bad response json (HTTP " + std::to_string(status_code) + ")")
+                : "bad response json";
+            return {};
+        }
         auto* choices = j.find("choices");
         if (!choices || !choices->is_array() || choices->items().empty()) {
-            last_error_ = j.get_str("error", "no choices in response");
+            // r24：错误体是 {"error":{"message":"..."}}（对象），旧的
+            // get_str("error") 对对象永远取不到真实信息
+            std::string em = j.get_path_str("error.message", "");
+            if (em.empty()) em = j.get_str("error", "");
+            if (em.empty()) em = "no choices in response";
+            last_error_ = status_code ? ("HTTP " + std::to_string(status_code) + ": " + em) : em;
             return {};
         }
         if (auto* m = choices->items()[0].find("message")) {
@@ -432,6 +478,7 @@ private:
 
     Config cfg_;
     HeuristicPlanner fallback_;
+    const AppSettings* settings_ = nullptr;   // r24：代理/凭据来源（可为空）
     std::string last_error_;
 };
 

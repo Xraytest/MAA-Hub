@@ -332,6 +332,7 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
             save_task_list();
             refresh_snapshot();
         }
+        panel_params_stale_ = true;   // 导入直接改了 Hub 里的 task_params，UI 缓存作废
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
@@ -996,18 +997,23 @@ void MaaHubWindow::draw_post_action(RECT area, const std::string& id) {
           L"\u9700\u5728 Windows \u7535\u6e90\u9009\u9879\u4e2d\u542f\u7528\u4f11\u7720\u529f\u80fd\uff0c\u5426\u5219\u8be5\u529f\u80fd\u65e0\u6548\u3002" },
         { "shutdown",             L"\u5173\u673a", nullptr },
     };
+    bool pa_dirty = false;
     for (auto& it : items) {
         CheckState st = getb(it.key) ? CheckState::On : CheckState::Off;
         RECT r{ card.left + 20, y, card.right - 20, y + 22 };
-        gui_.checkbox3(("pa-" + id + "-" + it.key).c_str(), r, it.label, st);
-        p.set(it.key, st == CheckState::On);
+        bool touched = gui_.checkbox3(("pa-" + id + "-" + it.key).c_str(), r, it.label, st);
+        bool on = st == CheckState::On;
+        if (touched || on != getb(it.key)) {   // r24 P0：只在真正改动时更新并落盘
+            p.set(it.key, on);
+            pa_dirty = true;
+        }
         y += row_h;
         if (it.tip) {
             gui_.tip_line(card.left + 44, y - 6, card.right - 20, it.tip);
             y += 16;
         }
     }
-    save_post_action(id);
+    if (pa_dirty) save_post_action(id);
 }
 
 // 完成后动作的人类可读描述（对应官方 PostActionSetting.ActionDescription）
@@ -1791,14 +1797,23 @@ void MaaHubWindow::page_executor(RECT content) {
     int rx = right_col.left;
     if (!sel_task.empty() && sel_valid) {
         TaskUiState& ui = task_ui_[id][sel_task];
-        // 从持久层加载已保存的面板值（官方面板的设置是持久化的）
+        // 参数加载改为事件驱动（r24 P0）：只在首次使用、切换执行器/任务、导入完成
+        // 时从 Hub 同步一次；其余帧以 ui.params 为权威，不再每帧拷贝再写回
+        std::map<std::string, mj::Value> panel_before;
         {
-            mj::Value saved = hub_->task_params(id, sel_task);
-            for (auto& kv : saved.members()) {
-                // "__once_" 前缀为一次性标记，不持久化
-                if (kv.first.rfind("__once_", 0) == 0) continue;
-                ui.params[kv.first] = kv.second;
+            std::string sync_key = id + "|" + sel_task;
+            bool first_use = panel_loaded_.insert(sync_key).second;
+            if (panel_params_stale_ || first_use || sync_key != panel_synced_key_) {
+                panel_synced_key_ = sync_key;
+                panel_params_stale_ = false;
+                mj::Value saved = hub_->task_params(id, sel_task);
+                for (auto& kv : saved.members()) {
+                    // "__once_" 前缀为一次性标记，不持久化
+                    if (kv.first.rfind("__once_", 0) == 0) continue;
+                    ui.params[kv.first] = kv.second;
+                }
             }
+            panel_before = ui.params;
         }
         // 官方：ScrollViewer Grid.Row=0 → SimpleStackPanel Width=220，
         // 面板直接坐在页面背景上——无大标题、无独立卡片、无左侧竖线
@@ -1826,9 +1841,12 @@ void MaaHubWindow::page_executor(RECT content) {
         draw_task_panel(pctx, &specs);
         measured = pctx.y - right_col.top + 16;
         if (measured < panel_h) measured = panel_h;
-        // 面板修改写回持久层（一次性标记除外）
+        // 面板修改写回持久层（一次性标记除外）：与帧初快照逐键对比，只写真正变过的键
         for (auto& kv : ui.params) {
             if (kv.first.rfind("__once_", 0) == 0) continue;
+            auto bit = panel_before.find(kv.first);
+            if (bit != panel_before.end() && mj::Value::dump(bit->second) == mj::Value::dump(kv.second))
+                continue;
             hub_->set_task_param(id, sel_task, kv.first, kv.second);
         }
         gui_.end_scroll();
@@ -2056,7 +2074,7 @@ void MaaHubWindow::page_accounts(RECT content) {
         gui_.text(cols[3], ry + 6, gui::widen(a.get_str("match_mode", "")), gui_.theme.dim, gui_.font_small);
         gui_.text(cols[4], ry + 6, enabled ? L"启用" : L"停用",
                   enabled ? gui_.theme.ok : gui_.theme.err, gui_.font_small);
-        gui_.text(cols[5], ry + 6, last_run > 0 ? gui::widen(util::now_str()) : L"—",
+        gui_.text(cols[5], ry + 6, last_run > 0 ? gui::widen(util::fmt_time(last_run)) : L"—",
                   gui_.theme.dim, gui_.font_small);
         gui_.text(cols[6], ry + 6, done ? L"✅" : L"⏳",
                   done ? gui_.theme.ok : gui_.theme.warn, gui_.font_small);
@@ -2272,10 +2290,12 @@ void MaaHubWindow::page_cores(RECT content) {
         gui_.text_clipped({ bar.left + 14, bar.top + 40, bar.right - 14, bar.top + 60 },
                           root, gui_.theme.dim, gui_.font_small);
     }
-    if (!core_msg_.empty()) {
+    std::string notice;
+    { std::lock_guard<std::mutex> lk(msg_mtx_); notice = core_msg_; }
+    if (!notice.empty()) {
         gui_.text_clipped({ bar.right - 520, bar.top + 6, bar.right - 10, bar.top + 22 },
-                          gui::widen(core_msg_),
-                          core_msg_.find("失败") != std::string::npos ? gui_.theme.err : gui_.theme.ok,
+                          gui::widen(notice),
+                          notice.find("失败") != std::string::npos ? gui_.theme.err : gui_.theme.ok,
                           gui_.font_small);
     }
 
@@ -2531,7 +2551,7 @@ void MaaHubWindow::page_planner(RECT content) {
     for (auto& p : plans) {
         if (ry + row_h < ty) { ry += row_h; continue; }
         if (!gui_.row_fully_visible(ry, row_h)) break;   // 按裁剪区底剔除，别裁半行
-        gui_.text(cols[0], ry + 4, gui::widen(util::now_str()), gui_.theme.dim, gui_.font_small);
+        gui_.text(cols[0], ry + 4, gui::widen(util::fmt_time((double)p.get_int("ts", 0))), gui_.theme.dim, gui_.font_small);
         gui_.text(cols[1], ry + 4, gui::widen(p.get_str("planner", "")), gui_.theme.text, gui_.font_small);
         {
             gui_.text_clipped({ cols[2], ry + 4, cols[3] - 10, ry + 22 },
@@ -2844,7 +2864,11 @@ void MaaHubWindow::post_action(std::function<void()> fn, const std::string& busy
 }
 
 void MaaHubWindow::set_notice(const std::string& s) {
-    core_msg_ = s;
+    {
+        // r24：core_msg_ 被 backend/post_action 线程写、UI 线程读，必须同锁
+        std::lock_guard<std::mutex> lk(msg_mtx_);
+        core_msg_ = s;
+    }
     std::lock_guard<std::mutex> lk(snap_mtx_);
     ++snap_version_;
 }
@@ -3304,10 +3328,13 @@ void MaaHubWindow::page_settings(RECT content) {
         if (gui_.button("set-import", ib, L"\u5bfc\u5165\u914d\u7f6e...", 0)) {
             action_import_config();
         }
-        if (!core_msg_.empty()) {
-            gui_.text_clipped({ content.left + 156, y + 6, content.right, y + 28 },
-                              gui::widen(core_msg_),
-                              core_msg_.find("\u5931\u8d25") != std::string::npos
+        std::string notice;
+        { std::lock_guard<std::mutex> lk(msg_mtx_); notice = core_msg_; }
+        if (!notice.empty()) {
+            // r24：起点从 +156 移到 +312，原来和「导入配置...」按钮同位置互相遮盖
+            gui_.text_clipped({ content.left + 312, y + 6, content.right, y + 28 },
+                              gui::widen(notice),
+                              notice.find("失败") != std::string::npos
                                   ? gui_.theme.err : gui_.theme.ok,
                               gui_.font);
         }
