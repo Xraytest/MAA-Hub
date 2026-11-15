@@ -548,6 +548,11 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 
 1. **attach 关联键未实测**：`AsstAsyncAttachWindow` 的事件匹配现在同时接受 `taskid`/`call_id`/`callid`，因为本仓没有任何 AsyncCallInfo 抓包能证明真名（`_cmp` 里只有 `taskid` 的 TaskChain 样本）。需要一次真机 `--cli connect` 才能收敛到单键。
 2. **`MaaControllerGetResolution` 返回值**：现在捕获并在 `0x0` 时 trace `(GetResolution failed)`，但这只是可观测性。Endfield 上 `image.size()=[1200,720]` 与 `fit client=1280x720` 不一致这条**根因未修**。
+
+   **r24 远端实测（11-16 03:2x，WorkCenter session-1，AutoEcoFarm task_id=200000001）**：
+   - `--cli connect`：session 0 报 `game window not found`（SSH 会话看不到 session 1 桌面，属测试姿势问题非缺陷）；改经交互式计划任务在 session 1 跑 → `connect=1 conn=connected`，trace 首次打出 `maaend connected res=0x0 (GetResolution failed)` —— r24 新增的可观测性在真机生效，证实分辨率探测确实拿不到值。
+   - `--cli run … AutoEcoFarm … --timeout 660`：`finished state=failed elapsed=288s`。**与 v1.0.0 的失败形态不同**：不再是 497s 超时，而是完整走完 pipeline（截图/识别/动作链路全部工作，`Node.Recognition.Succeeded`/`Node.Action.Succeeded` 连续推进），最终命中 `AutoEcoFarmRanchFailed` → 收尾自定义动作 `FailureCollectorFinish [ret=false]` → `Tasker.Task.Failed`。即「业务级判定：牧场环节失败」，编排与输入输出通路是活的。
+   - 但 `image.size()=[1200,720]` 的 `roi out of range` WRN 仍出现在本次运行内（03:26:53）：`fit client=1280x720` 改的是窗口外框（RECT=100,60,1396,867 → 1296x807），screendc 实际抓到的图仍是 1200x720 —— 抓图尺寸与逻辑分辨率不一致这条**没修好**，`GetResolution failed` 与之同链路。下一步应从「screendc 抓的是 client 还是 backbuffer、Endfield 内部分辨率设置」切入。
 3. **`post_action_` / `auto_reload_` 仍是空转 UI**：本轮只停止它们每帧写盘，没有补后端执行，也没有移除入口（属产品决策，报告 §五.1/§六第 4 步）。
 4. **`unload()` 的 `MaaStringBuffer` 泄漏、未使用的 14 个 FFI 成员、§三/§四 抽层与拆分**：均按纪律排除留给后续轮。
 5. 报告 §二.3 里 `tmp-<hex>` / `_download` 的命名不成立（真实为固定 `cores\.tmp`）；§二.2 的 `LoadLibrary` 顺序问题严重度被高估（`LOAD_WITH_ALTERED_SEARCH_PATH` 已覆盖同目录静态导入，真正受影响的是 `LoadLibraryW` 回退路径与缺失的 `SetDefaultDllDirectories`），但修法一致，仍按正确顺序改了。
@@ -679,7 +684,7 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 - 源码行数/字节（r24 后实测，含空行总行数）：全树 **14,369 行 / 670,321 B**（r22 后为 13,982 行；r23 +160/−4 未登记，r24 +343/−116）。`util.hpp` 575 / 23,174 B、`hub.hpp` 1566 / 69,371 B、`planner.hpp` 485 / 22,634 B、`accounts.hpp` 262 / 10,988 B、`core_manager.hpp` 963 / 46,305 B、`main.cpp` 989 / 46,828 B、`worker_main.cpp` 183 / 7,534 B、`worker_main.hpp` 7 / 146 B、`config_import.hpp` 926 / 45,263 B、`app_window.cpp` 3,466 / 168,087 B、`app_window.hpp` 297 / 13,988 B、`task_panels.hpp` 917 / 46,966 B、`maaend_adapter.hpp` 1,386 / 66,892 B、`maa_adapter.hpp` 499 / 23,633 B、`adapter.hpp` 96 / 3,343 B、`gui.hpp` 920 / 44,377 B、`json.hpp` 455 / 15,590 B、`settings.hpp` 183 / 7,886 B、`worker_client.hpp` 194 / 7,316 B。
 - `assets\MaaCore.dll` 未被本轮触碰：56,198,144 B，MD5 `6701554378F11708A9CF452621F06619`。
 - **验收门已从三重升级为四重，且门 4 有两个形态**：编译 + 探针逐字节 + 独立沙箱导入 18 条 + 差分测试。门 4 形态 A = 单函数差分（`parse_url_diff` 类，验证搬移/重写的函数体）；形态 B = **双 exe CLI 差分**（r14 新增，旧二进制 vs 新二进制各建沙箱、各拷同一份 state，逐例比 EXIT + 完整 stdout，验证改动落在分发路径/UI 侧时仍能给出可执行断言）。r15 用一次 75 处的大批改动把这套门走完（A/B 均 0 mismatch），说明门的粒度足以覆盖"批量删除"这种最难用肉眼确认的变更。门 4 的引入是对"回归门不执行被改代码"这一证据缺口的直接补强。
-- **部署状态（2026-11-16 02:5x 口径）**：远端 WorkCenter（`C:\Users\xray\Documents\MaaHub\build\MaaHub.exe`）仍在跑 **r23/v1.0.0 = 1,467,904 B / SHA256 `EF7027C8…`**（进程启动于 11-14 20:30:57，与发布资产同哈希）。r24 **未部署**：Endfield 的 `AutoEcoFarmTask` 两次实跑仍是 `ret=false`（根因未修），按纪律不做部署/推送/发 release。
+- **部署状态（2026-11-16 03:1x 更新）**：WorkCenter 已部署 **r24 = 1,475,584 B / SHA256 `532E61D3…`**（六阶段：备份 `_r24scratch\backup\MaaHub-1467904-20261116-031313.exe` → 停 7 进程 → 安装 → 经 `MaaHubScheduler` 交互任务拉起 → 复核 `PROCS=7 / STATE_JSON=9 / serve pid=319156`；`_r24_incoming` 与本地构建逐字节同哈希，远端回拉件与本地件同为 `532E61D3…`）。备份原件 = v1.0.0 发布件（`EF7027C8…`），watchdog 每 5 分钟保活。**release 未发**：r24 的 Endfield 实测仍 `ret=false`（详见下方实测条目），不满足「Endfield 测试完成」的发版前置。本地误建的 `v1.0.1` tag 已删除，远端只有 v1.0.0。
 - **本轮（r24）验收门口径变更**：历史门 `probe_norm.exe` 逐字节 golden 与 `iso_import` 18 条依赖本机已不存在的 `D:\Application\MAA`/`D:\Application\MaaEnd`，改由双 exe `--cli override` 差分（门②）+ `--check/--self-test`（门③）+ 双 exe 双跑渲染确定性（门④）承担；门④的 cross-exe 差异必须逐一定位到像素 bbox 或同盒对照复测，不允许「同尺寸不同内容」悬空。
 - **测试一律远端执行（用户硬性纪律）**：本轮全部门 2/3/4 均在 WorkCenter 远端跑，含新增的双 exe 差分类。本机 `pwsh` 只做文件哈希/文本比对/脚本下发，**不执行任何产品程序或测试程序**（20:36 那次本地误启动的教训见 §五 事故复盘条）。
 - 长期目标保持 armed，继续迭代 review。
