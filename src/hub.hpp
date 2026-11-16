@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
@@ -174,6 +175,11 @@ public:
         }
         for (auto& t : stops) t.join();
         util::trace("hub dtor workers stopped");
+        {
+            std::unique_lock<std::mutex> lk(tp_mtx_);
+            seq_cv_.wait_for(lk, std::chrono::milliseconds(2000),
+                             [this] { return active_seq_count_ == 0; });
+        }
         // r24：800ms 节流窗口内被挡住、尚未落盘的 task-params 尾写在退出前 flush
         //（防退出丢尾）。worker 已全部停止，这里只剩确定性的收尾写，不再拖慢关闭。
         {
@@ -780,6 +786,22 @@ public:
 
     std::string run_task_sequence(const std::string& exec_id,
                                   std::vector<std::string> tasks) {
+        struct SeqGuard {
+            Hub* h;
+            std::string id;
+            bool owns = false;
+            SeqGuard(Hub* hub, std::string exec) : h(hub), id(std::move(exec)) {
+                std::lock_guard<std::mutex> lk(h->tp_mtx_);
+                owns = h->seq_running_.insert(id).second;
+            }
+            ~SeqGuard() {
+                if (owns) {
+                    std::lock_guard<std::mutex> lk(h->tp_mtx_);
+                    h->seq_running_.erase(id);
+                }
+            }
+        } seq_guard(this, exec_id);
+
         ExecutorEntry e;
         if (!get_executor(exec_id, e)) return "no-executor";
         tasks = canonical_task_order(e.kind, std::move(tasks));
@@ -812,6 +834,56 @@ public:
             if (it != plans_.end()) status = it->status;
         }
         return status;
+    }
+
+    // 异步派发单执行器任务串（调度器与「启动后直接运行」共用），
+    // 不阻塞 scheduler_loop 的 10s tick，也不让多执行器互相延迟。
+    bool dispatch_sequence(const std::string& exec_id, std::vector<std::string> tasks) {
+        if (stopping_ || exec_id.empty() || tasks.empty()) return false;
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            if (!seq_running_.insert(exec_id).second) return false;
+            ++active_seq_count_;
+        }
+        std::thread([this, exec_id, tasks = std::move(tasks)]() mutable {
+            try {
+                std::string st = run_task_sequence(exec_id, std::move(tasks));
+                util::trace("[sched] " + exec_id + " -> " + st);
+            } catch (const std::exception& e) {
+                util::trace("[sched] async seq exception: " + std::string(e.what()));
+            } catch (...) {
+                util::trace("[sched] async seq unknown exception");
+            }
+            {
+                std::lock_guard<std::mutex> lk(tp_mtx_);
+                seq_running_.erase(exec_id);
+                if (active_seq_count_ > 0) --active_seq_count_;
+            }
+            seq_cv_.notify_all();
+        }).detach();
+        return true;
+    }
+
+    // 「启动后直接运行」：按 state\task-lists.json 异步拉起所有已启用且有任务串的执行器。
+    void run_startup_tasks() {
+        if (stopping_) return;
+        mj::Value lists = mj::Value::object();
+        std::string content;
+        if (!util::read_file(util::exe_dir() + "\\state\\task-lists.json", content)
+            || !mj::try_parse(content, lists) || !lists.is_object()) {
+            return;
+        }
+        for (auto& e : executors()) {
+            if (!e.enabled) continue;
+            auto* lst = lists.find(e.id);
+            if (!lst || !lst->is_array() || lst->items().empty()) continue;
+            std::vector<std::string> tasks;
+            for (auto& t : lst->items()) {
+                std::string name = t.as_string();
+                if (!name.empty()) tasks.push_back(name);
+            }
+            if (!tasks.empty()) dispatch_sequence(e.id, std::move(tasks));
+        }
     }
 
     // 合并导入的调度条目（GUI 导入按钮与 CLI import 共用）。
@@ -851,8 +923,9 @@ public:
     }
 
     // 调度器一次扫描。返回触发的执行器数。
-    // 只从调度器线程或 CLI sched-tick 调用：会重置 stop_flag_ 并同步跑完任务串。
-    int scheduler_tick() {
+    // async_exec=false 时（CLI sched-tick）同步跑完任务串；
+    // async_exec=true 时（驻留调度循环）按执行器异步派发，不阻塞下一分钟其他执行器的到点检测。
+    int scheduler_tick(bool async_exec = false) {
         if (stopping_) return 0;
         mj::Value sched;
         {
@@ -885,13 +958,15 @@ public:
         struct Due { size_t idx; std::string key; };
         std::vector<Fire> fires;
         std::vector<Due> due;
+        std::set<std::string> queued_execs;
 
         size_t idx = 0;
         for (auto& entry : entries->items()) {
             const size_t i = idx++;
             if (!entry.get_bool("enabled", false)) continue;
             const std::string exec_id = entry.get_str("exec_id", "");
-            if (exec_id.empty() || !running_task_of(exec_id).empty()) continue; // 忙：跳过且不标记
+            if (exec_id.empty() || !running_task_of(exec_id).empty()
+                || is_seq_running(exec_id)) continue; // 忙：跳过且不标记
             // 到点判定
             if (entry.get_str("kind", "") == "maaend") {
                 auto* wd = entry.find("weekdays");
@@ -919,14 +994,16 @@ public:
                 if (!name.empty()) tasks.push_back(name);
             }
             if (tasks.empty()) continue;
+            if (!queued_execs.insert(exec_id).second) continue; // 同执行器同分钟不重复入队
             // 执行器存在且启用；worker 懒生成（executors.json 加载后 worker 为空）
             ExecutorEntry e;
             if (!get_executor(exec_id, e) || !e.enabled) continue;
+            if (stopping_) return 0;
             if (!worker_of(exec_id)) spawn_worker(exec_id);
             due.push_back({ i, exec_id + "\x1f" + entry.get_str("source", "") });
             fires.push_back({ exec_id, std::move(tasks) });
         }
-        if (fires.empty()) return 0;
+        if (fires.empty() || stopping_) return 0;
 
         // 先标记当日已触发再 fire：长任务期间 10 秒 tick 不会重复入队
         {
@@ -948,9 +1025,13 @@ public:
         int fired = 0;
         for (auto& f : fires) {
             if (stopping_) break;
-            std::string status = run_task_sequence(f.exec_id, f.tasks);
-            util::trace("[sched] " + f.exec_id + " -> " + status);
-            ++fired;
+            if (async_exec) {
+                if (dispatch_sequence(f.exec_id, std::move(f.tasks))) ++fired;
+            } else {
+                std::string status = run_task_sequence(f.exec_id, f.tasks);
+                util::trace("[sched] " + f.exec_id + " -> " + status);
+                ++fired;
+            }
         }
         return fired;
     }
@@ -1006,6 +1087,11 @@ public:
         std::lock_guard<std::mutex> lk(tp_mtx_);
         auto it = running_task_.find(exec_id);
         return it == running_task_.end() ? std::string() : it->second;
+    }
+
+    bool is_seq_running(const std::string& exec_id) const {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        return seq_running_.count(exec_id) > 0;
     }
 
     void set_running_task(const std::string& exec_id, const std::string& task) {
@@ -1377,7 +1463,7 @@ private:
             for (int i = 0; i < 10 && !stopping_; ++i) Sleep(1000);   // 10s tick
             if (stopping_) break;
             try {
-                scheduler_tick();
+                scheduler_tick(/*async_exec=*/true);
             } catch (const std::exception& e) {
                 util::trace(std::string("[sched] tick exception: ") + e.what());
             } catch (...) {
@@ -1538,6 +1624,9 @@ private:
     std::map<std::string, mj::Value> data_;
 
     std::map<std::string, std::string> running_task_;   // exec_id -> 当前运行任务
+    std::set<std::string> seq_running_;                 // 正在运行任务串的 exec_id
+    int active_seq_count_ = 0;                          // 异步任务串计数（tp_mtx_ 保护）
+    std::condition_variable seq_cv_;
     std::map<std::string, std::map<std::string, std::string>> task_result_;
     mutable std::mutex tp_mtx_;
     std::map<std::string, std::map<std::string, std::map<std::string, mj::Value>>>

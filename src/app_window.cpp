@@ -14,6 +14,28 @@ namespace hub {
 using gui::Input;
 using gui::CheckState;
 
+static void sync_auto_start_registry(bool enable) {
+    HKEY hk = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &hk) != ERROR_SUCCESS) {
+        return;
+    }
+    if (enable) {
+        wchar_t exe[MAX_PATH] = {};
+        DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::wstring val = std::wstring(L"\"") + exe + L"\"";
+            RegSetValueExW(hk, L"MaaHub", 0, REG_SZ,
+                           (const BYTE*)val.c_str(),
+                           (DWORD)((val.size() + 1) * sizeof(wchar_t)));
+        }
+    } else {
+        RegDeleteValueW(hk, L"MaaHub");
+    }
+    RegCloseKey(hk);
+}
+
 // 最小 CRC32（PNG 用）
 static uint32_t crc32_calc(const uint8_t* d, size_t n) {
     static uint32_t table[256];
@@ -121,21 +143,27 @@ bool MaaHubWindow::create() {
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(hwnd_, SW_HIDE);
     } else {
-        ShowWindow(hwnd_, SW_SHOW);
-    }
-    UpdateWindow(hwnd_);
-    SetTimer(hwnd_, TIMER_REFRESH, 250, nullptr);
-
-    if (!offscreen_) {
-        // r25：窗口图标 + 托盘注册。offscreen_（--dump-render / 离屏基线）不碰，
-        // 免得无人值守渲染在托盘里多挂一个图标、改变探针环境。
+        // r25：窗口图标 + 托盘注册先于 ShowWindow，支持「启动后直接最小化」静默进托盘。
+        // offscreen_（--dump-render / 离屏基线）不碰，免得无人值守渲染在托盘多挂图标。
+        wm_taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
+        wm_activate_ = RegisterWindowMessageW((L"MaaHub_Activate_" + util::instance_key()).c_str());
         tray_big_ = make_icon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
         tray_small_ = make_icon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         if (tray_big_) SendMessageW(hwnd_, WM_SETICON, ICON_BIG, (LPARAM)tray_big_);
         if (tray_small_) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, (LPARAM)tray_small_);
         tray_icon_ = tray_small_ ? tray_small_ : tray_big_;
         tray_add();
+
+        AppSettings st = hub_->settings().get();
+        if (st.auto_start) sync_auto_start_registry(true);
+        if (st.start_minimized) {
+            ShowWindow(hwnd_, tray_added_ ? SW_HIDE : SW_SHOWMINNOACTIVE);
+        } else {
+            ShowWindow(hwnd_, SW_SHOW);
+        }
     }
+    UpdateWindow(hwnd_);
+    SetTimer(hwnd_, TIMER_REFRESH, 250, nullptr);
 
     running_ = true;
     backend_ = std::thread([this] { backend_loop(); });
@@ -368,6 +396,15 @@ LRESULT CALLBACK MaaHubWindow::wnd_proc(HWND hwnd, UINT m, WPARAM wp, LPARAM lp)
 }
 
 LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
+    if (wm_taskbar_created_ && m == wm_taskbar_created_ && !offscreen_) {
+        tray_added_ = false;
+        tray_add();
+        return 0;
+    }
+    if (wm_activate_ && m == wm_activate_) {
+        tray_show();
+        return 0;
+    }
     switch (m) {
     case WM_MOUSEMOVE:
         input_.mouse.x = GET_X_LPARAM(lp);
@@ -417,6 +454,9 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_TIMER:
         if (wp == TIMER_REFRESH) {
+            if (!offscreen_ && !tray_added_ && (++tray_retry_ticks_ % 4 == 0)) {
+                tray_add();
+            }
             uint64_t seen = 0;
             {
                 std::lock_guard<std::mutex> lk(snap_mtx_);
@@ -528,16 +568,28 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     case WM_CLOSE:
         // r25：对齐官方「关闭主界面时 → 最小化到系统托盘」。托盘没注册成功
         // （offscreen、NIM_ADD 失败）或走的是托盘「退出」，都照常销毁窗口。
-        if (tray_added_ && !tray_exiting_) {
-            ShowWindow(hwnd_, SW_HIDE);
-            if (!tray_hint_shown_) {
-                tray_hint_shown_ = true;
-                tray_balloon(L"MaaHub 仍在后台运行",
-                             L"双击托盘图标恢复窗口；右键托盘图标可退出程序。");
+        if (!offscreen_ && !tray_exiting_) {
+            if (!tray_added_) tray_add();
+            if (tray_added_) {
+                ShowWindow(hwnd_, SW_HIDE);
+                if (!tray_hint_shown_) {
+                    tray_hint_shown_ = true;
+                    tray_balloon(L"MaaHub 仍在后台运行",
+                                 L"双击托盘图标恢复窗口；右键托盘图标可退出程序。");
+                }
+                return 0;
             }
-            return 0;
         }
         return DefWindowProcW(hwnd, m, wp, lp);
+    case WM_QUERYENDSESSION:
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wp) {
+            tray_exiting_ = true;
+            tray_remove();
+            DestroyWindow(hwnd);
+        }
+        return 0;
     case WM_COMMAND: {
         WORD id = LOWORD(wp);
         if (id == IDM_TRAY_SHOW) { tray_show(); return 0; }
@@ -2063,7 +2115,9 @@ void MaaHubWindow::page_executor(RECT content) {
     //   Row1 = 「完成后」：ActionTitle + Divider + ActionDescription，右侧齿轮 RadioButton
     //   Row2 = Link Start! / 停止（官方同一时刻只可见一个，Width=100 Height=50 Margin=5，居中）
     //          其下 = 自动重载资源（CanShowAutoReload 时可见）
-    bool busy = connected && hub_->executor_status(id, 0).get_bool("busy", false);
+    mj::Value est = connected ? hub_->executor_status(id, 0) : mj::Value::object();
+    std::string erun = est.get_str("run", "");
+    bool busy = connected && (est.get_bool("busy", false) || erun == "running" || erun == "stopping");
 
     // Grid.Row=1：完成后（官方 StackPanel Width=210 = 内层 185 文本 + 右侧齿轮）
     {
@@ -2921,6 +2975,9 @@ void MaaHubWindow::backend_loop() {
     PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
     fprintf(stderr, "[startup] first_paint=%.0fms start_all=%.0fms full_ready=%.0fms\n",
             (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t0) * 1000);
+    if (!offscreen_ && hub_->settings().get().start_run) {
+        hub_->run_startup_tasks();
+    }
     while (running_) {
         // ---- 自动更新：启动检查 + 定时检查（对齐 MAA CheckOnStartup / CheckOnSchedule）
         // 二者都在 backend 线程执行，不占 UI 线程。
@@ -3014,7 +3071,8 @@ void MaaHubWindow::poll_task_states() {
         if (running.empty()) continue;
         mj::Value st = hub_->executor_status(e.id, 0);
         // worker 已停止/停止中，或该执行器没有正在跑的任务 => 结束
-        bool busy = st.get_bool("busy", false);
+        std::string run_st = st.get_str("run", "");
+        bool busy = st.get_bool("busy", false) || run_st == "running" || run_st == "stopping";
         if (!busy) {
             std::string err = st.get_str("last_error", "");
             hub_->set_task_result(e.id, running, err.empty() ? "ok" : "error");
@@ -3406,7 +3464,7 @@ void MaaHubWindow::page_settings(RECT content) {
         y += 30;
     }
     note(L"\u5b98\u65b9\u8fd8\u652f\u6301\u754c\u9762\u4e3b\u9898\u3001\u8fc7\u6e21\u52a8\u753b\u3001\u5e72\u5458\u540d\u79f0\u8bed\u8a00\u3001"
-         L"\u65e5\u5fd7\u5361\u7247\u6837\u5f0f\u3001\u6258\u76d8\u56fe\u6807\u7b49\uff08MaaHub \u672a\u5b9e\u73b0\uff09");
+         L"\u65e5\u5fd7\u5361\u7247\u6837\u5f0f\u7b49\uff08MaaHub \u672a\u5b9e\u73b0\uff09");
 
             // ---------------- 启动设置（官方 9 项，MaaHub 实现可行子集）----------------
     group(L"\u542f\u52a8\u8bbe\u7f6e");
@@ -3556,6 +3614,7 @@ void MaaHubWindow::action_save_settings() {
             s.github_token = gh_token;
         });
         if (ok) {
+            sync_auto_start_registry(auto_start);
             hub_->reload_llm_config();
             set_notice("设置已保存");
         } else {

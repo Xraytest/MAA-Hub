@@ -9,6 +9,8 @@ set ROOT=%~dp0
 if "%ROOT:~-1%"=="\" set ROOT=%ROOT:~0,-1%
 
 set VCVARS="C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+if not exist %VCVARS% set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+if not exist %VCVARS% set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 if not exist %VCVARS% (
     echo [ERROR] vcvars64.bat not found: %VCVARS%
     exit /b 1
@@ -33,7 +35,7 @@ REM identical warning set, byte-equal normalize probe, semantic-equal import + 6
 REM /GR-: disable RTTI. Verified 2026-11-13 (r19): whole tree has ZERO dynamic_cast/typeid/type_info
 REM usage, no third-party TUs; exe 1463296 -> 1455104 B (-8192 B, -0.56%) with identical gates 2/3/4.
 set CLFLAGS=/nologo /EHsc /std:c++17 /W3 /utf-8 /Fo:%ROOT%\build\ /Fe:%ROOT%\build\MaaHub.exe
-set LINKFLAGS=gdi32.lib user32.lib shell32.lib winhttp.lib advapi32.lib msimg32.lib
+set LINKFLAGS=/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup gdi32.lib user32.lib shell32.lib winhttp.lib advapi32.lib msimg32.lib
 
 if /i "%CONFIG%"=="debug" (
     set CLFLAGS=%CLFLAGS% /Zi /Od

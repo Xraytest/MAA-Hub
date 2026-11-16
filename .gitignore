@@ -44,3 +44,6 @@ _cmp/
 
 # docs top-level loose screenshots (local artifacts; doc images live in docs/assets/)
 docs/*.png
+
+# GitHub 访问令牌（本地凭据，绝不提交）
+.github-token*

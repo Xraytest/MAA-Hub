@@ -293,6 +293,9 @@ private:
     bool tray_added_ = false;                       // NIM_ADD 成功，负责 NIM_DELETE
     bool tray_exiting_ = false;                     // 托盘「退出」置位：WM_CLOSE 不再拦截
     bool tray_hint_shown_ = false;                  // 首次隐藏到托盘时发一条气泡
+    UINT wm_taskbar_created_ = 0;                   // Explorer 重启重建托盘图标
+    UINT wm_activate_ = 0;                          // 单实例再次启动时唤醒已驻留窗口
+    int tray_retry_ticks_ = 0;                      // 开机自启时壳尚未就绪的重试计数
     HICON tray_icon_ = nullptr;                     // 托盘当前引用的小图标
     HICON tray_big_ = nullptr;                      // WM_SETICON(ICON_BIG) 持有的自绘图标
     HICON tray_small_ = nullptr;                    // WM_SETICON(ICON_SMALL) + 托盘图标

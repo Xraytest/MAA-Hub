@@ -642,12 +642,24 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
     return 2;
 }
 
+static void attach_parent_console_if_needed() {
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out == nullptr || out == INVALID_HANDLE_VALUE || GetFileType(out) == FILE_TYPE_UNKNOWN) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            FILE* f = nullptr;
+            freopen_s(&f, "CONOUT$", "w", stdout);
+            freopen_s(&f, "CONOUT$", "w", stderr);
+        }
+    }
+    SetConsoleOutputCP(CP_UTF8);
+    setvbuf(stdout, nullptr, _IONBF, 0);
+}
+
 int main(int argc, char** argv) {
     // GDI+ 是 GUI/离屏渲染才需要的依赖：以前在入口无条件 Startup 且从不 Shutdown，
     // --worker/--cli/--core-version 纯控制台进程也跟着加载 gdiplus（r24 修）。
     bool gdiplus_ready = false;
 
-    SetConsoleOutputCP(CP_UTF8);
     setvbuf(stdout, nullptr, _IONBF, 0);
     std::set_terminate([] {
         crash_log("std::terminate (uncaught exception in thread)");
@@ -707,8 +719,10 @@ int main(int argc, char** argv) {
         else if (a == "--config" && i + 1 < argc) config_path = argv[++i];
         else if (a == "--port" && i + 1 < argc) ++i;   // 兼容旧参数：仅吞掉端口值（GUI 模式忽略）
         else if (a == "--core-version" && i + 2 < argc) {
+            attach_parent_console_if_needed();
             return core_version_mode(argv[i + 1], argv[i + 2]);
         } else if (a == "--import-core" && i + 2 < argc) {
+            attach_parent_console_if_needed();
             // 一次性迁移：把系统已有安装复制进 MaaHub 内部 cores 目录
             std::string kind = argv[++i];
             std::string path = argv[++i];
@@ -738,6 +752,10 @@ int main(int argc, char** argv) {
             }
             return worker_main(kind, cfgv);
         }
+    }
+
+    if (cli_mode || check_only || self_test || startup_bench || settings_dump || dump_render) {
+        attach_parent_console_if_needed();
     }
 
     mj::Value config = load_config(config_path);
@@ -971,6 +989,28 @@ int main(int argc, char** argv) {
     }
 
     // ---------------- GUI 模式（原生窗口） ----------------
+    HANDLE single_mtx = nullptr;
+    if (!offscreen) {
+        std::wstring key = util::instance_key();
+        std::wstring mtx_name = L"Local\\MaaHub_Instance_" + key;
+        std::wstring msg_name = L"MaaHub_Activate_" + key;
+        single_mtx = CreateMutexW(nullptr, FALSE, mtx_name.c_str());
+        if (single_mtx && GetLastError() == ERROR_ALREADY_EXISTS) {
+            UINT wm_act = RegisterWindowMessageW(msg_name.c_str());
+            if (wm_act) {
+                EnumWindows([](HWND hw, LPARAM lp) -> BOOL {
+                    wchar_t cls[64] = {};
+                    if (GetClassNameW(hw, cls, 64) > 0 && wcscmp(cls, L"MaaHubMainWindow") == 0) {
+                        PostMessageW(hw, (UINT)lp, 0, 0);
+                    }
+                    return TRUE;
+                }, (LPARAM)wm_act);
+            }
+            CloseHandle(single_mtx);
+            return 0;
+        }
+    }
+
     // r24：GDI+ 只在实际要画图的分支初始化，退出前配对 Shutdown
     Gdiplus::GdiplusStartupInput gpsi;
     ULONG_PTR gdiplus_token = 0;
@@ -979,11 +1019,13 @@ int main(int argc, char** argv) {
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     MaaHubWindow win(hInst, config, offscreen);
     if (!win.create()) {
+        if (single_mtx) CloseHandle(single_mtx);
         Gdiplus::GdiplusShutdown(gdiplus_token);
         MessageBoxW(nullptr, L"窗口创建失败", L"MaaHub", MB_ICONERROR);
         return 1;
     }
     int rc = win.run();
     if (gdiplus_ready) Gdiplus::GdiplusShutdown(gdiplus_token);
+    if (single_mtx) CloseHandle(single_mtx);
     return rc;
 }

@@ -373,6 +373,21 @@ inline std::string exe_dir() {
     return util::wide_to_utf8(p);
 }
 
+// Per-install-directory 64-bit FNV-1a hex key for single-instance desktop mutex/IPC
+// so isolated test sandboxes never collide with a running desktop instance.
+inline std::wstring instance_key() {
+    std::string dir = exe_dir();
+    uint64_t h = 14695981039346656037ull;
+    for (unsigned char c : dir) {
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    wchar_t buf[20];
+    swprintf_s(buf, L"%016llx", (unsigned long long)h);
+    return buf;
+}
+
 inline std::string parent_dir(const std::string& path) {
     std::string p = path;
     while (p.size() > 1 && (p.back() == '\\' || p.back() == '/')) p.pop_back();

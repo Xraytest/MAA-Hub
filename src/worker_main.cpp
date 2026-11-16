@@ -37,6 +37,7 @@ static mj::Value status_to_json(const AppStatus& s, const mj::Value& cfg) {
     v.set("error", s.error);
     v.set("conn", s.conn);
     v.set("run", s.run);
+    v.set("busy", s.run == "running" || s.run == "stopping");
     v.set("last_error", s.last_error);
     mj::Value ctrl = mj::Value::object();
     std::string mode = cfg.get_path_str("connect.mode", "win32");
