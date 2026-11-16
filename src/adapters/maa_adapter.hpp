@@ -256,7 +256,34 @@ public:
     }
 
     AppStatus status() const override {
+        bool ctrl_alive = handle_ && fn_.AsstConnected && (fn_.AsstConnected(handle_) != 0);
+        double now = util::now_sec();
+        bool need_probe = false;
+        if (cfg_.get_path_str("connect.mode", "win32") == "win32") {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            need_probe = (now - last_win_probe_) >= 1.0;
+        }
+        bool win_alive = false;
+        std::string win_title;
+        if (need_probe) {
+            util::WindowInfo wi;
+            win_alive = util::find_window(
+                cfg_.get_str("game_window_class", "UnityWndClass"),
+                cfg_.get_str("game_window_title_regex", "Arknights"), wi);
+            if (win_alive) win_title = util::window_title(wi.hwnd);
+        }
         std::lock_guard<std::mutex> lk(st_mtx_);
+        if (need_probe) {
+            cached_win_running_ = win_alive;
+            cached_win_title_ = win_title;
+            last_win_probe_ = now;
+        }
+        st_.game_running = cached_win_running_;
+        st_.game_title = cached_win_title_;
+        if (st_.conn == "connected" && !ctrl_alive) {
+            st_.conn = "disconnected";
+            st_.ctrl_hwnd = 0;
+        }
         return st_;
     }
 
@@ -484,7 +511,10 @@ private:
     }
 
     mj::Value cfg_;
-    AppStatus st_;
+    mutable AppStatus st_;
+    mutable double last_win_probe_ = 0;
+    mutable bool cached_win_running_ = false;
+    mutable std::string cached_win_title_;
     // MAA 报错链后紧跟 AllTasksCompleted，不锁住失败就会被冲成 idle，整串误报 done
     bool chain_err_ = false;
     mutable std::mutex st_mtx_;

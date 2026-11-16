@@ -311,6 +311,29 @@ public:
         return w->call("stop", mj::Value::object(), 60000, r);
     }
 
+    // UI「停止」按钮：同时打断运行中的多任务序列与当前核心任务
+    bool request_stop_executor(const std::string& id) {
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            exec_stop_flags_.insert(id);
+        }
+        return stop_executor(id);
+    }
+
+    // 任一执行器是否处于运行/序列执行中（供锁屏等完成后动作互斥判定）
+    bool any_executor_busy(const std::string& exclude_id = "") const {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        for (auto& kv : running_task_) {
+            if (!exclude_id.empty() && kv.first == exclude_id) continue;
+            if (!kv.second.empty()) return true;
+        }
+        for (auto& id : seq_running_) {
+            if (!exclude_id.empty() && id == exclude_id) continue;
+            return true;
+        }
+        return false;
+    }
+
     mj::Value executor_status(const std::string& id, double ttl_sec = 0.4) {
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -376,11 +399,27 @@ public:
         return r;
     }
 
+    static mj::Value resolve_once_params(const mj::Value& in) {
+        if (!in.is_object()) return in;
+        mj::Value out = mj::Value::object();
+        std::vector<std::string> once_keys;
+        for (auto& kv : in.members()) {
+            if (kv.first.rfind("__once_", 0) == 0) {
+                if (kv.second.as_bool(false)) once_keys.push_back(kv.first.substr(7));
+                continue;
+            }
+            out.set(kv.first, kv.second);
+        }
+        for (auto& k : once_keys) out.set(k, mj::Value(true));
+        return out;
+    }
+
     // 把 UI 面板的辅助键转换为 MaaCore/MaaEnd 真实参数名
     // （面板用更友好的键，下发前在此归一化）
     static mj::Value normalize_task_params(const std::string& kind,
                                            const std::string& task,
-                                           const mj::Value& in) {
+                                           const mj::Value& in_raw) {
+        mj::Value in = resolve_once_params(in_raw);
         mj::Value out = in;
         if (kind != "maa") return out;
         auto num = [&](const std::string& k, int def) -> int64_t {
@@ -391,19 +430,56 @@ public:
             auto* v = in.find(k);
             return (v && (v->is_bool() || v->is_number())) ? v->as_bool() : def;
         };
+        if (task == "Fight") {
+            if (in.find("use_medicine") && !boolean("use_medicine", false)) {
+                out.set("medicine", (int64_t)0);
+            }
+            if (in.find("use_stone") && !boolean("use_stone", false)) {
+                out.set("stone", (int64_t)0);
+            }
+            if ((in.find("perform_battles") && !boolean("perform_battles", false))
+                || (in.find("times") && num("times", 0) < 0)) {
+                out.set("times", (int64_t)2147483647);
+            }
+            if (boolean("assigned_material", false)) {
+                std::string item = in.get_str("drop_item", "");
+                int64_t qty = num("drop_quantity", 1);
+                if (!item.empty() && qty > 0) {
+                    static const std::map<std::string, std::string> kMatIds = {
+                        { "\xe5\x9b\xba\xe6\xba\x90\xe5\xb2\xa9", "30012" },
+                        { "\xe5\x9b\xba\xe6\xba\x90\xe5\xb2\xa9\xe7\xbb\x84", "30013" },
+                        { "\xe6\x8f\x90\xe7\xba\xaf\xe6\xba\x90\xe5\xb2\xa9", "30014" },
+                        { "\xe7\xb3\x96\xe7\xbb\x84", "30023" },
+                        { "\xe8\x81\x9a\xe9\x85\xb8\xe9\x85\xaf\xe7\xbb\x84", "30033" },
+                        { "\xe5\xbc\x82\xe9\x93\x81\xe7\xbb\x84", "30043" },
+                        { "\xe9\x85\xae\xe5\x87\x9d\xe9\x9b\x86\xe7\xbb\x84", "30053" },
+                        { "\xe5\x85\xa8\xe6\x96\xb0\xe8\xa3\x85\xe7\xbd\xae", "30063" },
+                        { "\xe6\x89\xad\xe8\xbd\xac\xe9\x86\x87", "30073" },
+                        { "\xe8\xbd\xbb\xe9\x94\xb0\xe7\x9f\xbf", "30083" },
+                        { "\xe7\xa0\x94\xe7\xa3\xa8\xe7\x9f\xb3", "30093" },
+                        { "RMA70-12", "30103" },
+                        { "\xe5\x87\x9d\xe8\x83\xb6", "31013" },
+                        { "\xe7\x82\xbd\xe5\x90\x88\xe9\x87\x91", "31023" },
+                        { "\xe6\x99\xb6\xe4\xbd\x93\xe5\x85\x83\xe4\xbb\xb6", "31033" },
+                        { "\xe5\x8d\x8a\xe8\x87\xaa\xe7\x84\xb6\xe6\xba\xb6\xe5\x89\x82", "31043" },
+                        { "\xe5\x8c\x96\xe5\x90\x88\xe5\x88\x87\xe5\x89\x8a\xe6\xb6\xb2", "31053" },
+                        { "\xe8\xbd\xac\xe8\xb4\xa8\xe7\x9b\x90\xe7\xbb\x84", "31063" },
+                        { "\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe8\xa1\xa5\xe6\x9d\xa1", "mod_update_token_1" },
+                        { "\xe6\x95\xb0\xe6\x8d\xae\xe5\xa2\x9e\xe8\xa1\xa5\xe4\xbb\xaa", "mod_update_token_2" },
+                    };
+                    auto mit = kMatIds.find(item);
+                    std::string id_or_name = (mit != kMatIds.end()) ? mit->second : item;
+                    mj::Value drops = mj::Value::object();
+                    drops.set(id_or_name, qty);
+                    out.set("drops", std::move(drops));
+                }
+            }
+        }
         if (task == "Infrast") {
             // mode: 0默认 / 10000自定义 / 20000轮换
             int m = (int)num("mode", 0);
             out.set("mode", (int64_t)(m == 1 ? 10000 : m == 2 ? 20000 : 0));
-            // drones: 索引 -> MAA 字符串（与面板 drones_idx radio / config_import kDrones 同序：
-            // 贸易站=Money 制造站=SyntheticJade 发电站=CombatRecord 办公室=Chip
-            // 加工站=PureGold 会客室=OriginStone）
-            // 只有面板/导入真正写过 drones_idx 才映射；否则保留已存在的 drones 字符串
-            // （fill_defaults 补的默认值、或 TaskQueue 直写场景），不再无条件覆盖
-            // r24 防漂移：下标语义被 task_panels 的 drones_idx 单选按顺序引用——
-            // 0=不使用 1=贸易站(Money) 2=制造站(SyntheticJade) 3=发电站(CombatRecord)
-            // 4=办公室(Chip) 5=加工站(PureGold) 6=会客室(OriginStone，官方即会客室产出)
-            // 两处必须同序；改表先改这里，数量不一致直接编译失败。
+            // drones: 索引 -> MAA 字符串（与面板 drones_idx / config_import kDrones 同序）
             static_assert(kDroneCount == sizeof(kDrones) / sizeof(kDrones[0]),
                           "kDrones 表与 kDroneCount 数量不一致");
             if (in.find("drones_idx")) {
@@ -411,11 +487,23 @@ public:
                 if (d < 0 || d >= (int)kDroneCount) d = 0;
                 out.set("drones", std::string(kDrones[d]));
             }
-            // 面板「换班设施」8 个勾选 -> 核心 facility 数组（数组序即换班优先级）
-            // 名字必须是核心 infrast.json roomType 里的键，Workshop/Mine 之类会被拒
+            // 面板「换班设施」8 个勾选 + 可选自定义顺序 facility_order -> 核心 facility 数组
+            std::vector<int> order;
+            bool seen[kFacilityCount] = {};
+            if (auto* fo = in.find("facility_order"); fo && fo->is_array()) {
+                for (auto& el : fo->items()) {
+                    int idx = (int)el.as_int(-1);
+                    if (idx >= 0 && idx < (int)kFacilityCount && !seen[idx]) {
+                        seen[idx] = true;
+                        order.push_back(idx);
+                    }
+                }
+            }
+            for (int k = 0; k < (int)kFacilityCount; ++k) if (!seen[k]) order.push_back(k);
+
             bool touched = false;
             mj::Value fac = mj::Value::array();
-            for (int k = 0; k < (int)kFacilityCount; ++k) {
+            for (int k : order) {
                 std::string key = "facility_" + std::to_string(k);
                 if (!in.find(key)) continue;
                 touched = true;
@@ -447,8 +535,6 @@ public:
             out.set("select", std::move(select));
         }
         if (task == "Mall") {
-            // blacklist_str / buy_first_str -> 核心的 blacklist / buy_first 数组
-            // （面板 pc_text 存分号分隔字符串；空格忽略；空串不写，避免清掉已有值）
             auto split_list = [](const std::string& s) {
                 mj::Value arr = mj::Value::array();
                 std::string cur;
@@ -466,14 +552,57 @@ public:
             std::string bf = in.get_str("buy_first_str", "");
             if (!bf.empty()) out.set("buy_first", split_list(bf));
         }
-        if (task == "StartUp") {
-            // account_name_set 只是面板开关，真实参数 account_name 由账号注入提供
-            // client_type：面板 pc_radio 存的是 0..5 下标，MaaCore 要字符串枚举。
-            // 顺序与 task_panels 的 radio 及 maa_adapter 的 enum 完全一致；
-            // 已是合法字符串就原样保留，缺失/非法值回退 "Official"（官服）。
+        if (task == "Roguelike") {
+            static const char* kTh[] = { "Phantom", "Mizuki", "Sami", "Sarkaz" };
+            if (auto* v = in.find("theme"); v && v->is_number()) {
+                int idx = (int)v->as_int(2);
+                if (idx < 0 || idx >= 4) idx = 2;
+                out.set("theme", std::string(kTh[idx]));
+            }
+            static const char* kSq[] = {
+                "\xe6\x8c\x87\xe6\x8c\xa5\xe5\x88\x86\xe9\x98\x9f",
+                "\xe9\x9b\x86\xe7\xbe\xa4\xe5\x88\x86\xe9\x98\x9f",
+                "\xe5\x90\x8e\xe5\x8b\xa4\xe5\x88\x86\xe9\x98\x9f",
+                "\xe7\x9f\x9b\xe5\xa4\xb4\xe5\x88\x86\xe9\x98\x9f"
+            };
+            if (auto* v = in.find("squad"); v && v->is_number()) {
+                int idx = (int)v->as_int(0);
+                if (idx >= 0 && idx < 4) out.set("squad", std::string(kSq[idx]));
+            }
+            if (auto* v = in.find("mode"); v && v->is_number()) {
+                int64_t m = v->as_int(0);
+                if (m == 2) out.set("mode", (int64_t)4);      // 刷开局
+                else if (m == 3) out.set("mode", (int64_t)6); // 月度小队
+            }
+            int64_t lim = num("start_times_limit", 0);
+            if (lim > 0 && (!in.find("starts_count") || num("starts_count", -1) >= 2147483647 || num("starts_count", 0) < 0)) {
+                out.set("starts_count", lim);
+            } else if (in.find("starts_count") && num("starts_count", 0) < 0) {
+                out.set("starts_count", (int64_t)2147483647);
+            }
+        }
+        if (task == "Copilot") {
+            std::string cf = in.get_str("copilot_file", "");
+            if (!cf.empty() && in.get_str("filename", "").empty()) out.set("filename", cf);
+        }
+        if (task == "Custom") {
+            if (auto* v = in.find("task_names"); v && v->is_string()) {
+                mj::Value arr = mj::Value::array();
+                std::string cur;
+                for (char ch : v->as_string() + ",") {
+                    if (ch == ',' || ch == ';') {
+                        if (!cur.empty()) { arr.push(cur); cur.clear(); }
+                    } else if (ch != ' ') {
+                        cur += ch;
+                    }
+                }
+                out.set("task_names", std::move(arr));
+            }
+        }
+        if (task == "StartUp" || task == "CloseDown") {
             std::string ct;
             if (auto* v = in.find("client_type")) {
-                if (v->is_number()) {
+                if (v->is_number() && !v->is_bool()) {
                     int idx = (int)v->as_int(0);
                     if (idx < 0 || idx >= (int)kClientCount) idx = 0;
                     ct = kClients[idx];
@@ -527,7 +656,10 @@ public:
         mj::Value filled = e.kind == "maa" ? fill_defaults(executor_catalog(id), task, params)
                                            : params;
         mj::Value normalized = normalize_task_params(e.kind, task, filled);
-        mj::Value final_params = (is_aware || has_acc)
+        bool allow_acc = !(e.kind == "maa" && task == "StartUp"
+                           && normalized.has("account_name_set")
+                           && !normalized.get_bool("account_name_set", true));
+        mj::Value final_params = (allow_acc && (is_aware || has_acc))
             ? AccountStore::apply_to_task(e.kind, task, normalized, has_acc ? &acc : nullptr)
             : normalized;
         {
@@ -620,6 +752,10 @@ public:
             j.set("version", st.get_str("version", ""));
             j.set("last_error", st.get_str("last_error", ""));
             j.set("task_count", st.get_int("task_count", 0));
+            j.set("game_running", st.get_bool("game_running", false));
+            j.set("game_title", st.get_str("game_title", ""));
+            j.set("agents_alive", st.get_int("agents_alive", 0));
+            j.set("agents_total", st.get_int("agents_total", 0));
             if (st.has("controller")) j.set("controller", st["controller"]);
             Account acc;
             if (!e.account_id.empty() && accounts_->get(e.account_id, acc)) {
@@ -637,7 +773,7 @@ public:
                 j.set("core_name", core.name);
                 j.set("core_version", core.version);
             }
-            // 浠诲姟鐩綍锛堝悗鍙扮嚎绋嬫煡璇紝UI 鍙蹇収锛岀粷涓嶉樆濉炴覆鏌擄級
+            // 任务目录（后台线程查询，UI 只读快照，绝不阻塞渲染）
             j.set("catalog", executor_catalog(id, 0));
             execs.push(std::move(j));
         }
@@ -834,6 +970,72 @@ public:
             if (it != plans_.end()) status = it->status;
         }
         return status;
+    }
+
+    // 异步派发按 UI 顺序（task_order_）编排的单执行器任务串（Link Start! / 从此处运行），
+    // 不阻塞 UI / backend_loop，逐项汇报运行中/完成状态，并在正常完成后回调收尾动作。
+    bool dispatch_ui_sequence(const std::string& exec_id,
+                              std::vector<std::pair<std::string, mj::Value>> steps,
+                              bool auto_reload = false,
+                              std::function<void(const std::string&)> on_done = nullptr) {
+        if (stopping_ || exec_id.empty() || steps.empty()) return false;
+        ExecutorEntry e;
+        if (!get_executor(exec_id, e)) return false;
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            if (!seq_running_.insert(exec_id).second) return false;
+            exec_stop_flags_.erase(exec_id);
+            ++active_seq_count_;
+        }
+        Plan plan;
+        plan.id = "ui-" + util::random_hex(6);
+        plan.ts = util::now_sec();
+        plan.planner = "ui";
+        plan.goal = "ui queue";
+        for (auto& st : steps) {
+            PlanStep s;
+            s.exec_id = exec_id;
+            s.kind = e.kind;
+            s.exec_label = e.label;
+            s.task = st.first;
+            s.params = std::move(st.second);
+            plan.steps.push_back(std::move(s));
+        }
+        {
+            std::lock_guard<std::mutex> lk(plans_mtx_);
+            plans_.push_back(plan);
+            if (plans_.size() > 50) plans_.erase(plans_.begin());
+        }
+        std::thread([this, exec_id, plan = std::move(plan), auto_reload,
+                     on_done = std::move(on_done)]() mutable {
+            std::string status = "failed";
+            try {
+                if (auto_reload) {
+                    restart_worker(exec_id);
+                    connect_executor(exec_id);
+                }
+                exec_worker(plan);
+                {
+                    std::lock_guard<std::mutex> lk(plans_mtx_);
+                    auto it = std::find_if(plans_.begin(), plans_.end(),
+                                           [&](const Plan& p) { return p.id == plan.id; });
+                    if (it != plans_.end()) status = it->status;
+                }
+            } catch (const std::exception& ex) {
+                util::trace("[ui-seq] exception: " + std::string(ex.what()));
+            } catch (...) {
+                util::trace("[ui-seq] unknown exception");
+            }
+            {
+                std::lock_guard<std::mutex> lk(tp_mtx_);
+                seq_running_.erase(exec_id);
+                exec_stop_flags_.erase(exec_id);
+                if (active_seq_count_ > 0) --active_seq_count_;
+            }
+            seq_cv_.notify_all();
+            if (on_done && !stopping_) on_done(status);
+        }).detach();
+        return true;
     }
 
     // 异步派发单执行器任务串（调度器与「启动后直接运行」共用），
@@ -1243,17 +1445,23 @@ private:
         util::trace("spawn_worker id=" + id + " load_ok=" + (loaded ? "1" : "0") + " reply=" + ld);
     }
 
+    bool is_exec_stopped(const std::string& exec_id) const {
+        std::lock_guard<std::mutex> lk(tp_mtx_);
+        return exec_stop_flags_.count(exec_id) > 0;
+    }
+
     void exec_worker(Plan plan) {
         std::string status = "done";
         std::string fail_reason;
         std::set<std::string> prepared;   // 每个执行器整串只准备一次
         for (auto& step : plan.steps) {
-            if (stop_flag_ || stopping_) {
+            if (stop_flag_ || stopping_ || is_exec_stopped(step.exec_id)) {
                 status = "stopped";
                 break;
             }
             auto w = worker_of(step.exec_id);
             if (!w) {
+                set_task_result(step.exec_id, step.task, "error");
                 status = "failed";
                 break;
             }
@@ -1262,6 +1470,7 @@ private:
                 if (st.get_str("conn", "") != "connected") {
                     // 连不上就停在这里：后续任务同样依赖这个连接，跳过只会整串空跑
                     if (!connect_executor(step.exec_id)) {
+                        set_task_result(step.exec_id, step.task, "error");
                         status = "connect-failed";
                         break;
                     }
@@ -1278,9 +1487,11 @@ private:
             }
             int64_t tid = run_on_executor(step.exec_id, step.task, step.params);
             if (tid <= 0) {
+                set_task_result(step.exec_id, step.task, "error");
                 status = "failed";
                 break;
-            }            ExecutorEntry e;
+            }
+            ExecutorEntry e;
             if (get_executor(step.exec_id, e) && !e.account_id.empty()
                 && (step.task == "Award" || step.task == "DailyRewards")) {
                 accounts_->mark_daily_done(e.account_id);
@@ -1290,7 +1501,7 @@ private:
             const double t0 = util::now_sec();
             std::string run_state, run_error;
             bool lost = false;
-            while (!stop_flag_ && !stopping_) {
+            while (!stop_flag_ && !stopping_ && !is_exec_stopped(step.exec_id)) {
                 Sleep(500);
                 mj::Value s2;
                 if (!w->call("status", mj::Value::object(), 15000, s2)) {
@@ -1298,6 +1509,7 @@ private:
                     // 继续等只会把"这一步根本没跑成"读成最后一个 run_state 报成 done
                     if (++idle_rounds > 3) {
                         lost = true;
+                        set_task_result(step.exec_id, step.task, "error");
                         status = "failed";
                         fail_reason = step.task + ": executor 无响应（worker 可能已崩溃）";
                         break;
@@ -1314,14 +1526,23 @@ private:
                 // 下一步在"上一个仍在跑"时被 AsstAppendTask 拒绝，整串 failed
                 if (util::now_sec() - t0 >= 2.0 && ++idle_rounds >= 2) break;
             }
+            if (stop_flag_ || stopping_ || is_exec_stopped(step.exec_id)) {
+                status = "stopped";
+                break;
+            }
             // 适配器把失败写在 run 里；不读它就会把"这一步根本没跑成"报成 done
             if (!lost && run_state == "failed") {
+                set_task_result(step.exec_id, step.task, "error");
                 status = "failed";
                 fail_reason = step.task + ": " + run_error;
                 break;
             }
+            set_task_result(step.exec_id, step.task, "ok");
         }
         if (stop_flag_ || stopping_) status = "stopped";
+        for (auto& s : plan.steps) {
+            if (is_exec_stopped(s.exec_id)) status = "stopped";
+        }
         update_plan_status(plan.id, status, fail_reason);
         // run_on_executor 正常完成后不清 running_task_（只清 call 失败路径）。
         // 这里按 steps 涉及的执行器统一收尾，调度器 tick 才能靠 running_task_of
@@ -1625,6 +1846,7 @@ private:
 
     std::map<std::string, std::string> running_task_;   // exec_id -> 当前运行任务
     std::set<std::string> seq_running_;                 // 正在运行任务串的 exec_id
+    std::set<std::string> exec_stop_flags_;             // 按执行器停止信号
     int active_seq_count_ = 0;                          // 异步任务串计数（tp_mtx_ 保护）
     std::condition_variable seq_cv_;
     std::map<std::string, std::map<std::string, std::string>> task_result_;

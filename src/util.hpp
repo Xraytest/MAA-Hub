@@ -108,6 +108,14 @@ struct WindowInfo {
     HWND hwnd = nullptr;
 };
 
+inline std::string window_title(HWND hwnd) {
+    if (!hwnd) return {};
+    wchar_t buf[256] = {};
+    int n = GetWindowTextW(hwnd, buf, 256);
+    if (n <= 0) return {};
+    return wide_to_utf8(std::wstring(buf, (size_t)n));
+}
+
 // 按窗口类名 + 标题正则关键字查找可见顶层窗口（与 Python 版行为一致）
 inline bool find_window(const std::string& class_regex, const std::string& title_regex, WindowInfo& out) {
     struct Ctx {

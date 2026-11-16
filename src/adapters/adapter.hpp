@@ -43,6 +43,11 @@ struct AppStatus {
     std::string resource_hash;
     int64_t task_count = 0;
     std::string log_state;      // MaaCore 侧日志目录是否设置成功
+    // 游戏客户端与 Agent 连接实况（MaaEnd <-> 终末地 / MAA Win32）
+    bool game_running = false;
+    std::string game_title;
+    int agents_alive = 0;
+    int agents_total = 0;
 };
 
 class IAdapter {

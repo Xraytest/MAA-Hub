@@ -107,7 +107,7 @@ struct Input {
     bool rpressed = false;    // 本帧刚按下右键
     bool rreleased = false;   // 本帧刚松开右键
     int wheel = 0;            // 本帧滚轮增量
-    wchar_t char_input = 0;   // WM_CHAR
+    std::wstring char_inputs; // WM_CHAR（每帧可能包含多个 UTF-16 字符，如 IME 上屏）
     int vk = 0;               // WM_KEYDOWN
 };
 
@@ -407,6 +407,7 @@ public:
         bool open = combo_open_ == key;
         if (hov && active_ == key && in_.released) {
             combo_open_ = open ? std::string() : key;
+            combo_scroll_ = 0;
             open = !open;
         }
         round_rect(r, theme.card_bg, open ? theme.primary : theme.border, 4);
@@ -438,13 +439,36 @@ public:
         combo_pop_.live = false;
         RECT b = combo_pop_.box;
         int n = (int)combo_pop_.items.size();
+        if (n <= 0) return;
         const int row = 26;
-        RECT list{ b.left, b.bottom + 2, b.right, b.bottom + 2 + n * row };
+        int avail_below = clip_.bottom - (b.bottom + 2) - 4;
+        int avail_above = (b.top - 2) - clip_.top - 4;
+        bool flip_up = avail_below < (std::min)(n, 4) * row && avail_above > avail_below;
+        int avail_h = flip_up ? avail_above : avail_below;
+        int max_vis = (std::min)(n, (std::max)(1, (std::min)(avail_h / row, 9)));
+        int pop_h = max_vis * row;
+        RECT list = flip_up
+            ? RECT{ b.left, b.top - 2 - pop_h, b.right, b.top - 2 }
+            : RECT{ b.left, b.bottom + 2, b.right, b.bottom + 2 + pop_h };
+
+        if (n > max_vis) {
+            if (hovered(list) && in_.wheel) {
+                combo_scroll_ -= in_.wheel * 2;
+                wheel_used_ = true;
+            }
+            if (combo_scroll_ < 0) combo_scroll_ = 0;
+            if (combo_scroll_ > n - max_vis) combo_scroll_ = n - max_vis;
+        } else {
+            combo_scroll_ = 0;
+        }
+
         fill(list, theme.card_bg);
         round_rect(list, CLR_INVALID, theme.border, 4);
         bool hit = false;
-        for (int i = 0; i < n; ++i) {
-            RECT ir{ list.left + 1, list.top + i * row, list.right - 1, list.top + (i + 1) * row };
+        for (int k = 0; k < max_vis; ++k) {
+            int i = combo_scroll_ + k;
+            if (i >= n) break;
+            RECT ir{ list.left + 1, list.top + k * row, list.right - 1, list.top + (k + 1) * row };
             bool hov = hovered(ir);
             if (hov) {
                 hit = true;
@@ -460,15 +484,24 @@ public:
             if (hov && in_.pressed) {
                 combo_pick_ = combo_pop_.key + "|" + std::to_string(i);
                 combo_open_.clear();
+                combo_scroll_ = 0;
                 return;
             }
         }
-        if (in_.pressed && !hit && !PtInRect(&b, in_.mouse)) combo_open_.clear();
+        if (n > max_vis) {
+            int thumb_h = (std::max)(16, pop_h * max_vis / n);
+            int ty = list.top + (pop_h - thumb_h) * combo_scroll_ / (std::max)(1, n - max_vis);
+            round_rect({ list.right - 5, ty + 2, list.right - 2, ty + thumb_h - 2 },
+                       RGB(0xA0, 0xA4, 0xAE), CLR_INVALID, 1);
+        }
+        if (in_.pressed && !hit && !PtInRect(&b, in_.mouse)) {
+            combo_open_.clear();
+            combo_scroll_ = 0;
+        }
     }
 
     // 官方样式滚动条（HandyControl ScrollBarBaseStyle）：
-    //   Width=8、Thumb 背景=PrimaryTextBrush(#212121)、圆角、仅 hover 时显示
-    // 在 end_scroll 之后调用，绘制在滚动区右缘（纵向）。
+    //   溢出时常驻浅色细滑块提示可滚动，鼠标进入滚动区或右缘时加深并显示轨道。
     void draw_scrollbar() {
         if (!scroll_y_) return;
         if (scroll_rect_.right <= scroll_rect_.left) return;
@@ -482,17 +515,18 @@ public:
         if (thumb_h > view_h) thumb_h = view_h;
         int track_h = view_h - thumb_h;
         int ty = scroll_rect_.top + (int)(track_h * frac);
-        int tx = scroll_rect_.right - 8;
-        // 轨道（透明底，仅 hover 时微显）
-        bool hov = in_.mouse.x >= scroll_rect_.right - 12
-                && in_.mouse.x <= scroll_rect_.right
-                && in_.mouse.y >= scroll_rect_.top
-                && in_.mouse.y <= scroll_rect_.bottom;
-        // Thumb：官方 PrimaryTextBrush，圆角 2；HandyControl 的 ScrollBarBaseStyle
-        // 默认 Opacity=0，只有指针进入滚动区才显形（否则静态界面里像一根多余的竖线）
-        if (!hov) return;
-        fill({ tx, scroll_rect_.top, tx + 4, scroll_rect_.bottom }, RGB(0xF0, 0xF0, 0xF0));
-        round_rect({ tx, ty, tx + 4, ty + thumb_h }, RGB(0x42, 0x42, 0x42), CLR_INVALID, 2);
+        int tx = scroll_rect_.right - 6;
+        bool edge_hov = in_.mouse.x >= scroll_rect_.right - 14
+                     && in_.mouse.x <= scroll_rect_.right
+                     && in_.mouse.y >= scroll_rect_.top
+                     && in_.mouse.y <= scroll_rect_.bottom;
+        bool area_hov = PtInRect(&scroll_rect_, in_.mouse);
+        if (edge_hov) {
+            fill({ tx, scroll_rect_.top, tx + 4, scroll_rect_.bottom }, RGB(0xF0, 0xF0, 0xF0));
+        }
+        COLORREF thumb_c = edge_hov ? RGB(0x42, 0x42, 0x42)
+                         : (area_hov ? RGB(0x8E, 0x94, 0xA0) : RGB(0xC6, 0xCA, 0xD2));
+        round_rect({ tx, ty, tx + 4, ty + thumb_h }, thumb_c, CLR_INVALID, 2);
     }
 
 
@@ -747,15 +781,26 @@ public:
         }
         // 键盘输入
         if (focused) {
-            if (in_.char_input) {
-                if (in_.char_input >= 32 || in_.char_input == L'\t') {
-                    value.push_back((char)in_.char_input);
-                } else if (in_.char_input == L'\b' && !value.empty()) {
-                    // UTF-8 backspace: drop last complete UTF-8 char
-                    size_t n = value.size();
-                    while (n > 0 && ((unsigned char)value[n - 1] & 0xC0) == 0x80) --n;
-                    if (n > 0) --n;
-                    value.resize(n);
+            if (!in_.char_inputs.empty()) {
+                for (size_t i = 0; i < in_.char_inputs.size(); ++i) {
+                    wchar_t ch = in_.char_inputs[i];
+                    if (ch >= 32 || ch == L'\t') {
+                        std::wstring unit(1, ch);
+                        if (ch >= 0xD800 && ch <= 0xDBFF && i + 1 < in_.char_inputs.size()) {
+                            wchar_t lo = in_.char_inputs[i + 1];
+                            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                                unit.push_back(lo);
+                                ++i;
+                            }
+                        }
+                        value += util::wide_to_utf8(unit);
+                    } else if (ch == L'\b' && !value.empty()) {
+                        // UTF-8 backspace: drop last complete UTF-8 char
+                        size_t n = value.size();
+                        while (n > 0 && ((unsigned char)value[n - 1] & 0xC0) == 0x80) --n;
+                        if (n > 0) --n;
+                        value.resize(n);
+                    }
                 }
             }
             if (in_.vk == VK_RETURN || in_.vk == VK_ESCAPE) focus_.clear();
@@ -910,6 +955,7 @@ private:
     std::string combo_open_;
     std::string combo_pick_;
     ComboPop combo_pop_;
+    int combo_scroll_ = 0;
     bool wheel_used_ = false;
     // 滚动
     RECT scroll_rect_{};

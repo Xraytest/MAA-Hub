@@ -61,6 +61,10 @@ static mj::Value status_to_json(const AppStatus& s, const mj::Value& cfg) {
     v.set("controller", std::move(ctrl));
     v.set("resource_hash", s.resource_hash);
     v.set("task_count", s.task_count);
+    v.set("game_running", s.game_running);
+    v.set("game_title", s.game_title);
+    v.set("agents_alive", (int64_t)s.agents_alive);
+    v.set("agents_total", (int64_t)s.agents_total);
     if (!s.log_state.empty()) v.set("fw_log", s.log_state);
     return v;
 }

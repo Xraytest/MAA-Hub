@@ -98,12 +98,19 @@ private:
     void draw_task_ctx_menu();
     void draw_rename_box(RECT area, const std::string& id);
     void draw_new_exec_overlay();
+    void draw_power_countdown_overlay();
+    static void execute_power_action(const std::string& kind);
     void save_task_alias();
     void load_task_alias();
+    void save_task_order();
+    void load_task_order();
     std::string kind_of(const std::string& id) const;
     void save_post_action(const std::string& id);
     std::wstring post_action_desc(const std::string& id);
     void load_post_action();
+    mj::Value post_action_copy(const std::string& id);
+    void run_post_actions(const std::string& id, const mj::Value& pa);
+    void apply_startup_connect(const std::string& id);
     void save_task_list();
     void load_task_list();       // MAA 1:1 实例页
     void save_task_checks();     // 左列勾选状态（官方队列状态会持久化）
@@ -145,6 +152,11 @@ private:
     void action_run(const std::string& id, const std::string& task, const mj::Value& params);
     void action_run_checked(const std::string& id);
     void action_run_from(const std::string& id, const std::string& from_task);
+    std::vector<std::pair<std::string, mj::Value>> collect_checked_steps(
+        const std::string& id, const std::string& from_task = "");
+    void launch_ui_sequence(const std::string& id,
+                            std::vector<std::pair<std::string, mj::Value>> steps,
+                            const char* label_notice);
     void action_propose(const std::string& goal, const std::string& planner);
     void action_execute(const std::string& plan_id);
     void action_reject(const std::string& plan_id);
@@ -196,9 +208,12 @@ private:
     std::map<std::string, int> content_h_;
     // 左列拖拽排序（对应 MAA 的 dd:DragDrop）
     std::map<std::string, std::vector<std::string>> task_order_;  // 执行器 -> 任务顺序
-    std::string drag_task_;      // 正在拖拽的任务名
-    int drag_y_ = -1;            // 拖拽中的鼠标 y
-    int drop_before_ = -1;       // 插入位置索引
+    std::string drag_pending_task_;  // 按下待判定的任务（超过 4px 才进入拖拽）
+    int drag_start_y_ = -1;
+    std::string drag_task_;          // 正在拖拽的任务名
+    int drag_y_ = -1;                // 拖拽中的鼠标 y
+    int drop_before_ = -1;           // 插入位置索引
+    bool task_split_open_ = false;   // 左列底部 SplitButton（反选 / 清空）展开菜单
     // 任务设置区视图切换：false=常规设置 true=高级设置（官方 ButtonGroup）
     bool advanced_view_ = false;
     // 任务项右键菜单（官方 ContextMenu）
@@ -214,7 +229,11 @@ private:
     // 新建执行器表单
     // 「完成后动作设置」浮层（官方 TaskQueue.PostAction.Settings）
     bool show_post_action_ = false;
+    mutable std::mutex pa_mtx_;
     std::map<std::string, mj::Value> post_action_;
+    std::string pending_power_action_;
+    double pending_power_deadline_ = 0.0;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     // 「添加新任务」浮层（官方左列底部 TaskQueue.AddTask）
     bool show_add_task_ = false;
     std::string add_task_filter_;

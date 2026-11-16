@@ -926,18 +926,33 @@ public:
     }
 
     bool connect() override {
-        if (!tasker_) { st_.last_error = "not loaded"; return false; }
-        st_.conn = "connecting";
-        std::string mode = cfg_.get_path_str("connect.mode", "win32");
-        if (mode == "adb") {
+        auto set_fail = [&](const std::string& err) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
             st_.conn = "failed";
-            st_.last_error = "ADB 模式未配置（请使用 win32）";
+            st_.last_error = err;
+            return false;
+        };
+        if (!tasker_) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.last_error = "not loaded";
             return false;
         }
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.conn = "connecting";
+        }
+        std::string mode = cfg_.get_path_str("connect.mode", "win32");
+        if (mode == "adb") return set_fail("ADB 模式未配置（请使用 win32）");
         std::string cls = cfg_.get_str("game_window_class", "UnityWndClass");
         std::string title = cfg_.get_str("game_window_title_regex", "Endfield");
         util::WindowInfo wi;
         if (!util::find_window(cls, title, wi)) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            cached_win_running_ = false;
+            cached_win_title_.clear();
+            last_win_probe_ = util::now_sec();
+            st_.game_running = false;
+            st_.game_title.clear();
             st_.conn = "failed";
             st_.last_error = "game window not found (class=" + cls + ", title~/" + title + "/). 请先启动终末地客户端。";
             return false;
@@ -977,41 +992,33 @@ public:
         uint64_t sc = method_value(cfg_, "connect.screencap_method", 32, screencap_names());
         uint64_t mm = method_value(cfg_, "connect.mouse_method", 1, input_names());
         uint64_t km = method_value(cfg_, "connect.keyboard_method", 1, input_names());
-        // 名称写法（如 anchored_touch）会被解析成位标志，状态要回报真正生效的值
-        st_.screencap_method = (int64_t)sc;
-        st_.mouse_method = (int64_t)mm;
-        st_.keyboard_method = (int64_t)km;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.screencap_method = (int64_t)sc;
+            st_.mouse_method = (int64_t)mm;
+            st_.keyboard_method = (int64_t)km;
+        }
         // r24：重复 connect 直接覆盖 ctrl_ 会泄漏上一句柄（UI「连接」按钮可反复点）
         if (ctrl_) { fn_.MaaControllerDestroy(ctrl_); ctrl_ = nullptr; }
         void* ctrl = fn_.MaaWin32ControllerCreate((void*)wi.hwnd, sc, mm, km);
-        if (!ctrl) {
-            st_.conn = "failed";
-            st_.last_error = "MaaWin32ControllerCreate failed";
-            return false;
-        }
+        if (!ctrl) return set_fail("MaaWin32ControllerCreate failed");
         ctrl_ = ctrl;
         util::trace("maaend connect ctrl=" + std::to_string((intptr_t)ctrl)
                     + " hwnd=" + std::to_string((intptr_t)wi.hwnd));
         int64_t cid = fn_.MaaControllerPostConnection(ctrl);
         if (cid <= 0) {
             fn_.MaaControllerDestroy(ctrl); ctrl_ = nullptr;   // r24：失败也要回收
-            st_.conn = "failed";
-            st_.last_error = "MaaControllerPostConnection failed";
-            return false;
+            return set_fail("MaaControllerPostConnection failed");
         }
         int st = fn_.MaaControllerWait(ctrl, cid);
         util::trace("maaend connect waited st=" + std::to_string(st));
         if (st != MAA_STATUS_SUCCEEDED) {
             fn_.MaaControllerDestroy(ctrl); ctrl_ = nullptr;   // r24：失败也要回收
-            st_.conn = "failed";
-            st_.last_error = "controller connect status=" + std::to_string(st);
-            return false;
+            return set_fail("controller connect status=" + std::to_string(st));
         }
         if (!fn_.MaaTaskerBindController(tasker_, ctrl)) {
             fn_.MaaControllerDestroy(ctrl); ctrl_ = nullptr;   // r24：失败也要回收
-            st_.conn = "failed";
-            st_.last_error = "MaaTaskerBindController failed";
-            return false;
+            return set_fail("MaaTaskerBindController failed");
         }
         int w = 0, hgt = 0;
         const bool rok = fn_.MaaControllerGetResolution(ctrl, &w, &hgt) != false;
@@ -1024,14 +1031,25 @@ public:
         std::string uuid;
         if (fn_.MaaControllerGetUuid(ctrl, sb)) uuid = strbuf_get(sb);
         void* hb = fn_.MaaStringBufferCreate();
-        if (fn_.MaaResourceGetHash(res_, hb)) st_.resource_hash = strbuf_get(hb);
-        st_.ctrl_mode = "win32";
-        st_.ctrl_hwnd = (int64_t)(intptr_t)wi.hwnd;
-        st_.res_w = w;
-        st_.res_h = hgt;
-        st_.uuid = uuid;
-        st_.conn = "connected";
-        st_.last_error.clear();
+        std::string rhash;
+        if (fn_.MaaResourceGetHash(res_, hb)) rhash = strbuf_get(hb);
+        std::string wtitle = util::window_title(wi.hwnd);
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            if (!rhash.empty()) st_.resource_hash = rhash;
+            st_.ctrl_mode = "win32";
+            st_.ctrl_hwnd = (int64_t)(intptr_t)wi.hwnd;
+            st_.res_w = w;
+            st_.res_h = hgt;
+            st_.uuid = uuid;
+            st_.game_running = true;
+            st_.game_title = wtitle;
+            cached_win_running_ = true;
+            cached_win_title_ = wtitle;
+            last_win_probe_ = util::now_sec();
+            st_.conn = "connected";
+            st_.last_error.clear();
+        }
         // r24：分辨率探测失败（返回 0x0）在 Endfield 实跑里正是模板匹配失效的
         // 前兆，原先把返回值整个丢弃，这里打进 trace 便于定位
         util::trace("maaend connected res=" + std::to_string(w) + "x" + std::to_string(hgt)
@@ -1044,7 +1062,9 @@ public:
         // tasker_ 上绑定的引用由框架内部引用计数保活，is_connected() 随 ctrl_
         // 置空自然变 false，后续重连会重建新的控制器。
         if (ctrl_) { fn_.MaaControllerDestroy(ctrl_); ctrl_ = nullptr; }
+        std::lock_guard<std::mutex> lk(st_mtx_);
         st_.conn = "disconnected";
+        st_.ctrl_hwnd = 0;
     }
 
     bool is_connected() override {
@@ -1147,14 +1167,25 @@ public:
         if (pretasks_.count(task)) {
             std::string err;
             const bool ok = run_pretask(task, err);
-            st_.run = ok ? "idle" : "failed";
-            st_.last_error = ok ? std::string() : (task + ": " + err);
+            {
+                std::lock_guard<std::mutex> lk(st_mtx_);
+                st_.run = ok ? "idle" : "failed";
+                st_.last_error = ok ? std::string() : (task + ": " + err);
+            }
             if (ok) out = 1;
             return ok;
         }
         out = 0;
-        if (!tasker_) { st_.last_error = "not loaded"; return false; }
-        if (!is_connected()) { st_.last_error = "not connected"; return false; }
+        if (!tasker_) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.last_error = "not loaded";
+            return false;
+        }
+        if (!is_connected()) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.last_error = "not connected";
+            return false;
+        }
         mj::Value plan = build_plan(task, params);
         const mj::Value& ov = plan["override"];
         std::string entry = plan.get_str("entry", task);
@@ -1164,10 +1195,14 @@ public:
         util::trace("maaend post " + task + " entry=" + entry + " override=" + dbg);
         int64_t tid = fn_.MaaTaskerPostTask(tasker_, entry.c_str(), override_json.c_str());
         if (tid <= 0) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
             st_.last_error = "MaaTaskerPostTask(" + task + ") failed";
             return false;
         }
-        st_.run = "running";
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.run = "running";
+        }
         out = tid;
         return true;
     }
@@ -1176,16 +1211,16 @@ public:
         if (!tasker_) return false;
         int64_t tid = fn_.MaaTaskerPostStop(tasker_);
         if (tid <= 0) return false;
-        // 绝不用 MaaTaskerWait 无限阻塞：任务不结束会把调用线程（进而整个
-        // WorkerClient::call 与 UI 刷新）永久挂住。改为轮询 Running，
-        // 最多等 10 秒后放弃等待（任务仍由 MaaEnd 侧自行收尾）。
         int waited = 0;
         while (waited < 10000) {
             if (fn_.MaaTaskerRunning(tasker_) == 0) break;
             Sleep(100);
             waited += 100;
         }
-        st_.run = fn_.MaaTaskerRunning(tasker_) != 0 ? "stopping" : "idle";
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.run = fn_.MaaTaskerRunning(tasker_) != 0 ? "stopping" : "idle";
+        }
         return true;
     }
 
@@ -1198,7 +1233,64 @@ public:
     }
 
     AppStatus status() const override {
+        // 实时探测终末地客户端窗口（约 1s 节流）与 Win32Controller / Agent 存活状态
+        bool ctrl_alive = false;
+        if (ctrl_ && fn_.MaaControllerConnected) {
+            ctrl_alive = (fn_.MaaControllerConnected(ctrl_) != 0);
+        }
+        int alive_agents = 0;
+        int total_agents = 0;
+        {
+            std::lock_guard<std::mutex> lk(cli_mtx_);
+            if (afn_.MaaAgentClientAlive) {
+                for (void* c : agent_clients_) {
+                    ++total_agents;
+                    if (c && afn_.MaaAgentClientAlive(c)) ++alive_agents;
+                }
+            }
+        }
+        if (total_agents == 0) {
+            std::lock_guard<std::mutex> lk(proc_mtx_);
+            for (const auto& p : agent_procs_) {
+                ++total_agents;
+                if (p.alive()) ++alive_agents;
+            }
+        }
+
+        double now = util::now_sec();
+        bool need_probe = false;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            need_probe = (now - last_win_probe_) >= 1.0;
+        }
+        bool running = false;
+        std::string wtitle;
+        if (need_probe) {
+            std::string cls = cfg_.get_str("game_window_class", "UnityWndClass");
+            std::string title = cfg_.get_str("game_window_title_regex", "Endfield");
+            util::WindowInfo wi;
+            running = util::find_window(cls, title, wi);
+            wtitle = running ? util::window_title(wi.hwnd) : std::string();
+        }
+
         std::lock_guard<std::mutex> lk(st_mtx_);
+        if (need_probe) {
+            cached_win_running_ = running;
+            cached_win_title_ = wtitle;
+            last_win_probe_ = now;
+        }
+        st_.game_running = cached_win_running_;
+        st_.game_title = cached_win_title_;
+        st_.agents_alive = alive_agents;
+        st_.agents_total = total_agents;
+        if (st_.conn == "connected") {
+            bool hwnd_ok = !st_.ctrl_hwnd || IsWindow((HWND)(intptr_t)st_.ctrl_hwnd) != FALSE;
+            if (!ctrl_ || !ctrl_alive || !hwnd_ok) {
+                st_.conn = "disconnected";
+                st_.ctrl_hwnd = 0;
+                st_.last_error = st_.game_running ? "控制器与终末地连接已断开" : "终末地客户端已关闭";
+            }
+        }
         return st_;
     }
 
@@ -1378,7 +1470,10 @@ private:
 
     mj::Value cfg_;
     mj::Value interface_;
-    AppStatus st_;
+    mutable AppStatus st_;
+    mutable double last_win_probe_ = 0;
+    mutable bool cached_win_running_ = false;
+    mutable std::string cached_win_title_;
     mutable std::mutex st_mtx_;
     HMODULE lib_ = nullptr;
     HMODULE agent_lib_ = nullptr;
@@ -1388,8 +1483,8 @@ private:
     void* ctrl_ = nullptr;
     SinkT sink_ = nullptr;
     std::vector<util::ProcHandle> agent_procs_;
-    std::mutex proc_mtx_;      // 保护 agent_procs_
-    std::mutex cli_mtx_;      // 保护 agent_clients_
+    mutable std::mutex proc_mtx_;      // 保护 agent_procs_
+    mutable std::mutex cli_mtx_;      // 保护 agent_clients_
     std::mutex err_mtx_;      // 保护 agent_error_
     std::vector<void*> agent_clients_;
     std::string agent_error_;

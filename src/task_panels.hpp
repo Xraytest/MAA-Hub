@@ -152,6 +152,46 @@ inline void pc_radio(PanelCtx& c, const std::string& key,
     c.y += 36;
 }
 
+inline void pc_combo_idx(PanelCtx& c, const std::string& key, const std::wstring& label,
+                         const std::vector<std::wstring>& opts, int cur, int& out_idx) {
+    const int LBL = 82;
+    if (!label.empty()) {
+        c.g.text_clipped({ c.x, c.y, c.x + LBL - 6, c.y + 28 }, label,
+                         c.g.theme.dim, c.g.font_small);
+    }
+    RECT r{ label.empty() ? c.x : (c.x + LBL), c.y, c.right, c.y + 28 };
+    int hit = c.g.combo((c.exec_id + ":" + c.task + ":" + key).c_str(), r, opts, cur);
+    out_idx = (hit >= 0) ? hit : cur;
+    c.y += 36;
+}
+
+inline void pc_combo(PanelCtx& c, const std::string& key, const std::wstring& label,
+                     const std::vector<std::wstring>& opts, int def = 0) {
+    int before = c.get_int(key, def);
+    int cur = before;
+    pc_combo_idx(c, key, label, opts, before, cur);
+    c.set_int(key, cur, cur != before);
+}
+
+inline int lookup_client_idx(const PanelCtx& c) {
+    static const char* kCl[] = { "Official", "Bilibili", "txwy", "YoStarEN", "YoStarJP", "YoStarKR" };
+    auto it = c.params.find("client_type");
+    if (it == c.params.end()) return 0;
+    if (it->second.is_number()) {
+        int idx = (int)it->second.as_int(0);
+        return (idx >= 0 && idx < 6) ? idx : 0;
+    }
+    if (it->second.is_string()) {
+        const std::string& s = it->second.as_string();
+        for (int i = 0; i < 6; ++i) if (s == kCl[i]) return i;
+    }
+    return 0;
+}
+
+inline bool task_has_advanced(const std::string& task) {
+    return task == "Fight";
+}
+
 // 选项多到一格只剩两三个字时，按官方退化成 ComboBox；否则 MaaEnd 那些两三十字符的 case 名会被压成「A… U… 」。
 // 返回当前下标，params[key] 随后被写回 cases 的字符串值
 inline int pc_select(PanelCtx& c, const std::string& key,
@@ -187,8 +227,15 @@ inline bool panel_startup(PanelCtx& c) {
 
     c.g.group_title(c.x, c.y, L"\u5ba2\u6237\u7aef\u7c7b\u578b");
     c.y += 16;
-    pc_radio(c, "client_type", { L"\u5b98\u670d", L"Bilibili", L"txwy", L"YoStarEN",
-                                 L"YoStarJP", L"YoStarKR" }, 0);
+    {
+        static const std::vector<std::wstring> clients = {
+            L"\u5b98\u670d", L"Bilibili", L"txwy", L"YoStarEN", L"YoStarJP", L"YoStarKR"
+        };
+        int before = lookup_client_idx(c);
+        int cur = before;
+        pc_combo_idx(c, "client_type", L"", clients, before, cur);
+        if (cur != before) c.set_int("client_type", cur);
+    }
     c.y += 4;
 
     c.g.group_title(c.x, c.y, L"\u8fde\u63a5");
@@ -205,7 +252,7 @@ inline bool panel_startup(PanelCtx& c) {
     pc_check(c, "mumu_extras", L"\u542f\u7528 MuMu \u622a\u56fe\u589e\u5f3a");
     pc_check(c, "mumu_bridge", L"MuMu \u7f51\u7edc\u6865\u63a5\u6a21\u5f0f");
     pc_check(c, "ld_extras", L"\u542f\u7528 LD \u622a\u56fe\u589e\u5f3a");
-    pc_check(c, "ld_manual_index", L"\u624b\u52a8\u586b\u5199 \u300c\u96c5\u5149\u6f0f\u6307\u6570\u300d");
+    pc_check(c, "ld_manual_index", L"\u624b\u52a8\u586b\u5199 \u300c\u5b9e\u4f8b\u7f16\u53f7\u300d");
     c.y += 4;
     c.g.group_title(c.x, c.y, L"\u622a\u56fe\u4e0e\u8f93\u5165");
     c.y += 16;
@@ -244,13 +291,15 @@ inline bool panel_fight(PanelCtx& c) {
         CheckState st = c.get_once(key) ? CheckState::Once
                         : (c.get_bool(key) ? CheckState::On : CheckState::Off);
         int lines = 1;
-        c.g.checkbox3((c.exec_id + ":Fight:" + key).c_str(), cell_l(), label, st, &lines);
-        c.set_bool(key, st == CheckState::On);
-        c.set_once(key, st == CheckState::Once);
-        int nv = c.get_int(nkey, def);
-        if (nv < lo) nv = def;          // 历史脏值（旧的「-1=无限」）回到官方默认
+        bool chg = c.g.checkbox3((c.exec_id + ":Fight:" + key).c_str(), cell_l(), label, st, &lines);
+        c.set_bool(key, st == CheckState::On, chg);
+        c.set_once(key, st == CheckState::Once, chg);
+        int before = c.get_int(nkey, def);
+        int nv = before;
+        if (nv < lo) nv = def;          // 历史脏值（旧的「-1=无限」）显示官方默认，仅改动时回写
+        int disp_before = nv;
         num_box(nkey, nv, lo, hi, c.y + M);
-        c.set_int(nkey, nv);
+        if (nv != disp_before) c.set_int(nkey, nv);
         c.y += RH + (lines > 1 ? 16 : 0);
     };
 
@@ -267,13 +316,17 @@ inline bool panel_fight(PanelCtx& c) {
         CheckState mat_st = c.get_once("assigned_material") ? CheckState::Once
                             : (c.get_bool("assigned_material") ? CheckState::On : CheckState::Off);
         {
-            c.g.checkbox3((c.exec_id + ":Fight:assigned_material").c_str(), cell_l(),
-                          L"指定材料", mat_st);
-            c.set_bool("assigned_material", mat_st == CheckState::On);
-            c.set_once("assigned_material", mat_st == CheckState::Once);
+            bool mat_chg = c.g.checkbox3((c.exec_id + ":Fight:assigned_material").c_str(), cell_l(),
+                                         L"指定材料", mat_st);
+            c.set_bool("assigned_material", mat_st == CheckState::On, mat_chg);
+            c.set_once("assigned_material", mat_st == CheckState::Once, mat_chg);
             c.g.icon_tip({ c.x + LC - 18, c.y + 4, c.x + LC - 6, c.y + 16 }, c.g.theme.faint);
-            static const char* kMats[] = { "固源岩", "研磨石", "聚酸组", "轻金组", "破片", "装置",
-                                           "醇", "糖", "酯", "数据增补条" };
+            static const char* kMats[] = {
+                "固源岩", "固源岩组", "提纯源岩", "糖组", "聚酸酯组", "异铁组",
+                "酮凝集组", "全新装置", "扭转醇", "轻锰矿", "研磨石", "RMA70-12",
+                "凝胶", "炽合金", "晶体元件", "半自然溶剂", "化合切削液", "转质盐组",
+                "数据增补条", "数据增补仪"
+            };
             std::vector<std::wstring> mats;
             mats.push_back(L"不选择");                 // 官方第一项：空值项，显示「不选择」
             for (auto* m : kMats) mats.push_back(gui::widen(m));
@@ -288,17 +341,18 @@ inline bool panel_fight(PanelCtx& c) {
         }
         // Grid.Row=1 row1：官方绑 IsSpecifiedDrops —— 未勾选「指定材料」时整行不出现。
         // 左列是竖排 hc:ButtonGroup（MaxWidth=88），右列是垂直居中的数量 NumericUpDown。
-        if (mat_st == CheckState::On) {
+        if (mat_st == CheckState::On || mat_st == CheckState::Once) {
             const int GH = 60, SUB = GH + 2 * M;
             int cur = c.get_int("drop_mode", 0);
             int hit = c.g.option_strip((c.exec_id + ":Fight:drop_mode").c_str(),
                                        { c.x + M, c.y + M, c.x + M + 88, c.y + M + GH },
                                        { L"刷取数量", L"目标库存" }, cur, true, true);
-            if (hit >= 0) c.set_int("drop_mode", hit);
-            int q = c.get_int("drop_quantity", 1);
-            if (q < 1) q = 1;
+            if (hit >= 0 && hit != cur) c.set_int("drop_mode", hit);
+            int q0 = c.get_int("drop_quantity", 1);
+            int q = q0 < 1 ? 1 : q0;
+            int q_disp = q;
             num_box("drop_quantity", q, 1, 999999, c.y + (SUB - 30) / 2);
-            c.set_int("drop_quantity", q);
+            if (q != q_disp) c.set_int("drop_quantity", q);
             c.y += SUB;
         }
 
@@ -375,7 +429,7 @@ inline bool panel_fight(PanelCtx& c) {
 
     // ---------------- 高级设置 ----------------
     pc_check(c, "use_custom_stage", L"\u624b\u52a8\u8f93\u5165\u5173\u5361\u540d");
-    pc_check(c, "dr_grandet", L"\u535a\u90ce\u53f0\u6a21\u5f0f",
+    pc_check(c, "dr_grandet", L"\u535a\u6717\u53f0\u6a21\u5f0f",
              L"\u7406\u667a\u4e3a 0 \u65f6\u4ecd\u8bd5\u8fdb\u5165\u5173\u5361\uff0c\u5229\u7528\u5bbf\u820d\u6062\u590d");
     pc_check(c, "use_expire_medicine", L"\u65e0\u9650\u5403 N \u5929\u5185\u8fc7\u671f\u7684\u7406\u667a\u836f");
     if (c.get_bool("use_expire_medicine")) {
@@ -421,42 +475,78 @@ inline bool panel_infrast(PanelCtx& c) {
     pc_radio(c, "mode", { L"\u9ed8\u8ba4\u57fa\u5efa", L"\u81ea\u5b9a\u4e49\u57fa\u5efa",
                           L"\u8f6e\u6362\u57fa\u5efa" }, 0);
     // 官方 ComboBox「内置配置」：自定义基建时选择的排班方案
-    pc_radio(c, "builtin_plan", { L"\u9ed8\u8ba4\u65b9\u6848",
-                                  L"\u4e09\u7279\u59d3\u5168\u9760\u5e73\u53f0",
-                                  L"\u4e09\u5de5\u4f5c\u5ba4\u65b9\u6848",
-                                  L"\u4f20\u68af\u54e5\u65b9\u6848" }, 0);
+    pc_combo(c, "builtin_plan", L"\u5185\u7f6e\u914d\u7f6e",
+             { L"\u9ed8\u8ba4\u65b9\u6848",
+               L"153 \u4e00\u5929 3 \u6362",
+               L"243 \u4e00\u5929 3 \u6362",
+               L"333 \u4e00\u5929 3 \u6362" }, 0);
     c.y += 4;
 
     c.g.group_title(c.x, c.y, L"\u65e0\u4eba\u673a");
     c.y += 16;
-    pc_radio(c, "drones_idx", { L"\u4e0d\u4f7f\u7528", L"\u8d38\u6613\u7ad9",
-                                L"\u5236\u9020\u7ad9", L"\u53d1\u7535\u7ad9",
-                                L"\u529e\u516c\u5ba4", L"\u52a0\u5de5\u7ad9",
-                                L"\u4f1a\u5ba2\u5ba4" }, 0);
+    pc_combo(c, "drones_idx", L"\u65e0\u4eba\u673a\u7528\u9014",
+             { L"\u4e0d\u4f7f\u7528", L"\u8d38\u6613\u7ad9",
+               L"\u5236\u9020\u7ad9", L"\u53d1\u7535\u7ad9",
+               L"\u529e\u516c\u5ba4", L"\u52a0\u5de5\u7ad9",
+               L"\u4f1a\u5ba2\u5ba4" }, 0);
     pc_number(c, "dorm_threshold", L"\u5bbf\u820d\u5fc3\u60c5\u9608\u503c", 30, 5, 0, 100);
     c.y += 6;
 
-    // 官方 ListBox「标签顺序可拖动」：换班设施多选 + 可拖拽排序
+    // 换班设施多选 + 上下排序（数组序即换班优先级）
     c.g.group_title(c.x, c.y, L"\u6362\u73ed\u8bbe\u65bd");
     c.y += 20;
-    c.g.tip_line(c.x, c.y, c.right, L"\u6807\u7b7e\u987a\u5e8f\u53ef\u62d6\u52a8");
+    c.g.tip_line(c.x, c.y, c.right, L"\u6392\u5e8f\u5373\u6362\u73ed\u4f18\u5148\u7ea7\uff08\u60ac\u505c\u53ef\u4e0a\u4e0b\u8c03\u6574\uff09");
     c.y += 18;
-    const wchar_t* facs[] = { L"\u63a7\u5236\u4e2d\u67bc", L"\u5236\u9020\u7ad9",
+    const wchar_t* facs[] = { L"\u63a7\u5236\u4e2d\u67a2", L"\u5236\u9020\u7ad9",
                               L"\u8d38\u6613\u7ad9", L"\u53d1\u7535\u7ad9",
                               L"\u4f1a\u5ba2\u5ba4", L"\u529e\u516c\u5ba4",
-                              L"\u8bad\u7ec3\u5ba4", L"\u5de5\u538b\u5e73\u53f0" };
-    // 单列排布（右栏宽度有限，两列会溢出到信息条外）
-    int half = (c.right - c.x) - 8;
-    for (int k = 0; k < 8; ++k) {
-        int row = k;
+                              L"\u8bad\u7ec3\u5ba4", L"\u52a0\u5de5\u7ad9" };
+    std::vector<int> order;
+    {
+        auto it = c.params.find("facility_order");
+        bool seen[8] = {};
+        if (it != c.params.end() && it->second.is_array()) {
+            for (auto& el : it->second.items()) {
+                int idx = (int)el.as_int(-1);
+                if (idx >= 0 && idx < 8 && !seen[idx]) {
+                    seen[idx] = true;
+                    order.push_back(idx);
+                }
+            }
+        }
+        for (int k = 0; k < 8; ++k) if (!seen[k]) order.push_back(k);
+    }
+    int swap_pos = -1, swap_dir = 0;
+    int full_w = (c.right - c.x) - 4;
+    for (int row = 0; row < 8; ++row) {
+        int k = order[row];
         int fx = c.x;
         int fy = c.y + row * 24;
+        RECT row_r{ fx, fy, fx + full_w, fy + 22 };
+        bool rhov = c.g.hovered(row_r);
         std::string key = std::string("facility_") + std::to_string(k);
         bool v = c.get_bool(key);
         CheckState st = v ? CheckState::On : CheckState::Off;
-        RECT fr{ fx, fy, fx + half, fy + 22 };
-        c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), fr, facs[k], st);
-        c.set_bool(key, st == CheckState::On);
+        int cbr_right = rhov ? (row_r.right - 46) : row_r.right;
+        RECT fr{ fx, fy, cbr_right, fy + 22 };
+        bool chg = c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), fr, facs[k], st);
+        c.set_bool(key, st == CheckState::On, chg);
+        if (rhov) {
+            RECT up_r{ row_r.right - 44, fy + 1, row_r.right - 24, fy + 21 };
+            RECT dn_r{ row_r.right - 22, fy + 1, row_r.right - 2, fy + 21 };
+            if (row > 0 && c.g.button((c.exec_id + ":fac-up-" + std::to_string(k)).c_str(), up_r, L"\u2191", 0)) {
+                swap_pos = row; swap_dir = -1;
+            }
+            if (row < 7 && c.g.button((c.exec_id + ":fac-dn-" + std::to_string(k)).c_str(), dn_r, L"\u2193", 0)) {
+                swap_pos = row; swap_dir = 1;
+            }
+        }
+    }
+    if (swap_pos >= 0 && swap_pos + swap_dir >= 0 && swap_pos + swap_dir < 8) {
+        std::swap(order[swap_pos], order[swap_pos + swap_dir]);
+        mj::Value arr = mj::Value::array();
+        for (int idx : order) arr.push((int64_t)idx);
+        c.touch("facility_order", arr, true);
     }
     c.y += 8 * 24 + 6;
     // 官方 全选 / 清空
@@ -475,7 +565,7 @@ inline bool panel_infrast(PanelCtx& c) {
     pc_check(c, "reception_message_board", L"\u4f1a\u5ba2\u5ba4\u4fe1\u606f\u677f\u6536\u53d6\u4fe1\u7528");
     pc_check(c, "reception_clue_exchange", L"\u8fdb\u884c\u7ebf\u7d22\u4ea4\u6d41");
     pc_check(c, "reception_send_clue", L"\u8d60\u9001\u7ebf\u7d22");
-    pc_check(c, "dorm_trust", L"\u5bbf\u820d\u7a7a\u4f59\u4f4d\u7f6e\u8e8f\u4fe1\u8d56");
+    pc_check(c, "dorm_trust", L"\u5bbf\u820d\u7a7a\u4f59\u4f4d\u7f6e\u8e6d\u4fe1\u8d56");
     pc_check(c, "dorm_filter_not_stationed", L"\u4e0d\u5c06\u5df2\u8fdb\u9a7b\u7684\u5e72\u5458\u653e\u5165\u5bbf\u820d");
     c.y += 4;
 
@@ -586,13 +676,49 @@ inline bool panel_award(PanelCtx& c) {
 inline bool panel_roguelike(PanelCtx& c) {
     c.g.group_title(c.x, c.y, L"\u57fa\u7840");
     c.y += 16;
-    pc_radio(c, "theme", { L"\u5c0f\u9e7f", L"\u673a\u94f6", L"\u6c34\u6708",
-                           L"\u6b65\u6ed1\u94c1\u5239" }, 0);
+    {
+        static const char* kTh[] = { "Phantom", "Mizuki", "Sami", "Sarkaz" };
+        int th_cur = 2; // Sami 默认
+        auto it = c.params.find("theme");
+        if (it != c.params.end()) {
+            if (it->second.is_number()) th_cur = (int)it->second.as_int(2);
+            else if (it->second.is_string()) {
+                for (int i = 0; i < 4; ++i) if (it->second.as_string() == kTh[i]) { th_cur = i; break; }
+            }
+        }
+        int th_hit = c.g.option_strip((c.exec_id + ":Roguelike:theme").c_str(),
+                                      { c.x, c.y, c.right, c.y + 24 },
+                                      { L"\u5080\u5f71", L"\u6c34\u6708", L"\u8428\u7c73", L"\u8428\u5361\u5179" },
+                                      th_cur);
+        if (th_hit >= 0 && th_hit != th_cur) c.set_int("theme", th_hit);
+        c.y += 36;
+    }
     pc_radio(c, "difficulty", { L"\u7b80\u5355", L"\u666e\u901a", L"\u56f0\u96be" }, 0);
     pc_radio(c, "mode", { L"\u7ecf\u5178", L"\u6295\u8d44", L"\u5237\u5f00\u5c40",
-                          L"\u9ed1\u5e95\u6cb3" }, 0);
-    pc_radio(c, "squad", { L"\u6307\u5c04\u7814\u7a76\u5458", L"\u8f93\u5fc5\u62a2\u536b\u8f66",
-                           L"\u4eea\u5f0f\u7814\u7a76\u5458", L"\u9ad8\u7ea7\u7269\u8d44\u56e2" }, 0);
+                          L"\u6708\u5ea6\u5c0f\u961f" }, 0);
+    {
+        static const char* kSq[] = {
+            "\xe6\x8c\x87\xe6\x8c\xa5\xe5\x88\x86\xe9\x98\x9f", // 指挥分队
+            "\xe9\x9b\x86\xe7\xbe\xa4\xe5\x88\x86\xe9\x98\x9f", // 集群分队
+            "\xe5\x90\x8e\xe5\x8b\xa4\xe5\x88\x86\xe9\x98\x9f", // 后勤分队
+            "\xe7\x9f\x9b\xe5\xa4\xb4\xe5\x88\x86\xe9\x98\x9f"  // 矛头分队
+        };
+        int sq_cur = 0;
+        auto it = c.params.find("squad");
+        if (it != c.params.end()) {
+            if (it->second.is_number()) sq_cur = (int)it->second.as_int(0);
+            else if (it->second.is_string()) {
+                for (int i = 0; i < 4; ++i) if (it->second.as_string() == kSq[i]) { sq_cur = i; break; }
+            }
+        }
+        int sq_hit = c.g.option_strip((c.exec_id + ":Roguelike:squad").c_str(),
+                                      { c.x, c.y, c.right, c.y + 24 },
+                                      { L"\u6307\u6325\u5206\u961f", L"\u96c6\u7fa4\u5206\u961f",
+                                        L"\u540e\u52e4\u5206\u961f", L"\u77db\u5934\u5206\u961f" },
+                                      sq_cur);
+        if (sq_hit >= 0 && sq_hit != sq_cur) c.set_int("squad", sq_hit);
+        c.y += 36;
+    }
     c.y += 6;
     c.g.group_title(c.x, c.y, L"\u5f00\u5c40");
     c.y += 16;
@@ -606,15 +732,15 @@ inline bool panel_roguelike(PanelCtx& c) {
     c.y += 6;
     c.g.group_title(c.x, c.y, L"\u6295\u8d44\u4e0e\u7ed3\u675f");
     c.y += 16;
-    pc_check(c, "investment_enabled", L"\u6295\u8d44\u6e90\u77f3\u9408");
+    pc_check(c, "investment_enabled", L"\u6295\u8d44\u6e90\u77f3\u952d");
     pc_check(c, "investment_with_more_score",
              L"\u6295\u8d44\u6a21\u5f0f\u542f\u7528\u8d2d\u7269\u3001\u62db\u52df\u3001\u8fdb 2 \u5c42");
     pc_number(c, "start_times_limit",
               L"\u5f00\u59cb\u63a2\u7d22 N \u6b21\u540e\u505c\u6b62\u4efb\u52a1", 0, 1, 0, 999);
     pc_number(c, "gold_times_limit",
-              L"\u6295\u8d44 N \u4e2a\u6e90\u77f3\u9408\u540e\u505c\u6b62\u4efb\u52a1", 0, 1, 0, 9999);
+              L"\u6295\u8d44 N \u4e2a\u6e90\u77f3\u952d\u540e\u505c\u6b62\u4efb\u52a1", 0, 1, 0, 9999);
     pc_number(c, "stop_on_gold_limit",
-              L"\u5907\u7528\u6e90\u77f3\u9408\u4e0a\u9650\u65f6\u505c\u6b62", 0, 100, 0, 99999);
+              L"\u5907\u7528\u6e90\u77f3\u952d\u4e0a\u9650\u65f6\u505c\u6b62", 0, 100, 0, 99999);
     c.y += 6;
     c.g.group_title(c.x, c.y, L"\u884c\u4e3a");
     c.y += 16;
@@ -744,7 +870,7 @@ inline bool panel_depot(PanelCtx& c) {
     pc_check(c, "auto_series", L"AUTO \u4ee3\u7406\u500d\u7387");
     c.y += 4;
 
-    c.g.group_title(c.x, c.y, L"\u5236\u84b4\u4e0e\u7269\u6599");
+    c.g.group_title(c.x, c.y, L"\u5236\u5242\u4e0e\u7269\u6599");
     c.y += 16;
     pc_check(c, "use_medicine", L"\u542f\u7528 \u300c\u4f7f\u7528\u836f\u5242\u300d",
              L"\u8be5\u9009\u9879\u53f3\u952e\u9009\u4e2d\u65f6\u4ec5\u751f\u6548\u4e00\u6b21");
@@ -760,7 +886,7 @@ inline bool panel_operbox(PanelCtx& c) {
     c.g.group_title(c.x, c.y, L"\u8bc6\u522b\u8303\u56f4");
     c.y += 16;
     pc_check(c, "update_all", L"\u5168\u91cf\u8bc6\u522b");
-    pc_check(c, "update_elite", L"\u7ecbe\u82f1\u5316");
+    pc_check(c, "update_elite", L"\u7cbe\u82f1\u5316");
     pc_check(c, "update_skill", L"\u6280\u80fd\u7b49\u7ea7");
     pc_check(c, "update_module", L"\u6a21\u7ec4");
     return true;
@@ -794,9 +920,15 @@ inline bool panel_custom(PanelCtx& c) {
 
 // ---- CloseDown：关闭游戏 ----
 inline bool panel_closedown(PanelCtx& c) {
-    c.g.group_title(c.x, c.y, L"\u5173\u95ed");
+    c.g.group_title(c.x, c.y, L"\u5ba2\u6237\u7aef\u7c7b\u578b");
     c.y += 16;
-    pc_check(c, "client_type", L"\u6309\u5ba2\u6237\u7aef\u7c7b\u578b\u5173\u95ed");
+    static const std::vector<std::wstring> clients = {
+        L"\u5b98\u670d", L"Bilibili", L"txwy", L"YoStarEN", L"YoStarJP", L"YoStarKR"
+    };
+    int before = lookup_client_idx(c);
+    int cur = before;
+    pc_combo_idx(c, "client_type", L"", clients, before, cur);
+    if (cur != before) c.set_int("client_type", cur);
     return true;
 }
 
