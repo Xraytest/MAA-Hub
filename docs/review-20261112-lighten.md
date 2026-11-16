@@ -558,6 +558,56 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 5. 报告 §二.3 里 `tmp-<hex>` / `_download` 的命名不成立（真实为固定 `cores\.tmp`）；§二.2 的 `LoadLibrary` 顺序问题严重度被高估（`LOAD_WITH_ALTERED_SEARCH_PATH` 已覆盖同目录静态导入，真正受影响的是 `LoadLibraryW` 回退路径与缺失的 `SetDefaultDllDirectories`），但修法一致，仍按正确顺序改了。
 
 构建产物：`build\MaaHub.exe` = **1,475,584 B**（02:47 最终构建，SHA256 `532E61D3…`；与本轮早先一次同尺寸构建 `E6A687B9…` 仅差链接器时间戳，见 §六 的 6 字节结论）。
+## 二·补19 r25（11-16 07:1x–08:2x）：fit 谎报修正 + 系统托盘注册（**承接到「Endfield 定责」结论**）
+
+上一轮 r24 只把 `GetResolution failed` 打进 trace；本轮把「定责分析」里确认属于 hub 的两条缺陷改掉，并补齐报告没覆盖、但用户点名的**托盘注册缺失**（全仓 `Shell_NotifyIcon` 命中数 = 0，关窗即进程结束）。4 个文件 **+245 / −19 = 净 +226 行**。
+
+### 定责前提（本轮的实测依据，全部来自 WorkCenter session-1）
+
+| 量 | 实测值 | 来源 |
+|---|---|---|
+| 游戏客户区 | **1280×768**（多次 connect 前后 + 3s/8s 轮询，恒定不动） | `GetClientRect` 探针 |
+| 窗口外框 / 边框 | 1296×807 / 16×39 | 同上（1280+16=1296、720+87=807 与 768+39=807 自洽） |
+| 核心抓图 | **1200×720** | `maafw.log` `image.size()` |
+| pipeline ROI 基准 | 1280×720（越界样本 `res=[1160,600,120,120]` 右缘 1280） | 同上 WRN 行 |
+| 屏幕 / DPI | 1920×1080 @ 96 DPI（缩放 100%） | `GetDeviceCaps` |
+
+`1200 = 1280 × 720/768`：抓图是客户区**按高等比缩放**的结果，5:3 比例自洽。DPI 虚拟化排除（无缩放）。hub 无 `.rc`/清单 → DPI-unaware，但在 100% 缩放下不受影响。
+
+### 逐项改动
+
+| 缺陷 | 修法 | 位置 |
+|---|---|---|
+| `fit_client_size()` 只看 `SetWindowPos` 返回值 → 对**自锁客户区**的游戏谎报「已校正」 | 写入后回读复查（100ms×10，最多三轮），并经 `out_w/out_h` 回传**实际**尺寸；返回 `stuck` 不再被当成成功 | `util.hpp` |
+| `connect()` 据此谎报继续跑，用户只看到几分钟后 `ret=false` | trace 改打 `want=… actual=… ok/stuck`；`fit != off` 分支与 else 分支都填 `client_w/client_h` | `maaend_adapter.hpp` |
+| 尺寸不匹配是静默失败（识别不出、无提示） | 新增 `WARN` 行：按 `fit` 目标算出抓图会被缩放成多大，直说「x 超出该宽度的模板 ROI 会静默失败」+ 处置建议（游戏改 16:9 或把 `connect.fit_window` 配成实际渲染尺寸）。**只告警、不拒连**（见下） | `maaend_adapter.hpp` |
+| `MaaControllerGetResolution` 返回失败时，状态里拿 `0x0` 冒充分辨率 | 失败则退回 hub 自己实测的客户区尺寸，`st_.res_w/res_h` 不再是 0x0 | `maaend_adapter.hpp` |
+| **托盘完全没实现**：`Shell_NotifyIcon` 全仓 0 次；关窗 = `PostQuitMessage` = 进程结束，后台调度/正在跑的任务一起没 | 新增注册：`create()` 里 GDI 现画大小图标（`CreateDIBSection`+`CreateIconIndirect`，零 `.rc`/`.ico` 依赖）→ `WM_SETICON` + `NIM_ADD` + `NIM_SETVERSION(v4)`；`WM_APP+3` 托盘回调（左键/双击恢复、右键 `TrackPopupMenuEx` 菜单「显示主界面 / 退出 MaaHub」）；`WM_CLOSE` 改拦截为 `SW_HIDE` + 首次气泡提示；`WM_DESTROY` 里 `NIM_DELETE` + `DestroyIcon`（防幽灵图标）；`offscreen_`（`--dump-render`/基线）**不注册**，探针环境不变 | `app_window.cpp/hpp` |
+
+### 有意为之的两个决定
+
+- **不拒连**：曾实现「客户区长宽比 ≠ 基准就直接 `connect()` 失败」。被自己的数据否掉——同一条 1200×720 缩放链路上 `AutoCollectSchedule` 是能 `ret=true` 的（`maafw.log` 11-14 20:32），拒连会把**能跑的任务一起杀掉**。改成告警 + 如实状态，把判断留给用户。
+- **不猜游戏的 16:9 档位**：试过读 `AppData\LocalLow\Hypergryph\Endfield\ClientData\User\405582243\Default.json` 找分辨率设置（44,744 B，只出现一处字面 `720`，无 width/height 类键）——**没找到可靠键名，就没动它**。改游戏配置属于用户数据，盲改的风险高于收益。
+
+### 验收（四重门 + 两项实机）
+
+1. **编译** `build.bat` `EXIT=0`，0 error，警告 **13 条 = C4996×6 + C4244×7**，与 r24 基线逐条同数同型；唯一站点随插行下移（`app_window.cpp:2064 → 2233`）。exe **1,481,728 B / SHA256 `AD363F335C029986…`**。
+2. **双 exe `--cli override` 差分**（新 r25 vs 基线 r24，同一份 state、5 个执行器）：**0 diffs → PASS**。
+3. **`--check` / `--self-test` / `--startup-bench`**：全 `rc=0`；self-test **18 项 ALL OK**；`first_paint=10ms`（阈 200ms）。
+4. **6 页面 `--dump-render`**：确定性 6/6 True；`cores`/`settings` 两页 new≠old → **同沙盒 A/B 换件复测**（只换 exe，路径/state 完全一致），`cores`/`settings`/`executor`/`events` **四页逐字节相同**，证明差异纯属沙盒路径文本，非渲染回归。
+5. **托盘实机**（WorkCenter session-1，空 state 隔离实例，不碰生产 serve）：`trace: tray added`（`NIM_ADD` 成功）→ `WM_CLOSE` 后**进程存活**、主窗口 `visible 1→0`（隐藏进托盘）→ 模拟托盘左键 `WM_APP+3/WM_LBUTTONUP` 后 `MaaHubMainWindow visible=1`（恢复）→ `WM_COMMAND IDM_TRAY_EXIT` 后进程干净退出，`hub dtor begin → workers stopped → dtor end`。**三段行为全 PASS**。
+6. **r25 真实 Endfield connect**（换件后的生产目录）：`connect rc=0 / connect=1`，trace 三行——`maaend fit client want=1280x720 actual=1280x768 stuck`、`maaend WARN … capture scales to ~1200x720, ROIs beyond will silently fail …`、`maaend connected res=1280x768 (GetResolution failed)`。**谎报变如实报告，且预言的失败宽度与 `maafw.log` 的 `image.size()=[1200,720]` 精确吻合。**
+
+### 已知未闭合（本轮**没有**解决，别误读）
+
+- **Endfield `AutoEcoFarm` 仍会 `ret=false`**：根因是 MaaEnd 的 Endfield 资源按 1280×720 基准写 ROI，而游戏锁 1280×768、核心把图缩到 1200×720——**不在 hub 代码内**（hub 不产图、不传尺寸）。r25 做到的是：connect 阶段就把这条不匹配说清楚，不再让人空跑 288s。
+- `MaaControllerGetResolution` 对该 win32 控制器**返回失败**（框架缺陷，实测恒 `false`；兜底只是不再显示 0x0）。
+- 提权（`/rl HIGHEST`，`SetWindowPos` 返回 TRUE）也**改不动**游戏客户区——游戏自己锁 5:3；LIMITED 下更是 `gle=5`。所以「fit 生效」在 Endfield 上不可能，只能如实报告。
+- 核心日志本轮实测 `no available gpu found`（Intel UHD 750 显存 <2GB 被跳、只剩软件适配器）——很可能是游戏锁 768 高的成因，属环境侧，未处理。
+- `--cli list` 不是有效子命令（有效集：`core-check/ping/devices/tasks/get-connect/set-connect/accounts/add-account/use-account/link/import/sched-list/sched-run/sched-tick/serve/connect/disconnect/stop/events/override/run/seq`）；门 5 首次部署脚本用它做健康检查报了 `rc=1`，属**脚本用错命令**，非 r25 缺陷（后续改用 serve 进程数 + `connect` 实跑复核）。
+- **探针教训**：`DllImport` 不写 `CharSet=CharSet.Unicode` 时，`GetWindowTextW/GetClassNameW` 会把中文/宽字符按 ANSI 截断（`cls=U`、`title=E` 这类单字符假象），导致「找不到窗口 → 后续断言全无效」。第一版托盘探针正是栽在这里，结论作废后重写才算数。
+
+
 ## 三、纪律性排除（明确决定不改的，及理由）
 
 | 项 | 位置 | 不改理由 |
@@ -680,11 +730,12 @@ r18 证明"删死语句"这条路已见底后，r19 换了维度：**不再改�
 
 ## 六、当前状态
 
-- `build\MaaHub.exe` = **1,475,584 B**（11-16 02:47 r24 构建，SHA256 `532E61D3…`；同日 01:57 的同内容中间构建 1,475,584 B / `E6A687B9…`，两者只差链接器写入的 PE TimeDateStamp 与调试目录时间戳共 6 字节——见本条末尾。链：r13/r14 1,470,464 B、r15 1,467,392 B、r16 1,465,856 B、r17 1,463,296 B、r18 1,463,296 B、r19 1,455,104 B、r20 1,453,056 B、r21 1,453,568 B、r22 1,454,080 B、r23 1,467,904 B（= tag `v1.0.0` 资产，发布件与本地件同样只差这 6 字节）、**r24 1,475,584 B**）。`build.bat release` 干净通过（EXIT=0 / 13 警告 / 0 错误，警告集合与基线逐条相同，仅 `app_window.cpp` 站点行号 2061→2064 漂移）。r24 是**行为修正轮**，体积增加 7.6 KB 来自新增的脏标记链、错误分支句柄释放与节流兜底逻辑，不计入轻量化累计收益。
-- 源码行数/字节（r24 后实测，含空行总行数）：全树 **14,369 行 / 670,321 B**（r22 后为 13,982 行；r23 +160/−4 未登记，r24 +343/−116）。`util.hpp` 575 / 23,174 B、`hub.hpp` 1566 / 69,371 B、`planner.hpp` 485 / 22,634 B、`accounts.hpp` 262 / 10,988 B、`core_manager.hpp` 963 / 46,305 B、`main.cpp` 989 / 46,828 B、`worker_main.cpp` 183 / 7,534 B、`worker_main.hpp` 7 / 146 B、`config_import.hpp` 926 / 45,263 B、`app_window.cpp` 3,466 / 168,087 B、`app_window.hpp` 297 / 13,988 B、`task_panels.hpp` 917 / 46,966 B、`maaend_adapter.hpp` 1,386 / 66,892 B、`maa_adapter.hpp` 499 / 23,633 B、`adapter.hpp` 96 / 3,343 B、`gui.hpp` 920 / 44,377 B、`json.hpp` 455 / 15,590 B、`settings.hpp` 183 / 7,886 B、`worker_client.hpp` 194 / 7,316 B。
+- `build\MaaHub.exe` = **1,481,728 B**（11-16 07:53 r25 构建，SHA256 `AD363F335C029986…`；同内容首次构建 07:53:00 / `188822B9…`，差 6 字节链接器时间戳——机制见本条末尾。链：r13/r14 1,470,464 B、r15 1,467,392 B、r16 1,465,856 B、r17 1,463,296 B、r18 1,463,296 B、r19 1,455,104 B、r20 1,453,056 B、r21 1,453,568 B、r22 1,454,080 B、r23 1,467,904 B（= tag `v1.0.0` 资产）、r24 1,475,584 B / `532E61D3…`、**r25 1,481,728 B**）。`build\_review1115\MaaHub.exe` 仍是 r20 期对照件，不参与发布。
+- 源码行数/字节（r25 后实测，含空行总行数）：全树 **14,595 行 / 681,280 B**（r22 后 13,982；r24 +227 → 14,369；r25 +226）。本轮四个文件：`util.hpp` 591 / 24,136 B（r24 575）、`app_window.hpp` 314 / 15,300 B（297）、`app_window.cpp` 3,635 / 175,049 B（3,466）、`adapters\maaend_adapter.hpp` 1,410 / 68,615 B（1,386）。
 - `assets\MaaCore.dll` 未被本轮触碰：56,198,144 B，MD5 `6701554378F11708A9CF452621F06619`。
 - **验收门已从三重升级为四重，且门 4 有两个形态**：编译 + 探针逐字节 + 独立沙箱导入 18 条 + 差分测试。门 4 形态 A = 单函数差分（`parse_url_diff` 类，验证搬移/重写的函数体）；形态 B = **双 exe CLI 差分**（r14 新增，旧二进制 vs 新二进制各建沙箱、各拷同一份 state，逐例比 EXIT + 完整 stdout，验证改动落在分发路径/UI 侧时仍能给出可执行断言）。r15 用一次 75 处的大批改动把这套门走完（A/B 均 0 mismatch），说明门的粒度足以覆盖"批量删除"这种最难用肉眼确认的变更。门 4 的引入是对"回归门不执行被改代码"这一证据缺口的直接补强。
-- **部署状态（2026-11-16 03:1x 更新）**：WorkCenter 已部署 **r24 = 1,475,584 B / SHA256 `532E61D3…`**（六阶段：备份 `_r24scratch\backup\MaaHub-1467904-20261116-031313.exe` → 停 7 进程 → 安装 → 经 `MaaHubScheduler` 交互任务拉起 → 复核 `PROCS=7 / STATE_JSON=9 / serve pid=319156`；`_r24_incoming` 与本地构建逐字节同哈希，远端回拉件与本地件同为 `532E61D3…`）。备份原件 = v1.0.0 发布件（`EF7027C8…`），watchdog 每 5 分钟保活。**release 未发**：r24 的 Endfield 实测仍 `ret=false`（详见下方实测条目），不满足「Endfield 测试完成」的发版前置。本地误建的 `v1.0.1` tag 已删除，远端只有 v1.0.0。
+- **部署状态（2026-11-16 08:1x 更新）**：WorkCenter 已部署 **r25 = 1,481,728 B / SHA256 `AD363F335C029986…`**（六阶段：冻结 `MaaHubWatchdog` → 备份 r24 为 `_r24scratch\backup\MaaHub-1475584-20261116-081557.exe` → 停 7 进程 → 安装 → 经 `MaaHubScheduler` 交互任务拉起 → 复核 `PROCS=7 / serve pid=324096` → 恢复 watchdog）。远端安装件与本地构建**逐字节同哈希**（`AD363F335C029986…`，双向核对）。备份链：v1.0.0 件 `EF7027C8…` 与 r24 件 `532E61D3…` 都在 `_r24scratch\backup\`，任一可回滚。**r25 的 Endfield 实测见「二·补19」验收第 5/6 条：connect 成功、fit/WARN/分辨率三项如实上报；`AutoEcoFarm` 业务判定仍 `ret=false`（根因不在 hub）。**
+- **release 仍未发**：远端只有 tag `v1.0.0`（= r23）；r24/r25 都过了代码四重门与托盘实机，但「Endfield 测试完成」这一前置按用户要求未满足，且失败根因在 MaaEnd 资源与游戏客户区比例（1280×768 vs 1280×720 基准），不是 hub 能修的——发版决定挂起，等用户裁决。
 - **本轮（r24）验收门口径变更**：历史门 `probe_norm.exe` 逐字节 golden 与 `iso_import` 18 条依赖本机已不存在的 `D:\Application\MAA`/`D:\Application\MaaEnd`，改由双 exe `--cli override` 差分（门②）+ `--check/--self-test`（门③）+ 双 exe 双跑渲染确定性（门④）承担；门④的 cross-exe 差异必须逐一定位到像素 bbox 或同盒对照复测，不允许「同尺寸不同内容」悬空。
 - **测试一律远端执行（用户硬性纪律）**：本轮全部门 2/3/4 均在 WorkCenter 远端跑，含新增的双 exe 差分类。本机 `pwsh` 只做文件哈希/文本比对/脚本下发，**不执行任何产品程序或测试程序**（20:36 那次本地误启动的教训见 §五 事故复盘条）。
 - 长期目标保持 armed，继续迭代 review。

@@ -284,7 +284,24 @@ private:
 
     static const UINT WM_APP_SNAP = WM_APP + 1;
     static const UINT WM_APP_IMPORT = WM_APP + 2;   // backend 线程完成导入 -> UI 线程合并任务列表
+    static const UINT WM_APP_TRAY = WM_APP + 3;     // r25：托盘回调（NIM v4：事件=LOWORD(lParam)）
     static const UINT_PTR TIMER_REFRESH = 1;
+    // ---- r25：系统托盘（此前全仓没有一次 Shell_NotifyIcon，关窗=进程结束） ----
+    static const WORD kTrayId = 1;                  // 本窗口唯一图标 uID
+    static const int IDM_TRAY_SHOW = 0x4D01;        // 托盘右键菜单：显示主界面
+    static const int IDM_TRAY_EXIT = 0x4D02;        // 托盘右键菜单：真正退出
+    bool tray_added_ = false;                       // NIM_ADD 成功，负责 NIM_DELETE
+    bool tray_exiting_ = false;                     // 托盘「退出」置位：WM_CLOSE 不再拦截
+    bool tray_hint_shown_ = false;                  // 首次隐藏到托盘时发一条气泡
+    HICON tray_icon_ = nullptr;                     // 托盘当前引用的小图标
+    HICON tray_big_ = nullptr;                      // WM_SETICON(ICON_BIG) 持有的自绘图标
+    HICON tray_small_ = nullptr;                    // WM_SETICON(ICON_SMALL) + 托盘图标
+    static HICON make_icon(int sx, int sy);         // GDI 自绘，无 .rc/.ico 资源
+    void tray_add();
+    void tray_remove();
+    void tray_show();
+    void tray_menu(POINT pos);
+    void tray_balloon(const wchar_t* title, const wchar_t* text);
 
     // 导入动作的跨线程交接：backend 线程写入（import_mtx_ 保护），
     // UI 线程在 WM_APP_IMPORT 里取走并合并进 task_list_

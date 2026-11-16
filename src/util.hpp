@@ -144,19 +144,35 @@ inline bool find_window(const std::string& class_regex, const std::string& title
     return ctx.found;
 }
 
-// 把窗口客户区校正成指定尺寸。
-// 游戏按 1280x720 渲染时 pipeline 模板才匹配；窗口被拉伸成 1280x768 这类
-// 非 16:9 尺寸后，UI 图标相对模板缩放，识别会静默失败（表现为任务空转）。
-inline bool fit_client_size(HWND hwnd, int want_w, int want_h) {
+// 把窗口客户区校正成指定尺寸，并复查是否真的生效（r25）。
+// 旧版只看 SetWindowPos 返回值：会自锁客户区的游戏（Endfield 实测锁 1280x768）
+// 照样返回 TRUE 而尺寸没变，随后核心把抓图按高度等比缩放（1280x768→1200x720），
+// 模板 ROI 右缘越界，识别静默失败。现在写入后轮询复查、最多三轮，并经 out 参数
+// 回传最终实际尺寸——调用方按实际值判定，不再凭 SetWindowPos 的谎报。
+inline bool fit_client_size(HWND hwnd, int want_w, int want_h, int* out_w, int* out_h) {
     RECT wr{}, cr{};
-    if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return false;
-    const int cur_w = cr.right - cr.left;
-    const int cur_h = cr.bottom - cr.top;
-    if (cur_w == want_w && cur_h == want_h) return true;
-    const int frame_w = (wr.right - wr.left) - cur_w;
-    const int frame_h = (wr.bottom - wr.top) - cur_h;
-    return SetWindowPos(hwnd, nullptr, 0, 0, want_w + frame_w, want_h + frame_h,
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
+    auto read = [&]() -> bool {
+        if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return false;
+        if (out_w) *out_w = (int)(cr.right - cr.left);
+        if (out_h) *out_h = (int)(cr.bottom - cr.top);
+        return true;
+    };
+    if (!read()) return false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const int cur_w = (int)(cr.right - cr.left), cur_h = (int)(cr.bottom - cr.top);
+        if (cur_w == want_w && cur_h == want_h) return true;
+        const int frame_w = (int)(wr.right - wr.left) - cur_w;
+        const int frame_h = (int)(wr.bottom - wr.top) - cur_h;
+        if (!SetWindowPos(hwnd, nullptr, 0, 0, want_w + frame_w, want_h + frame_h,
+                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE))
+            return false;
+        for (int i = 0; i < 10; ++i) {   // 最多等 1s：游戏若接受改尺寸，WM_SIZE 很快到
+            Sleep(100);
+            if (!read()) return false;
+            if (cr.right - cr.left == want_w && cr.bottom - cr.top == want_h) return true;
+        }
+    }
+    return false;   // 三轮后仍不是目标尺寸 = 游戏锁死了客户区
 }
 
 // ---------------- 进程启动 ----------------

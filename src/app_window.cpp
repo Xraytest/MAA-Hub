@@ -7,6 +7,7 @@
 #include <windowsx.h>
 #include <commdlg.h>
 #include <shobjidl.h>   // IFileDialog（导入安装路径选择）
+#include <shellapi.h>   // r25：Shell_NotifyIcon（系统托盘注册）
 
 namespace hub {
 
@@ -125,6 +126,17 @@ bool MaaHubWindow::create() {
     UpdateWindow(hwnd_);
     SetTimer(hwnd_, TIMER_REFRESH, 250, nullptr);
 
+    if (!offscreen_) {
+        // r25：窗口图标 + 托盘注册。offscreen_（--dump-render / 离屏基线）不碰，
+        // 免得无人值守渲染在托盘里多挂一个图标、改变探针环境。
+        tray_big_ = make_icon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+        tray_small_ = make_icon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+        if (tray_big_) SendMessageW(hwnd_, WM_SETICON, ICON_BIG, (LPARAM)tray_big_);
+        if (tray_small_) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, (LPARAM)tray_small_);
+        tray_icon_ = tray_small_ ? tray_small_ : tray_big_;
+        tray_add();
+    }
+
     running_ = true;
     backend_ = std::thread([this] { backend_loop(); });
     return true;
@@ -235,6 +247,119 @@ int MaaHubWindow::run() {
         DispatchMessage(&msg);
     }
     return (int)msg.wParam;
+}
+
+// ---------------- r25：系统托盘 ----------------
+// 图标是 GDI 现画的（深蓝底白“M”），不引入 .rc/.ico：本工程零二进制资源，
+// build.bat 也只有 cl 一条命令，加资源就得拖 rc.exe 进构建链。
+HICON MaaHubWindow::make_icon(int sx, int sy) {
+    if (sx < 8 || sy < 8) { sx = sy = 32; }
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = sx;
+    bmi.bmiHeader.biHeight = -sy;              // 负值 = 自上而下
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP color = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!color) { DeleteDC(dc); ReleaseDC(nullptr, screen); return nullptr; }
+    uint32_t* px = (uint32_t*)bits;
+    for (int i = 0; i < sx * sy; ++i) px[i] = 0xFF4E2C1Bu;   // BGRA：R=1B G=2C B=4E
+    HBITMAP old_bmp = (HBITMAP)SelectObject(dc, color);
+    HPEN pen = CreatePen(PS_SOLID, sx / 8 + 1, RGB(255, 255, 255));
+    HPEN old_pen = (HPEN)SelectObject(dc, pen);
+    const int x0 = sx * 3 / 12, x1 = sx - x0;
+    const int yb = sy * 72 / 100, yt = sy * 28 / 100, ym = sy * 52 / 100;
+    MoveToEx(dc, x0, yb, nullptr);
+    LineTo(dc, x0, yt);
+    LineTo(dc, sx / 2, ym);
+    LineTo(dc, x1, yt);
+    LineTo(dc, x1, yb);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+    // GDI 画进 32bpp DIB 会把高字节写成 0；统一补满不透明（遮罩全 0 时才走 alpha）
+    for (int i = 0; i < sx * sy; ++i) px[i] |= 0xFF000000u;
+    SelectObject(dc, old_bmp);
+    HBITMAP mask = CreateBitmap(sx, sy, 1, 1, nullptr);
+    if (mask) {
+        HDC mdc = CreateCompatibleDC(nullptr);
+        HBITMAP old_m = (HBITMAP)SelectObject(mdc, mask);
+        PatBlt(mdc, 0, 0, sx, sy, BLACKNESS);
+        SelectObject(mdc, old_m);
+        DeleteDC(mdc);
+    }
+    ICONINFO ii{};
+    ii.fIcon = TRUE;
+    ii.hbmColor = color;
+    ii.hbmMask = mask;
+    HICON ic = CreateIconIndirect(&ii);
+    if (mask) DeleteObject(mask);
+    DeleteObject(color);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
+    return ic;
+}
+
+void MaaHubWindow::tray_add() {
+    if (tray_added_ || !tray_icon_) return;
+    NOTIFYICONDATAW nd{};
+    nd.cbSize = sizeof(nd);
+    nd.hWnd = hwnd_;
+    nd.uID = kTrayId;
+    nd.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nd.uCallbackMessage = WM_APP_TRAY;
+    nd.hIcon = tray_icon_;
+    wcscpy_s(nd.szTip, L"MaaHub — MAA / MaaEnd 统一管理器");
+    if (!Shell_NotifyIconW(NIM_ADD, &nd)) {
+        util::trace("tray NIM_ADD failed gle=" + std::to_string(GetLastError()));
+        return;
+    }
+    nd.uFlags = 0;
+    nd.uVersion = NOTIFYICON_VERSION_4;   // 双击/右键气泡版：事件在 LOWORD(lParam)
+    Shell_NotifyIconW(NIM_SETVERSION, &nd);
+    tray_added_ = true;
+    util::trace("tray added");
+}
+
+void MaaHubWindow::tray_remove() {
+    if (!tray_added_) return;
+    tray_added_ = false;
+    NOTIFYICONDATAW nd{};
+    nd.cbSize = sizeof(nd);
+    nd.hWnd = hwnd_;
+    nd.uID = kTrayId;
+    Shell_NotifyIconW(NIM_DELETE, &nd);
+}
+
+void MaaHubWindow::tray_show() {
+    ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(hwnd_);
+}
+
+void MaaHubWindow::tray_balloon(const wchar_t* title, const wchar_t* text) {
+    if (!tray_added_) return;
+    NOTIFYICONDATAW nd{};
+    nd.cbSize = sizeof(nd);
+    nd.hWnd = hwnd_;
+    nd.uID = kTrayId;
+    nd.uFlags = NIF_INFO;
+    nd.dwInfoFlags = NIIF_INFO;
+    wcscpy_s(nd.szInfoTitle, title);
+    wcscpy_s(nd.szInfo, text);
+    Shell_NotifyIconW(NIM_MODIFY, &nd);
+}
+
+void MaaHubWindow::tray_menu(POINT pos) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_SHOW, L"显示主界面");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出 MaaHub");
+    TrackPopupMenuEx(menu, TPM_BOTTOMALIGN | TPM_RIGHTBUTTON, pos.x, pos.y, hwnd_, nullptr);
+    DestroyMenu(menu);
 }
 
 LRESULT CALLBACK MaaHubWindow::wnd_proc(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
@@ -385,7 +510,51 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         DeleteDC(tmp);
         return 0;
     }
+    case WM_APP_TRAY: {
+        // NIM v4：事件在 LOWORD、图标 id 在 HIWORD；v0 回退时事件整体在 lParam，
+        // LOWORD 取值同样正确，两种格式共用一条解析路径。
+        UINT ev = (UINT)LOWORD(lp);
+        if (ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK) { tray_show(); return 0; }
+        if (ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU) {
+            POINT pt{};
+            GetCursorPos(&pt);
+            SetForegroundWindow(hwnd_);   // 不置前会导致菜单点击外部不消失（MSDN 明确要求）
+            tray_menu(pt);
+            PostMessageW(hwnd_, WM_NULL, 0, 0);
+            return 0;
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        // r25：对齐官方「关闭主界面时 → 最小化到系统托盘」。托盘没注册成功
+        // （offscreen、NIM_ADD 失败）或走的是托盘「退出」，都照常销毁窗口。
+        if (tray_added_ && !tray_exiting_) {
+            ShowWindow(hwnd_, SW_HIDE);
+            if (!tray_hint_shown_) {
+                tray_hint_shown_ = true;
+                tray_balloon(L"MaaHub 仍在后台运行",
+                             L"双击托盘图标恢复窗口；右键托盘图标可退出程序。");
+            }
+            return 0;
+        }
+        return DefWindowProcW(hwnd, m, wp, lp);
+    case WM_COMMAND: {
+        WORD id = LOWORD(wp);
+        if (id == IDM_TRAY_SHOW) { tray_show(); return 0; }
+        if (id == IDM_TRAY_EXIT) {
+            tray_exiting_ = true;
+            tray_remove();
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, m, wp, lp);
+    }
     case WM_DESTROY:
+        // r25：先摘托盘再退——进程没了图标还挂着，就是资源管理器里的幽灵图标
+        tray_remove();
+        if (tray_big_) { DestroyIcon(tray_big_); tray_big_ = nullptr; }
+        if (tray_small_) { DestroyIcon(tray_small_); tray_small_ = nullptr; }
+        tray_icon_ = nullptr;
         PostQuitMessage(0);
         return 0;
     }

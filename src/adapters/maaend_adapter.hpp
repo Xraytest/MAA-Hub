@@ -946,14 +946,33 @@ public:
         // 尺寸后，UI 图标相对模板整体缩放，模板匹配会静默失败——DailyRewards
         // 就是在这里空转的（WorldMenu 图标在 ROI 内却匹配不上）。
         std::string fit = cfg_.get_path_str("connect.fit_window", "1280x720");
-        if (fit != "off" && fit != "none") {
-            const size_t xp = fit.find('x');
-            const int fw = atoi(fit.c_str());
-            const int fh = xp == std::string::npos ? 0 : atoi(fit.c_str() + xp + 1);
-            if (fw > 0 && fh > 0 && util::fit_client_size(wi.hwnd, fw, fh)) {
-                util::trace("maaend fit client=" + std::to_string(fw) + "x" + std::to_string(fh));
-                Sleep(500);   // 让渲染尺寸跟上，否则首帧仍是旧尺寸
+        const size_t xp = fit.find('x');
+        const int fw = atoi(fit.c_str());
+        const int fh = xp == std::string::npos ? 0 : atoi(fit.c_str() + xp + 1);
+        const bool do_fit = (fit != "off" && fit != "none" && fw > 0 && fh > 0);
+        int client_w = 0, client_h = 0;
+        if (do_fit) {
+            const bool fitted = util::fit_client_size(wi.hwnd, fw, fh, &client_w, &client_h);
+            util::trace("maaend fit client want=" + std::to_string(fw) + "x" + std::to_string(fh) +
+                        " actual=" + std::to_string(client_w) + "x" + std::to_string(client_h) +
+                        (fitted ? " ok" : " stuck"));
+            if (fitted) Sleep(500);   // 尺寸确实变了才需要等渲染跟上
+            // r25：只告警不拒连——实测部分任务在缩放图上仍能 ret=true
+            // （AutoCollectSchedule），拒连会把能跑的链路一起杀掉；但必须说清：
+            // 抓图会被等比缩放到基准高度（实测 1280x768 → 1200x720），
+            // x>1200 的模板 ROI 越界、识别静默失败（AutoEcoFarm 即栽在这里）。
+            if (client_w > 0 && client_h > 0
+                && (long long)client_w * fh != (long long)client_h * fw) {
+                util::trace("maaend WARN client " + std::to_string(client_w) + "x" + std::to_string(client_h)
+                    + " != fit target " + std::to_string(fw) + "x" + std::to_string(fh)
+                    + " : capture scales to ~" + std::to_string((long long)fh * client_w / client_h)
+                    + "x" + std::to_string(fh)
+                    + ", ROIs beyond will silently fail; set the game to 16:9"
+                    + " or match connect.fit_window to its real size");
             }
+        } else {
+            RECT cr{};
+            if (GetClientRect(wi.hwnd, &cr)) { client_w = (int)(cr.right - cr.left); client_h = (int)(cr.bottom - cr.top); }
         }
         uint64_t sc = method_value(cfg_, "connect.screencap_method", 32, screencap_names());
         uint64_t mm = method_value(cfg_, "connect.mouse_method", 1, input_names());
@@ -996,6 +1015,11 @@ public:
         }
         int w = 0, hgt = 0;
         const bool rok = fn_.MaaControllerGetResolution(ctrl, &w, &hgt) != false;
+        if (!rok && client_w > 0 && client_h > 0) {
+            // r25：核心报不出分辨率（Endfield 实测恒 0x0）时退回自己实测的客户区尺寸，
+            // 状态里不再拿 0x0 冒充真实值
+            w = client_w; hgt = client_h;
+        }
         void* sb = fn_.MaaStringBufferCreate();
         std::string uuid;
         if (fn_.MaaControllerGetUuid(ctrl, sb)) uuid = strbuf_get(sb);
