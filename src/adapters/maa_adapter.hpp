@@ -533,6 +533,12 @@ private:
             p("facility", "array", true, mj::Value::array(), "设施列表"),
             p("drones", "string", false, mj::Value("_NotUse"), "无人机用途",
               { "_NotUse", "Money", "SyntheticJade", "CombatRecord", "PureGold", "OriginStone", "Chip" }),
+            p("filename", "string", false, mj::Value(""), "自定义排班 JSON 路径"),
+            p("plan_index", "number", false, mj::Value(0), "自定义排班方案索引"),
+            p("continue_training", "bool", false, mj::Value(false), "继续当前专精训练"),
+            p("replenish", "bool", false, mj::Value(false), "源石碎片自动补货"),
+            p("fiammetta_recovery_enabled", "bool", false, mj::Value(false), "使用菲亚梅塔恢复心情"),
+            p("fiammetta_targets", "array", false, mj::Value::array(), "菲亚梅塔指定干员"),
         });
         add("Mall", "领取信用并购物", {
             p("visit_friends", "bool", false, mj::Value(true), "访问好友基建"),
@@ -548,19 +554,32 @@ private:
         add("Roguelike", "集成战略（肉鸽）", {
             p("theme", "string", false, mj::Value("Sami"), "主题",
               { "Phantom", "Mizuki", "Sami", "Sarkaz", "JieGarden", "BlackFlow" }),
+            p("difficulty", "number", false, mj::Value(0), "难度"),
             p("mode", "number", false, mj::Value(0), "模式"),
             p("squad", "string", false, mj::Value(""), "开局分队"),
             p("starts_count", "number", false, mj::Value(2147483647), "探索次数"),
+            p("investment_enabled", "bool", false, mj::Value(false), "投资源石锭"),
         });
         add("Copilot", "自动抄作业", {
             p("filename", "string", false, mj::Value(""), "作业 JSON 路径"),
+            p("stage_name", "string", false, mj::Value(""), "关卡名（可选）"),
+            p("formation", "bool", false, mj::Value(false), "自动编队"),
+            p("add_trust", "bool", false, mj::Value(false), "补充低信赖干员"),
+            p("ignore_requirements", "bool", false, mj::Value(false), "忽略干员属性要求"),
+            p("use_sanity_potion", "bool", false, mj::Value(false), "自动使用理智药"),
+            p("support_unit_usage", "number", false, mj::Value(0), "借助战策略 0不借 1按需 2随机"),
+            p("support_unit_name", "string", false, mj::Value(""), "指定助战干员"),
             p("loop_times", "number", false, mj::Value(1), "循环次数"),
         });
         add("Depot", "仓库识别（数据采集）", {});
         add("OperBox", "干员 box 识别（数据采集）", {});
         add("Reclamation", "生息演算", {
-            p("theme", "string", false, mj::Value("Tales"), "主题"),
-            p("mode", "number", false, mj::Value(0), "模式"),
+            p("theme", "string", false, mj::Value("Tales"), "主题", { "Tales", "Fire" }),
+            p("mode", "number", false, mj::Value(0), "模式 0无存档/1读档"),
+            p("tools_to_craft", "array", false, mj::Value::array(), "制作工具列表"),
+            p("num_craft_batches", "number", false, mj::Value(16), "制作轮数"),
+            p("increment_mode", "number", false, mj::Value(0), "增量模式 0次数/1天数"),
+            p("clear_store", "bool", false, mj::Value(false), "清空商店"),
         });
         add("Custom", "自定义 pipeline 任务", {
             p("task_names", "array", true, mj::Value::array(), "任务名列表"),

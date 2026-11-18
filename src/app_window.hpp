@@ -125,8 +125,69 @@ private:
     void page_copilot(RECT content);
     // 官方 ToolboxView（小工具）
     void page_toolbox(RECT content);
+    void page_schedules(RECT content);
+    void draw_edit_schedule_overlay();
+    void open_edit_schedule(const mj::Value* entry = nullptr, const std::string& default_exec = "");
+    std::string browse_file_dialog(const wchar_t* title, const wchar_t* filter);
+    std::string browse_folder_or_config_dialog();
+    static std::string read_clipboard_utf8(HWND owner);
+
+    struct CopilotFileEntry {
+        std::string cat;   // main | sss | paradox | local
+        std::string path;
+        std::string title;
+        std::string stage;
+        std::string details;
+        std::string opers_summary;
+    };
+    void refresh_copilot_list(const std::string& maa_install_dir, bool force = false);
+    void inspect_copilot_file(const std::string& path);
+    void action_fetch_copilot_code(const std::string& code_or_url);
+
     std::string copilot_path_;
     std::map<std::string, bool> copilot_opt_;
+    std::string copilot_stage_;
+    int copilot_type_ = 0;            // 0=Copilot 1=SSSCopilot 2=ParadoxCopilot
+    int copilot_loop_ = 1;
+    int copilot_support_ = 0;         // 0=不用 1=按需 2=随机
+    std::string copilot_support_name_;
+    bool copilot_clip_auto_ = false;
+    std::string copilot_last_clip_;
+    std::string copilot_scan_dir_;
+    bool copilot_scanned_ = false;
+    std::vector<CopilotFileEntry> copilot_files_;
+    std::string copilot_preview_path_;
+    CopilotFileEntry copilot_preview_;
+    std::string fetched_copilot_path_;   // msg_mtx_ 保护：神秘代码拉取回传给 UI 线程
+
+    // ToolboxView（小工具）
+    int toolbox_tab_ = 0;             // 0=公招 1=仓库与干员 2=生息演算 3=牛牛小游戏与视频识别
+    int tb_ra_theme_ = 0;             // 0=Tales 1=Fire
+    int tb_ra_mode_ = 0;              // 0=无存档 1=读档
+    std::string tb_ra_tools_;
+    int tb_ra_batches_ = 16;
+    int tb_ra_inc_ = 0;
+    bool tb_ra_clear_store_ = false;
+    int tb_mg_kind_ = 0;              // 0=活动商店 1=材料合成 2=自动升潜能 3=隐秘战线 4=视频识别
+    std::string tb_mg_shop_blacklist_;
+    bool tb_mg_use_normal_token_ = false;
+    std::string tb_mg_secret_event_;
+    std::string tb_video_path_;
+    int tb_depot_sub_ = 0;            // 0=仓库物品 1=干员Box
+
+    // 统一 MaaHub 定时计划页与编辑弹窗
+    int sched_filter_ = 0;            // 0=全部 1=已启用 2=MAA 3=MaaEnd
+    bool show_edit_sched_ = false;
+    std::string edit_sched_id_;
+    int edit_sched_exec_idx_ = 0;
+    std::vector<std::string> edit_sched_exec_ids_;
+    bool edit_sched_enabled_ = true;
+    std::string edit_sched_times_ = "04:00";
+    bool edit_sched_wd_[7] = { true, true, true, true, true, true, true };
+    bool edit_sched_force_ = false;
+    bool edit_sched_close_ = false;
+    std::string edit_sched_config_ = "Default";
+    std::string edit_sched_source_;
     void page_accounts(RECT content);
     void page_cores(RECT content);
     void page_planner(RECT content);

@@ -26,6 +26,7 @@
 
 - 职责：执行器模型（独立 worker + 绑定核心 + 可选账号）、任务序列、定时调度、状态快照。
 - **最近（11-09，+539 行）**：`merge_schedules` 按 `exec_id + source` 去重并保留 `last_run_date`（重复导入幂等）；调度线程 10 s tick，命中条件 =「该执行器未在跑 + 今天没跑 + 到点」，**先写 `last_run_date` 再触发**。
+- **11-18（r26，语义对齐 MAA Core）**：`scheduler_tick` 改为分钟精确匹配（去掉 30 分钟追赶窗口）；忙时（非强制）一次性作废该时段（对齐 Core `_lastTimerElapsed` 消费分钟），记 `last_run_status=skipped_busy`；判定抽纯函数 `schedule_due_slot`（测试直测）；`last_run_slots` 按天裁剪；删除 `disable_native_timers`（不替代 Core）；CLI `sched-list/sched-run` 统一。详见 `docs/verify-20261118-scheduler-core-align.md`。
 - `--cli sched-tick` 手动扫一次、`serve` 常驻只跑调度器。
 
 ### 3. 核心管理 — `core_manager.hpp`（34 KB）

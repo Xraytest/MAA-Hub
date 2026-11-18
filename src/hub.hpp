@@ -540,10 +540,47 @@ public:
                 }
             }
         }
+        auto split_tokens = [](const std::string& s, const char* delims) {
+            mj::Value arr = mj::Value::array();
+            std::string cur;
+            for (size_t i = 0; i <= s.size(); ++i) {
+                char ch = (i < s.size()) ? s[i] : delims[0];
+                if (std::strchr(delims, ch)) {
+                    size_t l = 0, r = cur.size();
+                    while (l < r && cur[l] == ' ') ++l;
+                    while (r > l && cur[r - 1] == ' ') --r;
+                    if (r > l) arr.push(cur.substr(l, r - l));
+                    cur.clear();
+                } else {
+                    cur += ch;
+                }
+            }
+            return arr;
+        };
         if (task == "Infrast") {
             // mode: 0默认 / 10000自定义 / 20000轮换
             int m = (int)num("mode", 0);
             out.set("mode", (int64_t)(m == 1 ? 10000 : m == 2 ? 20000 : 0));
+            if (m == 1) {
+                std::string cf = in.get_str("custom_infrast_file", "");
+                if (!cf.empty()) {
+                    out.set("filename", cf);
+                } else if (in.find("builtin_plan")) {
+                    static const char* kBuiltinFiles[] = {
+                        "",
+                        "153_layout_3_times_a_day.json",
+                        "153_layout_4_times_a_day.json",
+                        "243_layout_3_times_a_day.json",
+                        "243_layout_4_times_a_day.json",
+                        "252_layout_3_times_a_day.json",
+                        "333_layout_for_Orundum_3_times_a_day.json"
+                    };
+                    int bp = (int)num("builtin_plan", 0);
+                    if (bp > 0 && bp < 7 && out.get_str("filename", "").empty()) {
+                        out.set("filename", std::string(kBuiltinFiles[bp]));
+                    }
+                }
+            }
             // drones: 索引 -> MAA 字符串（与面板 drones_idx / config_import kDrones 同序）
             static_assert(kDroneCount == sizeof(kDrones) / sizeof(kDrones[0]),
                           "kDrones 表与 kDroneCount 数量不一致");
@@ -575,6 +612,20 @@ public:
                 if (boolean(key, false)) fac.push(kFacility[k]);
             }
             if (touched) out.set("facility", std::move(fac));
+            if (in.find("dorm_trust")) out.set("dorm_trust_enabled", boolean("dorm_trust", false));
+            if (in.find("dorm_filter_not_stationed")) {
+                out.set("dorm_notstationed_enabled", boolean("dorm_filter_not_stationed", false));
+            }
+            if (auto* ft = in.find("fiammetta_targets"); ft && ft->is_string() && !ft->as_string().empty()) {
+                out.set("fiammetta_targets", split_tokens(ft->as_string(), ";,"));
+            }
+            if (out.has("filename") && out.get_str("filename", "").empty()) {
+                out.members().erase("filename");
+            }
+            if (out.has("fiammetta_targets") && out["fiammetta_targets"].is_array()
+                && out["fiammetta_targets"].items().empty()) {
+                out.members().erase("fiammetta_targets");
+            }
         }
         if (task == "Recruit") {
             // confirm_3..6 -> confirm 数组；select_tags -> select 数组
@@ -584,44 +635,26 @@ public:
                 std::string k = "confirm_" + std::to_string(lv);
                 if (boolean(k, false)) confirm.push((int64_t)lv);
             }
-            std::string tags = in.get_str("select_tags", "");
-            std::string cur;
-            for (char ch : tags + ";") {
-                if (ch == ';') {
-                    if (!cur.empty()) {
-                        try { select.push((int64_t)std::stoi(cur)); } catch (...) {}
-                        cur.clear();
-                    }
-                } else if (ch != ' ') {
-                    cur += ch;
-                }
+            mj::Value tag_strs = split_tokens(in.get_str("select_tags", ""), ";,");
+            for (auto& s : tag_strs.items()) {
+                try { select.push((int64_t)std::stoi(s.as_string())); } catch (...) {}
             }
             out.set("confirm", std::move(confirm));
             out.set("select", std::move(select));
         }
         if (task == "Mall") {
-            auto split_list = [](const std::string& s) {
-                mj::Value arr = mj::Value::array();
-                std::string cur;
-                for (char ch : s + ";") {
-                    if (ch == ';') {
-                        if (!cur.empty()) { arr.push(cur); cur.clear(); }
-                    } else if (ch != ' ') {
-                        cur += ch;
-                    }
-                }
-                return arr;
-            };
             std::string bl = in.get_str("blacklist_str", "");
-            if (!bl.empty()) out.set("blacklist", split_list(bl));
+            if (!bl.empty()) out.set("blacklist", split_tokens(bl, ";,"));
             std::string bf = in.get_str("buy_first_str", "");
-            if (!bf.empty()) out.set("buy_first", split_list(bf));
+            if (!bf.empty()) out.set("buy_first", split_tokens(bf, ";,"));
         }
         if (task == "Roguelike") {
-            static const char* kTh[] = { "Phantom", "Mizuki", "Sami", "Sarkaz" };
+            static const char* kTh[] = {
+                "Phantom", "Mizuki", "Sami", "Sarkaz", "JieGarden", "BlackFlow"
+            };
             if (auto* v = in.find("theme"); v && v->is_number()) {
                 int idx = (int)v->as_int(2);
-                if (idx < 0 || idx >= 4) idx = 2;
+                if (idx < 0 || idx >= 6) idx = 2;
                 out.set("theme", std::string(kTh[idx]));
             }
             static const char* kSq[] = {
@@ -646,22 +679,49 @@ public:
                 out.set("starts_count", (int64_t)2147483647);
             }
         }
+        if (task == "Reclamation") {
+            static const char* kRaTh[] = { "Tales", "Fire" };
+            if (auto* v = in.find("theme"); v && v->is_number()) {
+                int idx = (int)v->as_int(0);
+                if (idx < 0 || idx >= 2) idx = 0;
+                out.set("theme", std::string(kRaTh[idx]));
+            }
+            if (auto* tc = in.find("tools_to_craft"); tc && tc->is_string()) {
+                out.set("tools_to_craft", split_tokens(tc->as_string(), ";,"));
+            }
+        }
+        if (task == "OperBox") {
+            for (auto* k : { "update_all", "update_elite", "update_level", "update_skill",
+                             "update_module", "update_potential", "target_oper",
+                             "target_elite", "target_level", "target_skill" }) {
+                out.members().erase(k);
+            }
+        }
         if (task == "Copilot") {
             std::string cf = in.get_str("copilot_file", "");
             if (!cf.empty() && in.get_str("filename", "").empty()) out.set("filename", cf);
+            if (out.has("stage_name") && out.get_str("stage_name", "").empty()) {
+                out.members().erase("stage_name");
+            }
+            if (out.has("support_unit_name") && out.get_str("support_unit_name", "").empty()) {
+                out.members().erase("support_unit_name");
+            }
         }
         if (task == "Custom") {
             if (auto* v = in.find("task_names"); v && v->is_string()) {
-                mj::Value arr = mj::Value::array();
-                std::string cur;
-                for (char ch : v->as_string() + ",") {
-                    if (ch == ',' || ch == ';') {
-                        if (!cur.empty()) { arr.push(cur); cur.clear(); }
-                    } else if (ch != ' ') {
-                        cur += ch;
-                    }
-                }
-                out.set("task_names", std::move(arr));
+                out.set("task_names", split_tokens(v->as_string(), ",;"));
+            }
+            if (auto* eb = in.find("event_shop_blacklist"); eb && eb->is_string() && !eb->as_string().empty()) {
+                mj::Value es = out.has("event_shop") && out["event_shop"].is_object()
+                    ? out["event_shop"] : mj::Value::object();
+                es.set("blacklist", split_tokens(eb->as_string(), ";,"));
+                out.set("event_shop", std::move(es));
+            }
+            if (in.find("use_normal_token")) {
+                mj::Value arp = out.has("auto_raise_potential") && out["auto_raise_potential"].is_object()
+                    ? out["auto_raise_potential"] : mj::Value::object();
+                arp.set("use_normal_token", boolean("use_normal_token", false));
+                out.set("auto_raise_potential", std::move(arp));
             }
         }
         if (task == "StartUp" || task == "CloseDown") {
@@ -727,12 +787,29 @@ public:
         mj::Value final_params = (allow_acc && (is_aware || has_acc))
             ? AccountStore::apply_to_task(e.kind, task, normalized, has_acc ? &acc : nullptr)
             : normalized;
+        std::string dispatch_task = task;
+        if (e.kind == "maa" && task == "Infrast" && final_params.get_int("mode", 0) == 10000) {
+            std::string fn = final_params.get_str("filename", "");
+            if (!fn.empty() && fn.find('\\') == std::string::npos && fn.find('/') == std::string::npos) {
+                std::string inst_dir = e.config.get_str("install_dir", "");
+                if (!inst_dir.empty()) {
+                    final_params.set("filename", inst_dir + "\\resource\\custom_infrast\\" + fn);
+                }
+            }
+        }
+        if (e.kind == "maa" && task == "Copilot") {
+            int ct = (int)final_params.get_int("copilot_type", 0);
+            if (ct == 1) dispatch_task = "SSSCopilot";
+            else if (ct == 2) dispatch_task = "ParadoxCopilot";
+            final_params.members().erase("copilot_type");
+            final_params.members().erase("copilot_file");
+        }
         {
             std::lock_guard<std::mutex> lk(tp_mtx_);
             running_task_[id] = task;
         }
         mj::Value req = mj::Value::object();
-        req.set("task", task);
+        req.set("task", dispatch_task);
         req.set("params", final_params);
         mj::Value r;
         bool ok = w->call("run", req, 60000, r);
@@ -792,6 +869,7 @@ public:
         v.set("plans", mj::Value::array());
         v.set("events", mj::Value::array());
         v.set("data", mj::Value::object());
+        v.set("schedules", schedules_snapshot());
         v.set("settings", settings_->get().to_json());
         return v;
     }
@@ -861,6 +939,7 @@ public:
             for (auto& kv : data_) data.set(kv.first, kv.second);
         }
         v.set("data", std::move(data));
+        v.set("schedules", schedules_snapshot());
         v.set("settings", settings_->get().to_json());
         return v;
     }
@@ -912,22 +991,26 @@ public:
     // ================================================================ 计划
     mj::Value propose_plan(const std::string& goal, const std::string& planner_name = "") {
         mj::Value snap = snapshot();
-        // 目录按 kind 聚合（取任一执行器的目录）
+        // 目录按 kind 聚合（每种 kind 取一个执行器的目录）
         mj::Value catalog = mj::Value::object();
         {
             std::lock_guard<std::mutex> lk(mtx_);
+            std::set<std::string> seen_kinds;
             for (auto& kv : executors_) {
+                if (seen_kinds.count(kv.second.kind)) continue;
                 auto w = kv.second.worker;
                 if (!w) continue;
                 mj::Value r;
                 if (w->call("tasks", mj::Value::object(), 15000, r) && r.is_array()) {
                     catalog.set(kv.second.kind, r);
-                    break;   // 同 kind 目录相同，取一个即可
+                    seen_kinds.insert(kv.second.kind);
                 }
             }
         }
         Plan plan;
-        if (planner_name == "heuristic") {
+        bool use_heur = (planner_name == "heuristic")
+                     || (planner_name.empty() && (!settings_->get().llm_enabled || llm_cfg_.api_key.empty()));
+        if (use_heur) {
             HeuristicPlanner hp;
             plan = hp.plan(goal, snap, catalog);
         } else {
@@ -1149,36 +1232,168 @@ public:
         }
     }
 
+    // 统一读取某执行器勾选/展示列表（state\task-lists.json）
+    std::vector<std::string> load_exec_task_list(const std::string& exec_id,
+                                                 const mj::Value* lists_cache = nullptr) const {
+        mj::Value local;
+        const mj::Value* src = lists_cache;
+        if (!src) {
+            std::string content;
+            if (util::read_file(util::exe_dir() + "\\state\\task-lists.json", content)
+                && mj::try_parse(content, local) && local.is_object()) {
+                src = &local;
+            }
+        }
+        std::vector<std::string> tasks;
+        if (!src || !src->is_object()) return tasks;
+        auto* lst = src->find(exec_id);
+        if (!lst || !lst->is_array()) return tasks;
+        for (auto& t : lst->items()) {
+            std::string name = t.as_string();
+            if (!name.empty()) tasks.push_back(name);
+        }
+        return tasks;
+    }
+
     // 合并导入的调度条目（GUI 导入按钮与 CLI import 共用）。
-    // 按 exec_id+\x1f+source 去重：同键覆盖（保留已记录的 last_run_date），新键追加。
+    // 按 id 或 exec_id+\x1f+source 去重：同键覆盖（保留已记录的 last_run_* / 强制启动等），新键追加。
     void merge_schedules(const mj::Value& incoming_entries) {
         if (!incoming_entries.is_array() || incoming_entries.items().empty()) return;
+        auto exec_list = executors();
         std::lock_guard<std::mutex> lk(sched_mtx_);
-        // entries 缺失时 operator[] 会创建 Object；对 Object push 只进 arr_ 不改 type_，
-        // dump 时静默丢数据——先保证它是 Array
         if (!schedules_.has("entries") || !schedules_["entries"].is_array())
             schedules_.set("entries", mj::Value::array());
-        for (auto& in : incoming_entries.items()) {
+        for (mj::Value in : incoming_entries.items()) {
+            normalize_schedule_entry(in, exec_list);
             std::string key = in.get_str("exec_id", "") + "\x1f" + in.get_str("source", "");
+            std::string in_id = in.get_str("id", "");
             bool replaced = false;
             mj::Value& cur = schedules_["entries"];
             if (cur.is_array()) {
                 for (auto& ex : cur.items()) {
-                    if (ex.get_str("exec_id", "") + "\x1f" + ex.get_str("source", "") != key)
-                        continue;
+                    bool match = (!in_id.empty() && ex.get_str("id", "") == in_id)
+                              || (!in.get_str("source", "").empty()
+                                  && (ex.get_str("exec_id", "") + "\x1f" + ex.get_str("source", "") == key));
+                    if (!match) continue;
+                    std::string old_id = ex.get_str("id", "");
                     std::string lrd = ex.get_str("last_run_date", "");
                     std::string lrt = ex.get_str("last_run_time", "");
+                    mj::Value lrs = ex.find("last_run_slots") ? *ex.find("last_run_slots") : mj::Value();
+                    bool fs = ex.get_bool("force_start", false);
+                    bool cg = ex.get_bool("close_game_after", false);
                     ex = in;
+                    if (!old_id.empty()) ex.set("id", old_id);
                     if (!lrd.empty()) ex.set("last_run_date", lrd);
                     if (!lrt.empty()) ex.set("last_run_time", lrt);
+                    if (lrs.is_array() && !lrs.items().empty()) ex.set("last_run_slots", lrs);
+                    if (fs) ex.set("force_start", true);
+                    if (cg) ex.set("close_game_after", true);
                     replaced = true;
                     break;
                 }
             }
-            if (!replaced) schedules_["entries"].push(in);
+            if (!replaced) schedules_["entries"].push(std::move(in));
         }
         schedules_.set("version", 1);
         save_schedules_locked();
+    }
+
+    // 新增或更新一条 MaaHub 统一定时计划（GUI 新建/编辑用）
+    bool upsert_schedule(mj::Value entry_in) {
+        if (!entry_in.is_object()) return false;
+        std::string exec_id = entry_in.get_str("exec_id", "");
+        if (exec_id.empty()) return false;
+        auto exec_list = executors();
+        normalize_schedule_entry(entry_in, exec_list);
+        std::string id = entry_in.get_str("id", "");
+        std::lock_guard<std::mutex> lk(sched_mtx_);
+        if (!schedules_.has("entries") || !schedules_["entries"].is_array())
+            schedules_.set("entries", mj::Value::array());
+        auto& arr = schedules_["entries"].items();
+        bool updated = false;
+        for (auto& ex : arr) {
+            if (ex.get_str("id", "") == id) {
+                std::string lrd = ex.get_str("last_run_date", "");
+                std::string lrt = ex.get_str("last_run_time", "");
+                mj::Value lrs = ex.find("last_run_slots") ? *ex.find("last_run_slots") : mj::Value();
+                ex = entry_in;
+                if (!lrd.empty() && ex.get_str("last_run_date", "").empty()) ex.set("last_run_date", lrd);
+                if (!lrt.empty() && ex.get_str("last_run_time", "").empty()) ex.set("last_run_time", lrt);
+                if (lrs.is_array() && !ex.has("last_run_slots")) ex.set("last_run_slots", lrs);
+                updated = true;
+                break;
+            }
+        }
+        if (!updated) arr.push_back(std::move(entry_in));
+        schedules_.set("version", 1);
+        save_schedules_locked();
+        return true;
+    }
+
+    bool remove_schedule(const std::string& id) {
+        if (id.empty()) return false;
+        std::lock_guard<std::mutex> lk(sched_mtx_);
+        if (!schedules_.has("entries") || !schedules_["entries"].is_array()) return false;
+        auto& arr = schedules_["entries"].items();
+        size_t before = arr.size();
+        arr.erase(std::remove_if(arr.begin(), arr.end(),
+                                 [&](const mj::Value& e) { return e.get_str("id", "") == id; }),
+                  arr.end());
+        if (arr.size() == before) return false;
+        save_schedules_locked();
+        return true;
+    }
+
+    bool toggle_schedule(const std::string& id, bool enabled) {
+        if (id.empty()) return false;
+        std::lock_guard<std::mutex> lk(sched_mtx_);
+        if (!schedules_.has("entries") || !schedules_["entries"].is_array()) return false;
+        for (auto& e : schedules_["entries"].items()) {
+            if (e.get_str("id", "") == id) {
+                e.set("enabled", enabled);
+                save_schedules_locked();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool run_schedule_now(const std::string& id) {
+        mj::Value entry;
+        {
+            std::lock_guard<std::mutex> lk(sched_mtx_);
+            auto* entries = schedules_.find("entries");
+            if (!entries || !entries->is_array()) return false;
+            for (const auto& e : entries->items()) {
+                if (e.get_str("id", "") == id) { entry = e; break; }
+            }
+        }
+        if (!entry.is_object()) return false;
+        std::string exec_id = entry.get_str("exec_id", "");
+        ExecutorEntry e;
+        if (exec_id.empty() || !get_executor(exec_id, e)) return false;
+        std::vector<std::string> tasks = load_exec_task_list(exec_id);
+        if (tasks.empty()) return false;
+        if (entry.get_bool("close_game_after", false)) {
+            std::string close_t = (e.kind == "maa") ? "CloseDown" : "CloseGamePC";
+            if (std::find(tasks.begin(), tasks.end(), close_t) == tasks.end()) tasks.push_back(close_t);
+        }
+        bool force = entry.get_bool("force_start", false);
+        bool busy = !running_task_of(exec_id).empty() || is_seq_running(exec_id);
+        if (busy && !force) return false;
+        if (!worker_of(exec_id)) spawn_worker(exec_id);
+        if (busy && force) {
+            request_stop_executor(exec_id);
+            std::thread([this, exec_id, tasks = std::move(tasks)]() mutable {
+                for (int i = 0; i < 40 && !stopping_; ++i) {
+                    if (running_task_of(exec_id).empty() && !is_seq_running(exec_id)) break;
+                    Sleep(150);
+                }
+                if (!stopping_) dispatch_sequence(exec_id, std::move(tasks));
+            }).detach();
+            return true;
+        }
+        return dispatch_sequence(exec_id, std::move(tasks));
     }
 
     // schedules.json 只读快照（CLI sched-list / GUI 展示用）
@@ -1187,28 +1402,16 @@ public:
         return schedules_;
     }
 
-    // 调度器一次扫描。返回触发的执行器数。
-    // async_exec=false 时（CLI sched-tick）同步跑完任务串；
-    // async_exec=true 时（驻留调度循环）按执行器异步派发，不阻塞下一分钟其他执行器的到点检测。
-    int scheduler_tick(bool async_exec = false) {
-        if (stopping_) return 0;
-        mj::Value sched;
-        {
-            std::lock_guard<std::mutex> lk(sched_mtx_);
-            sched = schedules_;
-        }
-        auto* entries = sched.find("entries");
-        if (!entries || !entries->is_array()) return 0;
-
-        // 本地时间（wDayOfWeek 0=周日，直接对应 weekdays 约定；0=周日..6=周六）
-        SYSTEMTIME st;
-        GetLocalTime(&st);
+    // 到点判定（纯函数，测试直测）：
+    // 精确分钟匹配（Core: currentTime == startTime）+ 当日/时段去重 + 星期过滤。
+    // 返回命中的时段字符串（"HH:MM"），未命中返回空。
+    static std::string schedule_due_slot(const mj::Value& entry, const SYSTEMTIME& st,
+                                         const std::string& today) {
+        if (!entry.get_bool("enabled", false)) return "";
         const int cur_m = (int)st.wHour * 60 + (int)st.wMinute;
-        std::string today = util::today_str();
         auto match_slot = [&](int h, int m, std::string& slot_out) -> bool {
             if (h < 0 || h > 23 || m < 0 || m > 59) return false;
-            const int sched_m = h * 60 + m;
-            if (cur_m < sched_m || cur_m - sched_m > 10) return false;
+            if (cur_m != h * 60 + m) return false;
             char buf[6];
             snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
             slot_out = buf;
@@ -1225,6 +1428,62 @@ public:
                 return false;
             }
         };
+        auto slot_already_ran = [&](const std::string& cand) -> bool {
+            if (auto* lrs = entry.find("last_run_slots"); lrs && lrs->is_array()) {
+                const std::string skey = today + "@" + cand;
+                for (auto& x : lrs->items()) if (x.as_string() == skey) return true;
+            }
+            return entry.get_str("last_run_date", "") == today
+                && entry.get_str("last_run_time", "") == cand;
+        };
+        // 星期检查（weekdays 缺失/空 = 每天）
+        if (auto* wd = entry.find("weekdays"); wd && wd->is_array() && !wd->items().empty()) {
+            bool day_ok = false;
+            for (auto& d : wd->items())
+                if (d.as_int(-1) == (int64_t)st.wDayOfWeek) { day_ok = true; break; }
+            if (!day_ok) return "";
+        }
+        std::string matched;
+        if (auto* ts = entry.find("times"); ts && ts->is_array() && !ts->items().empty()) {
+            for (auto& t : ts->items()) {
+                int h = -1, m = -1;
+                std::string cand;
+                if (!parse_hhmm(t.as_string(), h, m) || !match_slot(h, m, cand)) continue;
+                if (slot_already_ran(cand)) continue;
+                matched = cand;
+                break;
+            }
+        } else {
+            int h = (int)entry.get_int("hour", -1);
+            int m = (int)entry.get_int("min", -1);
+            std::string cand;
+            if (match_slot(h, m, cand) && !slot_already_ran(cand)) matched = cand;
+        }
+        return matched;
+    }
+
+    // 调度器一次扫描。返回触发的执行器数。
+    // async_exec=false 时（CLI sched-tick）同步跑完任务串；
+    // async_exec=true 时（驻留调度循环）按执行器异步派发。
+    // 语义对齐 MAA Core 定时器（TaskQueueViewModel.CheckTimers）：
+    //   分钟对齐 + 精确匹配（cur == slot，不做追赶窗口）；
+    //   非强制时忙则跳过该分钟（Core: !Idle && !ForceScheduledStart → return）；
+    //   force_start 对应 Core 的 ForceScheduledStart（停当前任务再跑）。
+    // 扩展：多时段 times[]、星期 weekdays[]（空=每天）、完后关游 close_game_after。
+    int scheduler_tick(bool async_exec = false, const SYSTEMTIME* now = nullptr) {
+        if (stopping_) return 0;
+        mj::Value sched;
+        {
+            std::lock_guard<std::mutex> lk(sched_mtx_);
+            sched = schedules_;
+        }
+        auto* entries = sched.find("entries");
+        if (!entries || !entries->is_array()) return 0;
+
+        // 本地时间（wDayOfWeek 0=周日..6=周六），截断到分钟（Core: new DateTime(..., Minute, 0)）
+        SYSTEMTIME st;
+        if (now) st = *now; else GetLocalTime(&st);
+        std::string today = util::today_str();
 
         // 任务序列：GUI 一键长草选择是唯一权威（state\task-lists.json）
         mj::Value lists = mj::Value::object();
@@ -1236,8 +1495,8 @@ public:
             }
         }
 
-        struct Fire { std::string exec_id; std::vector<std::string> tasks; };
-        struct Due { size_t idx; std::string key; std::string slot; };
+        struct Fire { std::string exec_id; std::vector<std::string> tasks; bool force_stop = false; };
+        struct Due { size_t idx; std::string id; std::string key; std::string slot; bool skipped = false; };
         std::vector<Fire> fires;
         std::vector<Due> due;
         std::set<std::string> queued_execs;
@@ -1247,57 +1506,49 @@ public:
             const size_t i = idx++;
             if (!entry.get_bool("enabled", false)) continue;
             const std::string exec_id = entry.get_str("exec_id", "");
-            if (exec_id.empty() || !running_task_of(exec_id).empty()
-                || is_seq_running(exec_id)) continue; // 忙：跳过且不标记
-            // 到点判定（含 10 分钟宽限窗口）
-            std::string matched_slot;
-            if (entry.get_str("kind", "") == "maaend") {
-                auto* wd = entry.find("weekdays");
-                if (!wd || !wd->is_array()) continue;
-                bool day_ok = false;
-                for (auto& d : wd->items())
-                    if (d.as_int(-1) == (int64_t)st.wDayOfWeek) { day_ok = true; break; }
-                if (!day_ok) continue;
-                auto* ts = entry.find("times");
-                const std::string lrd = entry.get_str("last_run_date", "");
-                const std::string lrt = entry.get_str("last_run_time", "");
-                if (ts && ts->is_array()) {
-                    for (auto& t : ts->items()) {
-                        int h = -1, m = -1;
-                        std::string cand;
-                        if (!parse_hhmm(t.as_string(), h, m) || !match_slot(h, m, cand)) continue;
-                        if (lrd == today && (lrt == cand || (lrt.empty() && cand == "07:30"))) continue;
-                        matched_slot = cand;
-                        break;
-                    }
-                }
-                if (matched_slot.empty()) continue;
-            } else {   // maa：hour/min 单点
-                int h = (int)entry.get_int("hour", -1);
-                int m = (int)entry.get_int("min", -1);
-                if (!match_slot(h, m, matched_slot)) continue;
-                if (entry.get_str("last_run_date", "") == today) continue;   // 当天已触发
+            if (exec_id.empty()) continue;
+
+            // 到点判定（纯函数 schedule_due_slot：精确分钟 + 去重 + 星期）
+            std::string matched_slot = schedule_due_slot(entry, st, today);
+            if (matched_slot.empty()) continue;
+
+            // 忙判定（Core: !Idle && !ForceScheduledStart → 该时段一次性作废，不追赶）。
+            // Core 的 Timer1_Elapsed 在每分钟第一次评估时就设置 _lastTimerElapsed（无条件消费
+            // 该分钟），忙时 HandleTimerLogic 直接 return → 该时段永久跳过。对齐此语义：
+            // 标记 last_run_*（记 skipped_busy）但不派发，同分钟后续 tick 不会重试。
+            bool force_start = entry.get_bool("force_start", false);
+            bool busy = !running_task_of(exec_id).empty() || is_seq_running(exec_id);
+            if (busy && !force_start) {
+                if (!queued_execs.insert(exec_id).second) continue; // 同执行器同轮只标记一次
+                due.push_back({ i, entry.get_str("id", ""),
+                                exec_id + "\x1f" + entry.get_str("source", ""),
+                                matched_slot, /*skipped=*/true });
+                util::trace("[sched] " + exec_id + " slot " + matched_slot
+                            + " skipped (busy, force_start off)");
+                continue;
             }
-            auto* lst = lists.find(exec_id);
-            if (!lst || !lst->is_array() || lst->items().empty()) continue;
-            std::vector<std::string> tasks;
-            for (auto& t : lst->items()) {
-                std::string name = t.as_string();
-                if (!name.empty()) tasks.push_back(name);
-            }
+
+            std::vector<std::string> tasks = load_exec_task_list(exec_id, &lists);
             if (tasks.empty()) continue;
-            if (!queued_execs.insert(exec_id).second) continue; // 同执行器同分钟不重复入队
-            // 执行器存在且启用；worker 懒生成（executors.json 加载后 worker 为空）
             ExecutorEntry e;
             if (!get_executor(exec_id, e) || !e.enabled) continue;
+            if (entry.get_bool("close_game_after", false)) {
+                std::string close_t = (e.kind == "maa") ? "CloseDown" : "CloseGamePC";
+                if (std::find(tasks.begin(), tasks.end(), close_t) == tasks.end()) {
+                    tasks.push_back(close_t);
+                }
+            }
+            if (!queued_execs.insert(exec_id).second) continue; // 同执行器同轮不重复入队
             if (stopping_) return 0;
             if (!worker_of(exec_id)) spawn_worker(exec_id);
-            due.push_back({ i, exec_id + "\x1f" + entry.get_str("source", ""), matched_slot });
-            fires.push_back({ exec_id, std::move(tasks) });
+            due.push_back({ i, entry.get_str("id", ""),
+                            exec_id + "\x1f" + entry.get_str("source", ""),
+                            matched_slot, /*skipped=*/false });
+            fires.push_back({ exec_id, std::move(tasks), busy && force_start });
         }
         if (fires.empty() || stopping_) return 0;
 
-        // 先标记当日已触发再 fire：长任务期间 10 秒 tick 不会重复入队
+        // 先标记当日+时段已触发再 fire：长任务期间 10 秒 tick 不会重复入队
         {
             std::lock_guard<std::mutex> lk(sched_mtx_);
             mj::Value& live = schedules_["entries"];
@@ -1306,19 +1557,54 @@ public:
                 for (auto& d : due) {
                     if (d.idx >= arr.size()) continue;
                     mj::Value& e2 = arr[d.idx];
-                    // 内容一致性检查：导入并发替换后索引可能错位
-                    if (e2.get_str("exec_id", "") + "\x1f" + e2.get_str("source", "") == d.key) {
+                    bool match = (!d.id.empty() && e2.get_str("id", "") == d.id)
+                              || (e2.get_str("exec_id", "") + "\x1f" + e2.get_str("source", "") == d.key);
+                    if (match) {
                         e2.set("last_run_date", today);
                         e2.set("last_run_time", d.slot);
+                        // 只保留今天的 slot 记录（每天重置，天然有界）
+                        mj::Value keep = mj::Value::array();
+                        if (auto* old = e2.find("last_run_slots"); old && old->is_array()) {
+                            for (auto& s : old->items()) {
+                                const std::string& sv = s.as_string();
+                                if (sv.rfind(today + "@", 0) == 0) keep.push(s);
+                            }
+                        }
+                        std::string sk = today + "@" + d.slot;
+                        if (std::none_of(keep.items().begin(), keep.items().end(),
+                                         [&](const mj::Value& v) { return v.as_string() == sk; })) {
+                            keep.push(mj::Value(sk));
+                        }
+                        e2.set("last_run_slots", std::move(keep));
+                        // skipped_busy：到点但忙（非强制）被作废；fired：已派发
+                        e2.set("last_run_status", d.skipped ? "skipped_busy" : "fired");
                     }
                 }
             }
         }
-        schedule_save_schedules();
+        save_schedules();
 
         int fired = 0;
         for (auto& f : fires) {
             if (stopping_) break;
+            if (f.force_stop) {
+                request_stop_executor(f.exec_id);
+                if (async_exec) {
+                    std::thread([this, exec_id = f.exec_id, tasks = std::move(f.tasks)]() mutable {
+                        for (int k = 0; k < 40 && !stopping_; ++k) {
+                            if (running_task_of(exec_id).empty() && !is_seq_running(exec_id)) break;
+                            Sleep(150);
+                        }
+                        if (!stopping_) dispatch_sequence(exec_id, std::move(tasks));
+                    }).detach();
+                    ++fired;
+                    continue;
+                }
+                for (int k = 0; k < 40 && !stopping_; ++k) {
+                    if (running_task_of(f.exec_id).empty() && !is_seq_running(f.exec_id)) break;
+                    Sleep(150);
+                }
+            }
             if (async_exec) {
                 if (dispatch_sequence(f.exec_id, std::move(f.tasks))) ++fired;
             } else {
@@ -1809,15 +2095,85 @@ private:
     }
 
     // ================================================================ 调度
-    // schedules.json 规范见 config_import.hpp 头部注释：
-    // {"version":1,"entries":[{exec_id,kind,label,enabled,weekdays,times,hour,min,config,source,last_run_date}]}
+    // 统一 MaaHub 调度模型：{id,exec_id,kind,label,enabled,weekdays,times,hour,min,
+    //                        force_start,close_game_after,config,source,last_run_date,last_run_time,last_run_slots}
+    static bool normalize_schedule_entry(mj::Value& e, const std::vector<ExecutorEntry>& execs) {
+        if (!e.is_object()) return false;
+        bool changed = false;
+        if (e.get_str("id", "").empty()) {
+            e.set("id", "sched-" + util::random_hex(6));
+            changed = true;
+        }
+        std::string eid = e.get_str("exec_id", "");
+        for (const auto& ex : execs) {
+            if (ex.id != eid) continue;
+            if (e.get_str("kind", "").empty()) { e.set("kind", ex.kind); changed = true; }
+            std::string fixed_lbl = util::fix_mojibake(e.get_str("label", ""));
+            if (fixed_lbl.empty() || fixed_lbl != e.get_str("label", "")) {
+                e.set("label", fixed_lbl.empty() ? ex.label : fixed_lbl);
+                changed = true;
+            }
+            break;
+        }
+        if (!e.has("times") || !e["times"].is_array() || e["times"].items().empty()) {
+            mj::Value arr = mj::Value::array();
+            int h = (int)e.get_int("hour", -1);
+            int m = (int)e.get_int("min", -1);
+            if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+                arr.push(std::string(buf));
+            } else {
+                arr.push(std::string("04:00"));
+                e.set("hour", 4);
+                e.set("min", 0);
+            }
+            e.set("times", std::move(arr));
+            changed = true;
+        } else {
+            // 同步首时段到 hour/min，兼容旧逻辑展示
+            const std::string& t0 = e["times"].items()[0].as_string();
+            size_t col = t0.find(':');
+            if (col != std::string::npos && col > 0 && col + 1 < t0.size()) {
+                int h = -1, m = -1;
+                try {
+                    h = std::stoi(t0.substr(0, col));
+                    m = std::stoi(t0.substr(col + 1));
+                } catch (...) {}
+                if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+                    if (e.get_int("hour", -1) != h) { e.set("hour", (int64_t)h); changed = true; }
+                    if (e.get_int("min", -1) != m) { e.set("min", (int64_t)m); changed = true; }
+                }
+            }
+        }
+        if (!e.has("weekdays") || !e["weekdays"].is_array() || e["weekdays"].items().empty()) {
+            mj::Value wd = mj::Value::array();
+            for (int d = 0; d < 7; ++d) wd.push((int64_t)d);
+            e.set("weekdays", std::move(wd));
+            changed = true;
+        }
+        if (!e.has("force_start")) { e.set("force_start", false); changed = true; }
+        if (!e.has("close_game_after")) { e.set("close_game_after", false); changed = true; }
+        return changed;
+    }
+
     void load_schedules() {
         std::string content;
         if (!util::read_file(util::exe_dir() + "\\state\\schedules.json", content)) return;
         mj::Value v;
         if (!mj::try_parse(content, v)) return;
-        std::lock_guard<std::mutex> lk(sched_mtx_);
-        schedules_ = std::move(v);
+        auto exec_list = executors();
+        bool dirty = false;
+        if (v.is_object() && v.has("entries") && v["entries"].is_array()) {
+            for (auto& e : v["entries"].items()) {
+                if (normalize_schedule_entry(e, exec_list)) dirty = true;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(sched_mtx_);
+            schedules_ = std::move(v);
+            if (dirty) save_schedules_locked();
+        }
     }
 
     // 调用方已持有 sched_mtx_ 时用这个（save_schedules 内部还要加锁，
@@ -1831,17 +2187,6 @@ private:
     void save_schedules() {
         std::lock_guard<std::mutex> lk(sched_mtx_);
         save_schedules_locked();
-    }
-
-    // 调度器线程保存节流（1s），避免每次 tick 都写盘
-    void schedule_save_schedules() {
-        uint64_t now = GetTickCount64();
-        {
-            std::lock_guard<std::mutex> lk(sched_save_mtx_);
-            if (now - last_sched_save_ < 1000) return;
-            last_sched_save_ = now;
-        }
-        save_schedules();
     }
 
     void scheduler_loop() {
@@ -2048,8 +2393,7 @@ private:
     std::atomic<bool> sched_done_{ false };
     mj::Value schedules_ = mj::Value::object();   // schedules.json 镜像
     mutable std::mutex sched_mtx_;
-    uint64_t last_sched_save_ = 0;
-    std::mutex sched_save_mtx_;
+
     mutable std::mutex dev_mtx_map_lk_;
     std::map<std::string, std::shared_ptr<std::mutex>> dev_mtx_map_;
 };

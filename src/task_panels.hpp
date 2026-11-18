@@ -1,6 +1,7 @@
 // MAA 官方任务设置面板（1:1 复刻 MaaWpfGui/Views/UserControl/TaskQueue/*.xaml）
 // 每个面板对应官方的一个 TaskUserControl，标签取自官方 zh-cn 本地化。
 #pragma once
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@ struct PanelCtx {
     const std::string& exec_id;
     const std::string& task;
     bool advanced = false;   // 官方「常规设置 / 高级设置」两页：同一面板只画其中一页
+    std::function<std::string(const wchar_t*, const wchar_t*)> pick_file = nullptr;
     // r24：dirty 感知写入。控件没被操作时不再回写 params，避免用帧初值覆盖
     // 外部（backend 导入线程）刚写入 Hub 的参数；未改动帧由调用方对比
     // before/params 决定零持久化写回。
@@ -137,6 +139,27 @@ inline void pc_text(PanelCtx& c, const std::string& key, const std::wstring& lab
     std::string before = v;
     c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, v,
                    hint.empty() ? nullptr : hint.c_str());
+    c.set_str(key, v, v != before);
+    c.y += 36;
+}
+
+inline void pc_file(PanelCtx& c, const std::string& key, const std::wstring& label,
+                    const std::wstring& hint = L"",
+                    const wchar_t* filter = L"JSON\0*.json\0All Files\0*.*\0") {
+    std::string v = c.get_str(key);
+    std::string before = v;
+    const int LBL = 78;
+    const int BTN = 46;
+    c.g.text_clipped({ c.x, c.y, c.x + LBL - 4, c.y + 24 }, label, c.g.theme.dim, c.g.font_small);
+    RECT r{ c.x + LBL, c.y, c.right - BTN - 4, c.y + 24 };
+    c.g.text_input((c.exec_id + ":" + c.task + ":" + key).c_str(), r, v,
+                   hint.empty() ? nullptr : hint.c_str());
+    RECT br{ c.right - BTN, c.y, c.right, c.y + 24 };
+    if (c.g.button((c.exec_id + ":" + c.task + ":" + key + ":pick").c_str(),
+                   br, L"\u6d4f\u89c8", 0, (bool)c.pick_file)) {
+        std::string picked = c.pick_file(label.c_str(), filter);
+        if (!picked.empty()) v = picked;
+    }
     c.set_str(key, v, v != before);
     c.y += 36;
 }
@@ -469,17 +492,30 @@ inline bool panel_fight(PanelCtx& c) {
 
 // ---- Infrast：基建换班 ----
 inline bool panel_infrast(PanelCtx& c) {
-    // 官方 InfrastTaskUserControl：8 个控件
+    // 官方 InfrastTaskUserControl
     c.g.group_title(c.x, c.y, L"\u57fa\u5efa\u6a21\u5f0f");
     c.y += 16;
     pc_radio(c, "mode", { L"\u9ed8\u8ba4\u57fa\u5efa", L"\u81ea\u5b9a\u4e49\u57fa\u5efa",
                           L"\u8f6e\u6362\u57fa\u5efa" }, 0);
-    // 官方 ComboBox「内置配置」：自定义基建时选择的排班方案
-    pc_combo(c, "builtin_plan", L"\u5185\u7f6e\u914d\u7f6e",
-             { L"\u9ed8\u8ba4\u65b9\u6848",
-               L"153 \u4e00\u5929 3 \u6362",
-               L"243 \u4e00\u5929 3 \u6362",
-               L"333 \u4e00\u5929 3 \u6362" }, 0);
+    if (c.get_int("mode", 0) == 1) {
+        pc_combo(c, "builtin_plan", L"\u5185\u7f6e\u914d\u7f6e",
+                 { L"\u4e0d\u4f7f\u7528",
+                   L"153 \u4e00\u5929 3 \u6362",
+                   L"153 \u4e00\u5929 4 \u6362",
+                   L"243 \u4e00\u5929 3 \u6362",
+                   L"243 \u4e00\u5929 4 \u6362",
+                   L"252 \u4e00\u5929 3 \u6362",
+                   L"333 \u6413\u7389 3 \u6362" }, 0);
+        pc_file(c, "custom_infrast_file", L"\u6392\u73ed\u6587\u4ef6",
+                L"\u7559\u7a7a\u4f7f\u7528\u5185\u7f6e\u914d\u7f6e");
+        pc_number(c, "plan_index", L"\u6392\u73ed\u65b9\u6848\u7d22\u5f15", 0, 1, 0, 15);
+    } else {
+        pc_combo(c, "builtin_plan", L"\u5185\u7f6e\u914d\u7f6e",
+                 { L"\u9ed8\u8ba4\u65b9\u6848",
+                   L"153 \u4e00\u5929 3 \u6362",
+                   L"243 \u4e00\u5929 3 \u6362",
+                   L"333 \u4e00\u5929 3 \u6362" }, 0);
+    }
     c.y += 4;
 
     c.g.group_title(c.x, c.y, L"\u65e0\u4eba\u673a");
@@ -576,6 +612,16 @@ inline bool panel_infrast(PanelCtx& c) {
     pc_check(c, "use_worldly_plight", L"\u4f7f\u7528\u4eba\u95f4\u70df\u706b\u8de8\u8bbe\u65bd\u7ec4\u5408");
     pc_check(c, "use_abyssal_hunter", L"\u4f7f\u7528\u6df1\u6d77\u730e\u4eba\u8de8\u8bbe\u65bd\u7ec4\u5408");
     pc_check(c, "use_weekly_plan", L"\u542f\u7528\u5468\u8ba1\u5212");
+    c.y += 4;
+    c.g.group_title(c.x, c.y, L"\u4e13\u7cbe\u4e0e\u8865\u8d27");
+    c.y += 16;
+    pc_check(c, "continue_training", L"\u7ee7\u7eed\u5f53\u524d\u4e13\u7cbe\u8bad\u7ec3");
+    pc_check(c, "replenish", L"\u6e90\u77f3\u788e\u7247\u81ea\u52a8\u8865\u8d27");
+    pc_check(c, "fiammetta_recovery_enabled", L"\u4f7f\u7528\u83f2\u4e9a\u6885\u5854\u6062\u590d\u5fc3\u60c5");
+    if (c.get_bool("fiammetta_recovery_enabled")) {
+        pc_text(c, "fiammetta_targets", L"\u83f2\u4e9a\u6885\u5854\u5e72\u5458",
+                L"\u591a\u4e2a\u7528\u5206\u53f7\u5206\u9694");
+    }
     return true;
 }
 
@@ -677,21 +723,28 @@ inline bool panel_roguelike(PanelCtx& c) {
     c.g.group_title(c.x, c.y, L"\u57fa\u7840");
     c.y += 16;
     {
-        static const char* kTh[] = { "Phantom", "Mizuki", "Sami", "Sarkaz" };
+        static const char* kTh[] = {
+            "Phantom", "Mizuki", "Sami", "Sarkaz", "JieGarden", "BlackFlow"
+        };
         int th_cur = 2; // Sami 默认
         auto it = c.params.find("theme");
         if (it != c.params.end()) {
             if (it->second.is_number()) th_cur = (int)it->second.as_int(2);
             else if (it->second.is_string()) {
-                for (int i = 0; i < 4; ++i) if (it->second.as_string() == kTh[i]) { th_cur = i; break; }
+                for (int i = 0; i < 6; ++i) if (it->second.as_string() == kTh[i]) { th_cur = i; break; }
             }
         }
-        int th_hit = c.g.option_strip((c.exec_id + ":Roguelike:theme").c_str(),
-                                      { c.x, c.y, c.right, c.y + 24 },
-                                      { L"\u5080\u5f71", L"\u6c34\u6708", L"\u8428\u7c73", L"\u8428\u5361\u5179" },
-                                      th_cur);
-        if (th_hit >= 0 && th_hit != th_cur) c.set_int("theme", th_hit);
-        c.y += 36;
+        if (th_cur < 0 || th_cur >= 6) th_cur = 2;
+        int th_hit = th_cur;
+        pc_combo_idx(c, "theme", L"\u4e3b\u9898",
+                     { L"\u5080\u5f71\u4e0e\u7329\u7ea2\u5b64\u94bb",
+                       L"\u6c34\u6708\u4e0e\u6df1\u84dd\u4e4b\u6811",
+                       L"\u63a2\u7d22\u8005\u7684\u94f6\u51c7\u6b62\u5883",
+                       L"\u8428\u5361\u5179\u7684\u65e0\u7ec8\u5947\u8bed",
+                       L"\u754c\u56ed",
+                       L"\u9ed1\u6f6e (BlackFlow)" },
+                     th_cur, th_hit);
+        if (th_hit != th_cur) c.set_int("theme", th_hit);
     }
     pc_radio(c, "difficulty", { L"\u7b80\u5355", L"\u666e\u901a", L"\u56f0\u96be" }, 0);
     pc_radio(c, "mode", { L"\u7ecf\u5178", L"\u6295\u8d44", L"\u5237\u5f00\u5c40",
@@ -887,34 +940,102 @@ inline bool panel_operbox(PanelCtx& c) {
     c.y += 16;
     pc_check(c, "update_all", L"\u5168\u91cf\u8bc6\u522b");
     pc_check(c, "update_elite", L"\u7cbe\u82f1\u5316");
+    pc_check(c, "update_level", L"\u5e72\u5458\u7b49\u7ea7");
     pc_check(c, "update_skill", L"\u6280\u80fd\u7b49\u7ea7");
     pc_check(c, "update_module", L"\u6a21\u7ec4");
+    pc_check(c, "update_potential", L"\u6f5c\u80fd");
+    c.y += 4;
+    c.g.group_title(c.x, c.y, L"\u517b\u6210\u76ee\u6807\uff08\u5bfc\u51fa\u4e0e\u5206\u6790\uff09");
+    c.y += 16;
+    pc_text(c, "target_oper", L"\u76ee\u6807\u5e72\u5458", L"\u591a\u4e2a\u7528\u5206\u53f7\u5206\u9694");
+    pc_number(c, "target_elite", L"\u76ee\u6807\u7cbe\u82f1\u5316", 2, 1, 0, 2);
+    pc_number(c, "target_level", L"\u76ee\u6807\u7b49\u7ea7", 60, 5, 1, 90);
+    pc_number(c, "target_skill", L"\u76ee\u6807\u6280\u80fd\u7b49\u7ea7", 7, 1, 1, 10);
     return true;
 }
 
 // ---- Reclamation：生息演算 ----
 inline bool panel_reclamation(PanelCtx& c) {
-    c.g.group_title(c.x, c.y, L"\u6f14\u7b97");
+    c.g.group_title(c.x, c.y, L"\u751f\u606f\u6f14\u7b97");
     c.y += 16;
-    pc_text(c, "theme", L"\u4e3b\u9898", L"\u5982 Tales");
-    pc_number(c, "mode", L"\u6a21\u5f0f", 0, 1, 0, 9);
+    {
+        int cur = 0;
+        auto it = c.params.find("theme");
+        if (it != c.params.end()) {
+            if (it->second.is_number()) cur = (int)it->second.as_int(0);
+            else if (it->second.is_string() && it->second.as_string() == "Fire") cur = 1;
+        }
+        int hit = c.g.option_strip((c.exec_id + ":Reclamation:theme").c_str(),
+                                   { c.x, c.y, c.right, c.y + 24 },
+                                   { L"\u6c99\u6d32\u9057\u95fb (Tales)", L"\u6c99\u4e2d\u4e4b\u706b (Fire)" },
+                                   cur);
+        if (hit >= 0 && hit != cur) c.set_int("theme", hit);
+        c.y += 36;
+    }
+    pc_radio(c, "mode", { L"\u5237\u7e41\u8363(\u65e0\u5b58\u6863)", L"\u5237\u7e41\u8363(\u8bfb\u6863)" }, 0);
+    c.y += 4;
+    c.g.group_title(c.x, c.y, L"\u5236\u4f5c\u4e0e\u5546\u5e97");
+    c.y += 16;
+    pc_text(c, "tools_to_craft", L"\u5236\u4f5c\u5de5\u5177", L"\u5206\u53f7\u5206\u9694\uff0c\u7559\u7a7a\u4e0d\u5236\u4f5c");
+    pc_number(c, "num_craft_batches", L"\u5236\u4f5c\u8f6e\u6570", 16, 1, 1, 999);
+    pc_radio(c, "increment_mode", { L"\u6309\u70b9\u51fb\u6b21\u6570", L"\u6309\u5929\u6570\u589e\u91cf" }, 0);
+    pc_check(c, "clear_store", L"\u81ea\u52a8\u6e05\u7406\u5546\u5e97");
     return true;
 }
 
 // ---- Copilot：自动抄作业 ----
 inline bool panel_copilot(PanelCtx& c) {
-    c.g.group_title(c.x, c.y, L"\u4f5c\u4e1a");
+    c.g.group_title(c.x, c.y, L"\u4f5c\u4e1a\u7c7b\u578b\u4e0e\u6587\u4ef6");
     c.y += 16;
-    pc_text(c, "copilot_file", L"\u4f5c\u4e1a\u6587\u4ef6", L"JSON \u6587\u4ef6\u8def\u5f84");
-    pc_check(c, "loop", L"\u5faa\u73af\u6267\u884c");
+    pc_combo(c, "copilot_type", L"\u4f5c\u4e1a\u7c7b\u578b",
+             { L"\u666e\u901a\u5173\u5361", L"\u4fdd\u5168\u6d3e\u9a7b", L"\u6096\u8bba\u6a21\u62df" }, 0);
+    pc_file(c, "copilot_file", L"\u4f5c\u4e1a\u6587\u4ef6", L"JSON \u6587\u4ef6\u8def\u5f84");
+    pc_text(c, "stage_name", L"\u5173\u5361\u540d", L"\u7559\u7a7a\u6309\u4f5c\u4e1a\u5185\u5b9a\u4e49");
+    pc_number(c, "loop_times", L"\u5faa\u73af\u6b21\u6570", 1, 1, 1, 999);
+    c.y += 4;
+    c.g.group_title(c.x, c.y, L"\u4f5c\u4e1a\u9009\u9879");
+    c.y += 16;
+    pc_check(c, "formation", L"\u81ea\u52a8\u7f16\u961f");
+    pc_check(c, "add_trust", L"\u8865\u5145\u4f4e\u4fe1\u8d56\u5e72\u5458");
+    pc_check(c, "ignore_requirements", L"\u5ffd\u7565\u5e72\u5458\u7ec3\u5ea6\u8981\u6c42");
+    pc_check(c, "use_sanity_potion", L"\u81ea\u52a8\u4f7f\u7528\u7406\u667a\u836f");
+    pc_combo(c, "support_unit_usage", L"\u52a9\u6218\u7b56\u7565",
+             { L"\u4e0d\u4f7f\u7528\u52a9\u6218", L"\u6309\u9700\u4f7f\u7528\u52a9\u6218", L"\u968f\u673a\u9009\u62e9\u52a9\u6218" }, 0);
+    if (c.get_int("support_unit_usage", 0) > 0) {
+        pc_text(c, "support_unit_name", L"\u6307\u5b9a\u52a9\u6218", L"\u5e72\u5458\u540d\uff08\u53ef\u9009\uff09");
+    }
     return true;
 }
 
 // ---- Custom：自定任务 ----
 inline bool panel_custom(PanelCtx& c) {
-    c.g.group_title(c.x, c.y, L"\u4efb\u52a1\u540d\u5217\u8868");
+    c.g.group_title(c.x, c.y, L"\u5feb\u901f\u9884\u8bbe");
     c.y += 16;
-    pc_text(c, "task_names", L"\u4efb\u52a1\u540d", L"\u591a\u4e2a\u7528\u9017\u53f7\u5206\u9694");
+    {
+        struct Preset { const char* id; const wchar_t* lbl; const char* val; };
+        const Preset ps[] = {
+            { "p1", L"\u6d3b\u52a8\u5546\u5e97", "SS@Store@Begin" },
+            { "p2", L"\u6750\u6599\u5408\u6210", "MiniGame@MaterialSynthesis@Begin" },
+            { "p3", L"\u81ea\u52a8\u5347\u6f5c", "MiniGame@AutoRaisePotential@Begin" },
+            { "p4", L"\u5207\u6362\u4e3b\u9898", "SwitchTheme" },
+        };
+        int hw = (c.right - c.x - 6) / 2;
+        for (int i = 0; i < 4; ++i) {
+            int col = i % 2, row = i / 2;
+            RECT br{ c.x + col * (hw + 6), c.y + row * 28,
+                     c.x + col * (hw + 6) + hw, c.y + row * 28 + 24 };
+            if (c.g.button((c.exec_id + ":Custom:" + ps[i].id).c_str(), br, ps[i].lbl, 0)) {
+                c.set_str("task_names", ps[i].val);
+            }
+        }
+        c.y += 60;
+    }
+    c.g.group_title(c.x, c.y, L"\u4efb\u52a1\u540d\u5217\u8868\u4e0e\u53c2\u6570");
+    c.y += 16;
+    pc_text(c, "task_names", L"\u4efb\u52a1\u540d", L"\u591a\u4e2a\u7528\u9017\u53f7\u6216\u5206\u53f7\u5206\u9694");
+    pc_text(c, "event_shop_blacklist", L"\u5546\u5e97\u9ed1\u540d\u5355",
+            L"SS@Store \u8df3\u8fc7\u7269\u54c1\uff0c\u5206\u53f7\u5206\u9694");
+    pc_check(c, "use_normal_token", L"\u81ea\u52a8\u5347\u6f5c\u5141\u8bb8\u4f7f\u7528\u901a\u7528\u4fe1\u7269");
     return true;
 }
 

@@ -663,6 +663,7 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
         if (page_ == "executor" && !selected_exec_.empty()) page_executor(content);
         else if (page_ == "copilot") page_copilot(content);
         else if (page_ == "toolbox") page_toolbox(content);
+        else if (page_ == "schedules") page_schedules(content);
         else if (page_ == "accounts") page_accounts(content);
         else if (page_ == "cores") page_cores(content);
         else if (page_ == "planner") page_planner(content);
@@ -678,6 +679,7 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
     draw_new_exec_overlay();   // 左栏「+ 新建」的弹窗，盖在所有页面之上
     draw_edit_exec_overlay();
     draw_exec_ctx_menu();
+    draw_edit_schedule_overlay();
     draw_power_countdown_overlay();
     save_nav_state();
 
@@ -755,7 +757,7 @@ void MaaHubWindow::draw_gif_widget(RECT client) {
 // 窗口标题对齐官方 UpdateWindowTitle（模拟器 + IP:端口），由原生标题栏显示。
 void MaaHubWindow::sync_window_title() {
     std::wstring title = L"MaaHub";
-    if (page_ == "executor") {
+    if (page_ == "executor" || page_ == "copilot" || page_ == "toolbox") {
         mj::Value cur;
         if (find_executor(selected_exec_, cur)) {
             std::string lbl = cur.get_str("label", "");
@@ -772,23 +774,25 @@ void MaaHubWindow::draw_top_tabs(RECT r) {
     gui_.fill(r, gui_.theme.card_bg);
     gui_.fill({ r.left, r.bottom - 1, r.right, r.bottom }, gui_.theme.border);
 
+    std::string cur_kind = kind_of(selected_exec_);
+    const bool is_end = (cur_kind == "maaend");
+    if (is_end && (page_ == "copilot" || page_ == "toolbox")) {
+        page_ = "executor";
+    }
+
     struct Tab { const char* page; const wchar_t* label; };
-    const Tab tabs[] = {
-        // 官方 4 个 Tab（RootViewModel.InitViewModels）：
-        //   TaskQueueViewModel=一键长草 / CopilotViewModel=自动战斗 /
-        //   ToolboxViewModel=小工具 / SettingsViewModel=设置
-        // MaaHub 的账号/核心/智能规划/事件日志是全局管理页，不占实例页 Tab
-        { "executor",  L"\u4e00\u952e\u957f\u8349" },
-        // 以下两页尚未做完，暂时隐藏入口（页面实现与路由保留，做完再放开）：
-        //   copilot = 自动战斗：作业列表为空，未接入 Copilot 适配器
-        //   toolbox = 小工具：5 个工具里 3 个（牛杂系列）未实现
-        // { "copilot",   L"\u81ea\u52a8\u6218\u6597" },
-        // { "toolbox",   L"\u5c0f\u5de5\u5177" },
-    };
+    std::vector<Tab> tabs;
+    tabs.push_back({ "executor",  L"\u4e00\u952e\u957f\u8349" });
+    if (!is_end) {
+        tabs.push_back({ "copilot",   L"\u81ea\u52a8\u6218\u6597" });
+        tabs.push_back({ "toolbox",   L"\u5c0f\u5de5\u5177" });
+    }
+    tabs.push_back({ "schedules", L"\u5b9a\u65f6\u8ba1\u5212" });
+
     int y = r.top + 6;
     const int h = r.bottom - r.top - 12;
     // 官方 TabControlInLine 的 headerPanel 是 UniformGrid Rows=1：等分整行，标签居中
-    const int ntab = (int)(sizeof(tabs) / sizeof(tabs[0]));
+    const int ntab = (int)tabs.size();
     const int PIN_W = 56;   // 右侧只留给「置顶」
     int slot = ((r.right - PIN_W) - r.left) / (ntab > 0 ? ntab : 1);
     int x = r.left;
@@ -869,11 +873,12 @@ void MaaHubWindow::draw_left_rail(RECT r) {
 
     struct G { const char* page; const wchar_t* label; };
     const G gs[] = {
-        { "accounts", L"账号管理" },
-        { "cores",    L"核心管理" },
-        { "planner",  L"智能规划" },
-        { "events",   L"事件日志" },
-        { "settings", L"设置"     },
+        { "schedules", L"定时计划" },
+        { "accounts",  L"账号管理" },
+        { "cores",     L"核心管理" },
+        { "planner",   L"智能规划" },
+        { "events",    L"事件日志" },
+        { "settings",  L"设置"     },
     };
     for (auto& g : gs) {
         RECT gr{ x0, y, x1, y + EXEC_ROW_H };
@@ -897,7 +902,8 @@ void MaaHubWindow::draw_executor_list(RECT r) {
         int top = r.top + (int)k * RH;
         if (top + RH - 3 > r.bottom) break;  // 放不下即止（单列实例数远小于可视高度）
         RECT ir{ r.left, top, r.right, top + RH - 3 };
-        bool sel = (page_ == "executor") && (selected_exec_ == e.id);
+        bool sel = (page_ == "executor" || page_ == "copilot" || page_ == "toolbox")
+                && (selected_exec_ == e.id);
         bool hov = gui_.hovered(ir);
         // 侧栏里靠底色区分选中，未选中不描边，否则一列方框很碎
         gui_.round_rect(ir, sel ? gui_.theme.primary_light : (hov ? gui_.theme.hover : CLR_INVALID),
@@ -917,7 +923,9 @@ void MaaHubWindow::draw_executor_list(RECT r) {
                           sel ? gui_.theme.primary_dark : gui_.theme.text, gui_.font_small);
         if (hov && gui_.input().pressed) {
             selected_exec_ = e.id;
-            page_ = "executor";
+            if (e.kind == "maaend" || (page_ != "copilot" && page_ != "toolbox")) {
+                page_ = "executor";
+            }
         }
         if (hov && gui_.input().rpressed) {
             exec_ctx_open_ = true;
@@ -2504,7 +2512,10 @@ void MaaHubWindow::page_executor(RECT content) {
                           content_h, psy);
         // 滚动偏移必须真的减进内容起点，否则滚轮只动滚动条、内容不动
         PanelCtx pctx{ gui_, rx, panel_start_y, right_col.right,
-                       ui.params, id, sel_task, advanced_view_ };
+                       ui.params, id, sel_task, advanced_view_,
+                       [this](const wchar_t* title, const wchar_t* filter) {
+                           return browse_file_dialog(title, filter);
+                       } };
         draw_task_panel(pctx, &specs);
         measured = pctx.y - panel_start_y + 16;
         if (measured < panel_h) measured = panel_h;
@@ -2786,161 +2797,1125 @@ void MaaHubWindow::page_accounts(RECT content) {
 }
 
 // ================================================================ 核心管理
+void MaaHubWindow::inspect_copilot_file(const std::string& path) {
+    copilot_preview_path_ = path;
+    copilot_preview_ = {};
+    copilot_preview_.path = path;
+    if (path.empty() || !util::file_exists(path)) return;
+    std::string raw;
+    if (!util::read_file(path, raw)) return;
+    mj::Value j;
+    if (!mj::try_parse(raw, j) || !j.is_object()) return;
+    copilot_preview_.stage = j.get_str("stage_name", "");
+    if (auto* doc = j.find("doc"); doc && doc->is_object()) {
+        copilot_preview_.title = doc->get_str("title", "");
+        copilot_preview_.details = doc->get_str("details", "");
+    }
+    if (copilot_preview_.title.empty()) {
+        size_t pos = path.find_last_of("\\/");
+        copilot_preview_.title = (pos == std::string::npos) ? path : path.substr(pos + 1);
+    }
+    if (auto* ops = j.find("opers"); ops && ops->is_array() && !ops->items().empty()) {
+        std::string names;
+        int n = (int)ops->items().size();
+        for (int i = 0; i < n && i < 6; ++i) {
+            std::string nm = ops->items()[i].get_str("name", "");
+            if (nm.empty()) continue;
+            if (!names.empty()) names += ", ";
+            names += nm;
+        }
+        if (n > 6) names += " ...";
+        copilot_preview_.opers_summary = std::to_string(n) + " \u540d\u5e72\u5458"
+            + (names.empty() ? "" : (": " + names));
+    }
+    if (copilot_stage_.empty() && !copilot_preview_.stage.empty()) {
+        copilot_stage_ = copilot_preview_.stage;
+    }
+}
+
+void MaaHubWindow::refresh_copilot_list(const std::string& maa_install_dir, bool force) {
+    if (!force && copilot_scanned_ && copilot_scan_dir_ == maa_install_dir) return;
+    copilot_scan_dir_ = maa_install_dir;
+    copilot_scanned_ = true;
+    copilot_files_.clear();
+
+    auto scan_dir = [&](const std::string& root, const std::string& default_cat) {
+        if (root.empty() || !util::dir_exists(root)) return;
+        std::vector<std::string> queue{ root };
+        while (!queue.empty() && copilot_files_.size() < 240) {
+            std::string d = queue.back();
+            queue.pop_back();
+            WIN32_FIND_DATAW fd;
+            HANDLE h = FindFirstFileW(util::utf8_to_wide(d + "\\*").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) continue;
+            do {
+                std::wstring wn = fd.cFileName;
+                if (wn == L"." || wn == L"..") continue;
+                std::string full = d + "\\" + util::wide_to_utf8(wn);
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    queue.push_back(full);
+                    continue;
+                }
+                if (full.size() <= 5 || _stricmp(full.c_str() + full.size() - 5, ".json") != 0)
+                    continue;
+                std::string fname = util::wide_to_utf8(wn);
+                std::string cat = default_cat;
+                if (default_cat != "local") {
+                    if (fname.rfind("SSS_", 0) == 0 || full.find("\\SSS") != std::string::npos)
+                        cat = "sss";
+                    else if (full.find("Paradox") != std::string::npos || full.find("\xe6\x82\x96\xe8\xae\xba") != std::string::npos)
+                        cat = "paradox";
+                }
+                CopilotFileEntry entry;
+                entry.cat = cat;
+                entry.path = full;
+                std::string raw;
+                mj::Value j;
+                if (util::read_file(full, raw) && mj::try_parse(raw, j) && j.is_object()) {
+                    entry.stage = j.get_str("stage_name", "");
+                    if (auto* doc = j.find("doc"); doc && doc->is_object()) {
+                        entry.title = doc->get_str("title", "");
+                        entry.details = doc->get_str("details", "");
+                    }
+                }
+                if (entry.title.empty()) entry.title = fname.substr(0, fname.size() - 5);
+                copilot_files_.push_back(std::move(entry));
+            } while (FindNextFileW(h, &fd) && copilot_files_.size() < 240);
+            FindClose(h);
+        }
+    };
+
+    if (!maa_install_dir.empty()) scan_dir(maa_install_dir + "\\resource\\copilot", "main");
+    scan_dir(util::exe_dir() + "\\state\\copilot", "local");
+
+    std::sort(copilot_files_.begin(), copilot_files_.end(),
+              [](const CopilotFileEntry& a, const CopilotFileEntry& b) {
+                  auto rank = [](const std::string& c) {
+                      return c == "local" ? 0 : c == "main" ? 1 : c == "sss" ? 2 : 3;
+                  };
+                  if (rank(a.cat) != rank(b.cat)) return rank(a.cat) < rank(b.cat);
+                  return a.title < b.title;
+              });
+}
+
+void MaaHubWindow::action_fetch_copilot_code(const std::string& code_or_url) {
+    std::string s = code_or_url;
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\r' || s.front() == '\n' || s.front() == '\t')) s.erase(s.begin());
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\r' || s.back() == '\n' || s.back() == '\t')) s.pop_back();
+    if (s.empty()) {
+        set_notice("\u8bf7\u8f93\u5165\u4f5c\u4e1a\u795e\u79d8\u4ee3\u7801\u6216 JSON \u5185\u5bb9");
+        return;
+    }
+
+    std::string content_json;
+    std::string save_id = util::random_hex(4);
+    if (s.front() == '{') {
+        content_json = s;
+    } else {
+        if (s.rfind("maa://", 0) == 0) s = s.substr(6);
+        std::string digits;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] >= '0' && s[i] <= '9') digits += s[i];
+            else if (!digits.empty()) break;
+        }
+        if (digits.empty()) {
+            set_notice("\u65e0\u6cd5\u8bc6\u522b\u7684\u795e\u79d8\u4ee3\u7801\uff1a" + s);
+            return;
+        }
+        save_id = digits;
+        AppSettings st = hub_->app_settings();
+        std::string resp = CoreManager::fetch_url(
+            "https://prts.maa.plus/copilot/get/" + digits, 15000, &st);
+        if (resp.empty()) {
+            resp = CoreManager::fetch_url(
+                "https://prts.plus/api/copilot/get/" + digits, 15000, &st);
+        }
+        if (resp.empty()) {
+            set_notice("\u83b7\u53d6\u795e\u79d8\u4ee3\u7801 " + digits + " \u5931\u8d25\uff08\u7f51\u7edc\u6216\u670d\u52a1\u4e0d\u53ef\u8fbe\uff09");
+            return;
+        }
+        mj::Value wrapped;
+        if (!mj::try_parse(resp, wrapped) || !wrapped.is_object()) {
+            set_notice("\u795e\u79d8\u4ee3\u7801\u8fd4\u56de\u975e\u6cd5 JSON");
+            return;
+        }
+        if (auto* d = wrapped.find("data"); d && d->is_object()) {
+            std::string inner = d->get_str("content", "");
+            content_json = inner.empty() ? mj::Value::dump_pretty(*d) : inner;
+        } else {
+            content_json = resp;
+        }
+    }
+
+    mj::Value parsed;
+    if (!mj::try_parse(content_json, parsed) || !parsed.is_object()) {
+        set_notice("\u4f5c\u4e1a\u5185\u5bb9\u4e0d\u662f\u6709\u6548\u7684 JSON \u5bf9\u8c61");
+        return;
+    }
+    std::string dir = util::exe_dir() + "\\state\\copilot";
+    util::ensure_dir(dir);
+    std::string out_path = dir + "\\prts_" + save_id + ".json";
+    if (!util::write_file(out_path, mj::Value::dump_pretty(parsed))) {
+        set_notice("\u4fdd\u5b58\u4f5c\u4e1a\u6587\u4ef6\u5931\u8d25");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(msg_mtx_);
+        fetched_copilot_path_ = out_path;
+    }
+    if (hwnd_) PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
+    std::string stg = parsed.get_str("stage_name", "");
+    set_notice("\u5df2\u83b7\u53d6\u5e76\u4fdd\u5b58\u4f5c\u4e1a" + (stg.empty() ? "" : (" (" + stg + ")")));
+}
+
+// ================================================================ 自动战斗 (Copilot)
 void MaaHubWindow::page_copilot(RECT content) {
-    // 官方 CopilotView（自动战斗）：左侧作业列表（按类型分类）+
-    // 右侧「作业路径/神秘代码」输入与作业选项。
-    // MaaHub 未接入真实作业运行（需 Copilot 适配器），此处提供官方形态的
-    // 文件选择与选项区，未实现的能力明确标注，不虚构。
-    gui_.text(content.left, content.top, L"\u81ea\u52a8\u6218\u6597",
-              gui_.theme.text, gui_.font_bold);
-    gui_.text(content.left + 90, content.top + 3,
-              L"\u9009\u62e9\u4f5c\u4e1a JSON \u6587\u4ef6\uff0c\u81ea\u52a8\u6267\u884c\u5173\u5361\u6d41\u7a0b",
-              gui_.theme.dim, gui_.font_small);
-    int y = content.top + 34;
-
-    // ---- 作业列表（官方按类型分类的 ListBox）----
     {
-        RECT card{ content.left, y, content.left + 260, content.bottom };
-        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
-        int cy = card.top + 12;
-        gui_.text(card.left + 12, cy, L"\u4f5c\u4e1a\u5217\u8868", gui_.theme.dim,
-                  gui_.font_small);
-        cy += 22;
-        // 官方分类（Copilot.MainStageAndSideStory / SSS / ParadoxSimulation / OtherActivityStage）
-        struct Cat { const wchar_t* name; };
-        const Cat cats[] = {
-            { L"\u4e3b\u7ebf\u5173\u5361 / \u526f\u672c\u6536\u96c6" },  // 主线/故事集/侧故事
-            { L"\u4fdd\u5168\u6d3e\u9a7b" },                        // SSS
-            { L"\u6096\u8bba\u6a21\u62df" },                        // 悖论模拟
-            { L"\u5176\u4ed6\u6d3b\u52a8" },                        // 其他活动
-        };
-        for (auto& cat : cats) {
-            gui_.text(card.left + 12, cy, cat.name, gui_.theme.text, gui_.font_small);
-            cy += 22;
-            gui_.text(card.left + 24, cy, L"\uff08\u672a\u5bfc\u5165\u4f5c\u4e1a\uff09",
-                      gui_.theme.faint, gui_.font_small);
-            cy += 24;
-        }
-        // 官方提示：作业文件可以直接用鼠标拖进来
-        gui_.text_clipped({ card.left + 12, card.bottom - 34, card.right - 12, card.bottom - 4 },
-                          L"\u4f5c\u4e1a\u6587\u4ef6\u53ef\u76f4\u63a5\u62d6\u5165\uff08MaaHub \u672a\u5b9e\u73b0\uff09",
-                          gui_.theme.faint, gui_.font_small);
-    }
-
-    // ---- 右侧：作业路径 + 选项 ----
-    int rx = content.left + 272;
-    int rw = content.right - rx;
-    gui_.text(rx, y + 4, L"\u4f5c\u4e1a\u8def\u5f84 / \u795e\u79d8\u4ee3\u7801",
-              gui_.theme.dim, gui_.font_small);
-    y += 24;
-    gui_.text_input("copilot-path", { rx, y, rx + rw - 80, y + 26 },
-                    copilot_path_, L"\u9009\u62e9 JSON \u6216\u7c98\u8d34 prts.plus \u4f5c\u4e1a\u4ee3\u7801");
-    RECT pick{ rx + rw - 74, y, rx + rw, y + 26 };
-    if (gui_.button("copilot-pick", pick, L"\u9009\u62e9", 0)) {
-        // 打开文件选择对话框（官方为 WPF OpenFileDialog；此处用系统对话框）
-        char buf[MAX_PATH] = {0};
-        OPENFILENAMEA ofn = {0};
-        ofn.lStructSize = sizeof(ofn);
-        ofn.lpstrFilter = "Copilot JSON\0*.json\0All Files\0*.*\0";
-        ofn.lpstrFile = buf;
-        ofn.nMaxFile = MAX_PATH;
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-        if (GetOpenFileNameA(&ofn)) {
-            copilot_path_ = buf;
-        }
-    }
-    y += 34;
-
-    gui_.text(rx, y + 4, L"\u8bfb\u53d6\u526a\u8d34\u677f", gui_.theme.dim, gui_.font_small);
-    {
-        CheckState st = CheckState::Off;
-        // 复选框矩形给足宽度，避免文字换行溢出到下方卡片
-        gui_.checkbox3("copilot-clip", { rx + 80, y, rx + rw, y + 22 },
-                       L"\u81ea\u52a8\u8bc6\u522b\u4f5c\u4e1a/\u4f5c\u4e1a\u96c6", st);
-    }
-    y += 34;
-
-    // ---- 作业选项（官方 CopilotView 开关组）----
-    {
-        RECT card{ rx, y, rx + rw, y + 210 };
-        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
-        int cy = card.top + 12;
-        gui_.text(card.left + 12, cy, L"\u4f5c\u4e1a\u9009\u9879", gui_.theme.dim,
-                  gui_.font_small);
-        cy += 24;
-        struct Opt { const char* key; const wchar_t* label; const wchar_t* tip; };
-        const Opt opts[] = {
-            { "copilot-auto-squad",  L"\u81ea\u52a8\u7f16\u961f",
-              L"\u81ea\u52a8\u7f16\u961f\u53ef\u80fd\u65e0\u6cd5\u8bc6\u522b\u5e26\u6709 \u300c\u7279\u522b\u5173\u6ce8\u300d \u6807\u8bb0\u7684\u5e72\u5458" },
-            { "copilot-use-formation", L"\u4f7f\u7528\u7f16\u961f", L"" },
-            { "copilot-ignore-req",  L"\u5ffd\u7565\u5e72\u5458\u5c5e\u6027\u8981\u6c42", L"" },
-            { "copilot-support-unit", L"\u501f\u52a9\u6218",
-              L"\u7f3a\u4e00\u4e2a\u8fd8\u80fd\u7528\u7528\uff0c\u7f3a\u4e24\u4e2a\u4ee5\u4e0a\u8fd8\u662f\u6362\u4efd\u4f5c\u4e1a\u5427" },
-            { "copilot-add-trust",   L"\u8865\u5145\u4f4e\u4fe1\u8d56\u5e72\u5458", L"" },
-        };
-        for (auto& o : opts) {
-            bool v = copilot_opt_.find(o.key) != copilot_opt_.end()
-                         ? copilot_opt_[o.key] : false;
-            CheckState st = v ? CheckState::On : CheckState::Off;
-            RECT r{ card.left + 16, cy, card.right - 16, cy + 22 };
-            gui_.checkbox3(o.key, r, o.label, st);
-            copilot_opt_[o.key] = (st == CheckState::On);
-            cy += 26;
-            if (o.tip && *o.tip) {
-                gui_.text_clipped({ card.left + 40, cy, card.right - 16, cy + 16 },
-                                  o.tip, gui_.theme.faint, gui_.font_small);
-                cy += 16;
+        std::string fetched;
+        {
+            std::lock_guard<std::mutex> lk(msg_mtx_);
+            if (!fetched_copilot_path_.empty()) {
+                fetched = fetched_copilot_path_;
+                fetched_copilot_path_.clear();
             }
         }
-        y = card.bottom + 12;
+        if (!fetched.empty()) {
+            copilot_path_ = fetched;
+            copilot_stage_.clear();
+            inspect_copilot_file(copilot_path_);
+            copilot_scanned_ = false;
+        }
     }
 
-    // ---- 操作按钮（官方 Copilot.Start / Common.Stop）----
+    mj::Value ex;
+    std::string id;
+    if (find_executor(selected_exec_, ex) && ex.get_str("kind", "") == "maa") {
+        id = ex.get_str("id", "");
+    } else {
+        for (const auto& e : hub_->executors()) {
+            if (e.kind == "maa") { find_executor(e.id, ex); id = e.id; break; }
+        }
+    }
+    std::string maa_dir;
+    if (!id.empty()) {
+        ExecutorEntry ee;
+        if (hub_->get_executor(id, ee)) maa_dir = ee.config.get_str("install_dir", "");
+    }
+    refresh_copilot_list(maa_dir, false);
+
+    if (copilot_clip_auto_ && !offscreen_) {
+        std::string clip = read_clipboard_utf8(hwnd_);
+        if (!clip.empty() && clip != copilot_last_clip_) {
+            copilot_last_clip_ = clip;
+            bool is_code = (clip.rfind("maa://", 0) == 0)
+                        || (clip.find("\"stage_name\"") != std::string::npos
+                            && clip.find("\"actions\"") != std::string::npos);
+            if (is_code) {
+                post_action([this, clip] { action_fetch_copilot_code(clip); }, "\u8bc6\u522b\u526a\u8d34\u677f\u4f5c\u4e1a");
+            }
+        }
+    }
+
+    gui_.text(content.left, content.top, L"\u81ea\u52a8\u6218\u6597",
+              gui_.theme.text, gui_.font_bold);
+    gui_.text(content.left + 86, content.top + 3,
+              id.empty() ? L"\u672a\u627e\u5230 MAA \u6267\u884c\u5668"
+                         : (L"\u5f53\u524d\u5b9e\u4f8b\uff1a" + gui::widen(ex.get_str("label", ""))),
+              gui_.theme.dim, gui_.font_small);
     {
-        RECT sb{ rx, y, rx + 120, y + 34 };
-        if (gui_.button("copilot-start", sb, L"\u5f00\u59cb", 1)) {
-            if (copilot_path_.empty()) {
-                set_notice("\u8bf7\u5148\u9009\u62e9\u4f5c\u4e1a\u6587\u4ef6");
+        std::string notice;
+        { std::lock_guard<std::mutex> lk(msg_mtx_); notice = core_msg_; }
+        if (!notice.empty()) {
+            gui_.text_clipped({ content.left + 260, content.top + 2, content.right, content.top + 22 },
+                              gui::widen(notice),
+                              notice.find("\u5931\u8d25") != std::string::npos ? gui_.theme.err : gui_.theme.ok,
+                              gui_.font_small);
+        }
+    }
+
+    int top_y = content.top + 32;
+    int total_w = content.right - content.left;
+    int list_w = (std::min)(244, total_w * 39 / 100);
+    if (list_w < 190) list_w = 190;
+
+    // ---- 左侧：作业列表 ----
+    {
+        RECT card{ content.left, top_y, content.left + list_w, content.bottom };
+        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
+        gui_.text(card.left + 12, card.top + 10,
+                  L"\u4f5c\u4e1a\u5217\u8868 (" + std::to_wstring(copilot_files_.size()) + L")",
+                  gui_.theme.dim, gui_.font_small);
+        RECT ref_b{ card.right - 64, card.top + 6, card.right - 10, card.top + 26 };
+        if (gui_.button("copilot-refresh", ref_b, L"\u5237\u65b0", 0)) {
+            refresh_copilot_list(maa_dir, true);
+        }
+        RECT list_r{ card.left + 8, card.top + 32, card.right - 8, card.bottom - 8 };
+        const int ROW_H = 38;
+        int total_h = (int)copilot_files_.size() * ROW_H + 8;
+        gui_.begin_scroll(list_r, total_h, scroll_["copilot-list"]);
+        int ry = list_r.top + 4 - (int)scroll_["copilot-list"];
+        if (copilot_files_.empty()) {
+            gui_.text_clipped({ list_r.left + 6, ry + 8, list_r.right - 6, ry + 30 },
+                              L"\u672a\u53d1\u73b0\u4f5c\u4e1a JSON\uff0c\u53ef\u70b9\u53f3\u4fa7\u9009\u62e9",
+                              gui_.theme.faint, gui_.font_small);
+        }
+        for (size_t i = 0; i < copilot_files_.size(); ++i) {
+            const auto& cf = copilot_files_[i];
+            if (ry + ROW_H < list_r.top) { ry += ROW_H; continue; }
+            if (ry > list_r.bottom) break;
+            RECT ir{ list_r.left + 2, ry, list_r.right - 4, ry + ROW_H - 4 };
+            bool sel = (copilot_path_ == cf.path);
+            bool hov = gui_.hovered(ir);
+            COLORREF bg = sel ? gui_.theme.primary_light : (hov ? gui_.theme.hover : gui_.theme.card_bg_soft);
+            COLORREF bd = sel ? gui_.theme.primary : gui_.theme.border;
+            gui_.round_rect(ir, bg, bd, 3);
+            std::wstring tag = cf.cat == "sss" ? L"[\u4fdd\u5168]"
+                             : cf.cat == "paradox" ? L"[\u6096\u8bba]"
+                             : cf.cat == "local" ? L"[\u672c\u5730]" : L"[\u4e3b\u7ebf]";
+            std::wstring title_w = tag + L" " + gui::widen(cf.title);
+            gui_.text_clipped({ ir.left + 8, ir.top + 3, ir.right - 8, ir.top + 19 },
+                              title_w, sel ? gui_.theme.primary_dark : gui_.theme.text, gui_.font_small);
+            std::wstring sub = cf.stage.empty() ? gui::widen(cf.path) : gui::widen(cf.stage);
+            gui_.text_clipped({ ir.left + 8, ir.top + 18, ir.right - 8, ir.bottom - 2 },
+                              sub, gui_.theme.dim, gui_.font_small);
+            if (hov && gui_.input().pressed) {
+                copilot_path_ = cf.path;
+                copilot_stage_ = cf.stage;
+                copilot_type_ = (cf.cat == "sss") ? 1 : (cf.cat == "paradox" ? 2 : 0);
+                inspect_copilot_file(cf.path);
+            }
+            ry += ROW_H;
+        }
+        gui_.end_scroll();
+    }
+
+    // ---- 右侧：路径 / 神秘代码 / 预览 / 选项 / 执行 ----
+    int rx = content.left + list_w + 12;
+    int rw = content.right - rx;
+    RECT right_r{ rx, top_y, rx + rw, content.bottom - 44 };
+    int& rh = content_h_["copilot-right"];
+    int view_h = right_r.bottom - right_r.top;
+    int ch = (rh > view_h) ? rh : view_h;
+    float& rsy = scroll_["copilot-right"];
+    gui_.begin_scroll(right_r, ch, rsy);
+    int y0 = right_r.top - (int)rsy;
+    int y = y0;
+
+    gui_.text(rx, y + 2, L"\u4f5c\u4e1a\u8def\u5f84 / \u795e\u79d8\u4ee3\u7801 (maa:// \u6216 JSON)",
+              gui_.theme.dim, gui_.font_small);
+    y += 20;
+    {
+        int bw1 = 54, bw2 = 66;
+        int iw = rw - bw1 - bw2 - 10;
+        if (iw < 120) iw = 120;
+        gui_.text_input("copilot-path", { rx, y, rx + iw, y + 26 },
+                        copilot_path_, L"\u9009\u62e9 JSON / maa://xxxx");
+        if (gui_.button("copilot-pick", { rx + iw + 4, y, rx + iw + 4 + bw1, y + 26 }, L"\u9009\u62e9", 0)) {
+            std::string picked = browse_file_dialog(L"\u9009\u62e9 Copilot \u4f5c\u4e1a JSON",
+                                                    L"Copilot JSON\0*.json\0All Files\0*.*\0");
+            if (!picked.empty()) {
+                copilot_path_ = picked;
+                copilot_stage_.clear();
+                inspect_copilot_file(picked);
+            }
+        }
+        if (gui_.button("copilot-fetch", { rx + iw + bw1 + 8, y, rx + rw, y + 26 }, L"\u83b7\u53d6\u4ee3\u7801", 1)) {
+            std::string code = copilot_path_;
+            post_action([this, code] { action_fetch_copilot_code(code); }, "\u83b7\u53d6\u4f5c\u4e1a");
+        }
+    }
+    y += 32;
+
+    {
+        if (gui_.button("copilot-clip-btn", { rx, y, rx + 96, y + 24 }, L"\u8bfb\u53d6\u526a\u8d34\u677f", 0)) {
+            std::string clip = read_clipboard_utf8(hwnd_);
+            if (clip.empty()) {
+                set_notice("\u526a\u8d34\u677f\u4e3a\u7a7a");
+            } else if (clip.rfind("maa://", 0) == 0 || clip.front() == '{'
+                       || std::all_of(clip.begin(), clip.end(), [](unsigned char c) { return isdigit(c) || c == '\r' || c == '\n' || c == ' '; })) {
+                post_action([this, clip] { action_fetch_copilot_code(clip); }, "\u89e3\u6790\u526a\u8d34\u677f");
             } else {
-                set_notice("\u81ea\u52a8\u6218\u6597\u9700\u8981 Copilot \u9002\u914d\u5668\uff0cMaaHub \u5c1a\u672a\u5b9e\u73b0\u8be5\u4efb\u52a1\u7c7b\u578b");
+                copilot_path_ = clip;
+                inspect_copilot_file(clip);
+            }
+        }
+        CheckState cst = copilot_clip_auto_ ? CheckState::On : CheckState::Off;
+        if (gui_.checkbox3("copilot-clip-auto", { rx + 106, y, rx + rw, y + 24 },
+                           L"\u81ea\u52a8\u76d1\u542c\u526a\u8d34\u677f\u4f5c\u4e1a", cst)) {
+            copilot_clip_auto_ = (cst == CheckState::On);
+        }
+    }
+    y += 30;
+
+    if (copilot_path_ != copilot_preview_path_ && util::file_exists(copilot_path_)) {
+        inspect_copilot_file(copilot_path_);
+    }
+
+    // 预览卡
+    {
+        RECT pcard{ rx, y, rx + rw, y + 66 };
+        gui_.round_rect(pcard, gui_.theme.card_bg_soft, gui_.theme.border, 4);
+        if (!copilot_preview_.title.empty() || !copilot_preview_.stage.empty()) {
+            std::wstring h1 = gui::widen(copilot_preview_.title)
+                + (copilot_preview_.stage.empty() ? L"" : (L"  [" + gui::widen(copilot_preview_.stage) + L"]"));
+            gui_.text_clipped({ pcard.left + 10, pcard.top + 6, pcard.right - 10, pcard.top + 24 },
+                              h1, gui_.theme.primary, gui_.font_small);
+            std::wstring h2 = copilot_preview_.opers_summary.empty()
+                ? L"\u672a\u5305\u542b\u5e72\u5458\u9700\u6c42"
+                : gui::widen(copilot_preview_.opers_summary);
+            gui_.text_clipped({ pcard.left + 10, pcard.top + 25, pcard.right - 10, pcard.top + 42 },
+                              h2, gui_.theme.text, gui_.font_small);
+            gui_.text_clipped({ pcard.left + 10, pcard.top + 43, pcard.right - 10, pcard.bottom - 4 },
+                              copilot_preview_.details.empty() ? gui::widen(copilot_preview_.path) : gui::widen(copilot_preview_.details),
+                              gui_.theme.dim, gui_.font_small);
+        } else {
+            gui_.text_clipped({ pcard.left + 10, pcard.top + 22, pcard.right - 10, pcard.top + 44 },
+                              L"\u9009\u62e9\u5de6\u4fa7\u4f5c\u4e1a\u6216\u8f93\u5165\u795e\u79d8\u4ee3\u7801\u540e\u5728\u6b64\u9884\u89c8\u4f5c\u4e1a\u4fe1\u606f",
+                              gui_.theme.faint, gui_.font_small);
+        }
+        y = pcard.bottom + 8;
+    }
+
+    // 作业类型与选项卡
+    {
+        RECT card{ rx, y, rx + rw, y + 258 };
+        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
+        int cy = card.top + 10;
+        gui_.text(card.left + 12, cy + 4, L"\u4f5c\u4e1a\u7c7b\u578b", gui_.theme.dim, gui_.font_small);
+        int thit = gui_.option_strip("cp-type", { card.left + 84, cy, card.right - 12, cy + 24 },
+                                     { L"\u666e\u901a Copilot", L"\u4fdd\u5168 SSS", L"\u6096\u8bba\u6a21\u62df" },
+                                     copilot_type_);
+        if (thit >= 0) copilot_type_ = thit;
+        cy += 30;
+
+        int half = (card.right - card.left - 32) / 2;
+        gui_.text_input("cp-stage", { card.left + 12, cy, card.left + 12 + half, cy + 24 },
+                        copilot_stage_, L"\u5173\u5361\u540d\uff08\u53ef\u7559\u7a7a\uff09");
+        gui_.number_input("cp-loop", { card.left + 20 + half, cy, card.right - 12, cy + 24 },
+                          L"\u5faa\u73af", copilot_loop_, 1, 1, 999);
+        cy += 32;
+
+        struct Opt { const char* key; const wchar_t* label; };
+        const Opt opts[] = {
+            { "formation",           L"\u81ea\u52a8\u7f16\u961f" },
+            { "add_trust",           L"\u8865\u5145\u4f4e\u4fe1\u8d56\u5e72\u5458" },
+            { "ignore_requirements", L"\u5ffd\u7565\u5e72\u5458\u7ec3\u5ea6\u8981\u6c42" },
+            { "use_sanity_potion",   L"\u81ea\u52a8\u4f7f\u7528\u7406\u667a\u836f" },
+        };
+        for (auto& o : opts) {
+            bool v = copilot_opt_[o.key];
+            CheckState st = v ? CheckState::On : CheckState::Off;
+            if (gui_.checkbox3((std::string("cp-") + o.key).c_str(),
+                               { card.left + 14, cy, card.right - 14, cy + 22 }, o.label, st)) {
+                copilot_opt_[o.key] = (st == CheckState::On);
+            }
+            cy += 25;
+        }
+        gui_.text(card.left + 14, cy + 4, L"\u52a9\u6218\u7b56\u7565", gui_.theme.dim, gui_.font_small);
+        int shit = gui_.option_strip("cp-sup", { card.left + 84, cy, card.right - 12, cy + 24 },
+                                     { L"\u4e0d\u501f", L"\u6309\u9700", L"\u968f\u673a" },
+                                     copilot_support_);
+        if (shit >= 0) copilot_support_ = shit;
+        cy += 30;
+        if (copilot_support_ > 0) {
+            gui_.text_input("cp-sup-name", { card.left + 14, cy, card.right - 14, cy + 24 },
+                            copilot_support_name_, L"\u6307\u5b9a\u52a9\u6218\u5e72\u5458\u540d\uff08\u53ef\u7559\u7a7a\uff09");
+        }
+        y = card.bottom + 8;
+    }
+    rh = y - y0 + 12;
+    gui_.end_scroll();
+
+    {
+        bool busy = !id.empty() && (hub_->is_seq_running(id) || ex.get_bool("busy", false) || ex.get_str("run", "") == "running");
+        RECT sb{ rx, content.bottom - 34, rx + 120, content.bottom };
+        if (busy) {
+            if (gui_.button("copilot-stop", sb, L"\u505c\u6b62", 2)) {
+                post_action([this, id] { hub_->request_stop_executor(id); }, "\u505c\u6b62\u4f5c\u4e1a");
+            }
+        } else {
+            if (gui_.button("copilot-start", sb, L"\u5f00\u59cb\u6284\u4f5c\u4e1a", 1, !id.empty())) {
+                if (copilot_path_.empty()) {
+                    set_notice("\u8bf7\u5148\u9009\u62e9\u4f5c\u4e1a JSON \u6587\u4ef6");
+                } else {
+                    mj::Value p = mj::Value::object();
+                    p.set("filename", copilot_path_);
+                    p.set("copilot_type", (int64_t)copilot_type_);
+                    p.set("loop_times", (int64_t)copilot_loop_);
+                    if (!copilot_stage_.empty()) p.set("stage_name", copilot_stage_);
+                    if (copilot_type_ == 0) {
+                        p.set("formation", copilot_opt_["formation"]);
+                        p.set("add_trust", copilot_opt_["add_trust"]);
+                        p.set("ignore_requirements", copilot_opt_["ignore_requirements"]);
+                        p.set("use_sanity_potion", copilot_opt_["use_sanity_potion"]);
+                        p.set("support_unit_usage", (int64_t)copilot_support_);
+                        if (copilot_support_ > 0 && !copilot_support_name_.empty()) {
+                            p.set("support_unit_name", copilot_support_name_);
+                        }
+                    }
+                    post_action([this, id, p] {
+                        apply_startup_connect(id);
+                        if (!hub_->connect_executor(id)) {
+                            set_notice("\u8fde\u63a5\u5931\u8d25\uff1a" + hub_->executor_status(id).get_str("last_error", ""));
+                            return;
+                        }
+                        action_run(id, "Copilot", p);
+                    }, "\u81ea\u52a8\u6218\u6597");
+                }
             }
         }
     }
 }
 
+// ================================================================ 小工具 (Toolbox)
 void MaaHubWindow::page_toolbox(RECT content) {
-    // 官方 ToolboxView（小工具）：MaaHub 提供常用工具的官方形态入口。
-    // 官方 Toolbox 主要是「牛杂」（肉鸽小游戏）相关自动化工具，
-    // 依赖 Copilot/Roguelike 适配器，MaaHub 未实现，此处列出官方工具清单
-    // 并明确标注未实现，不虚构能力。
-    gui_.text(content.left, content.top, L"\u5c0f\u5de5\u5177",
-              gui_.theme.text, gui_.font_bold);
-    gui_.text(content.left + 76, content.top + 3,
-              L"\u5b98\u65b9\u5c0f\u5de5\u5177\u96c6\u5408\uff08MaaHub \u90e8\u5206\u672a\u5b9e\u73b0\uff09",
-              gui_.theme.dim, gui_.font_small);
-    int y = content.top + 34;
-
-    struct Tool { const wchar_t* name; const wchar_t* desc; bool avail; };
-    const Tool tools[] = {
-        { L"\u725b\u6742", L"\u751f\u5b58\u6392\u540d\u8005\u526f\u672c\u81ea\u52a8\u5316\uff08\u7ed3\u5c40/\u4e8b\u4ef6/\u4efb\u52a1\u9009\u62e9\uff09", false },
-        { L"\u725b\u6742 \u00b7 \u7956\u9f99\u7968", L"\u81ea\u52a8\u9886\u53d6\u7956\u9f99\u7968\u5956\u52b1", false },
-        { L"\u725b\u6742 \u00b7 \u9886\u53d6\u7269\u8d44", L"\u81ea\u52a8\u9886\u53d6\u62bd\u5956\u7269\u8d44", false },
-        { L"\u4efb\u52a1\u8fc7\u6ee4\u5668", L"\u6309\u5173\u5361\u540d\u8fc7\u6ee4\u4efb\u52a1\u6267\u884c", true },
-        { L"\u65e5\u5fd7\u5bfc\u51fa", L"\u5bfc\u51fa\u8fd0\u884c\u65e5\u5fd7\u4e0e\u6392\u67e5\u4fe1\u606f", true },
-    };
-    for (auto& t : tools) {
-        RECT card{ content.left, y, content.right, y + 58 };
-        gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
-        gui_.text(card.left + 14, card.top + 10, t.name, gui_.theme.text, gui_.font);
-        gui_.text_clipped({ card.left + 14, card.top + 30, card.right - 130, card.bottom - 4 },
-                          t.desc, gui_.theme.dim, gui_.font_small);
-        COLORREF tag_c = t.avail ? gui_.theme.ok : gui_.theme.warn;
-        RECT tr{ card.right - 108, card.top + 16, card.right - 14, card.top + 38 };
-        gui_.round_rect(tr, tag_c, tag_c, 4);
-        gui_.text(tr.left + 10, tr.top + 5, t.avail ? L"\u53ef\u7528" : L"\u672a\u5b9e\u73b0",
-                  RGB(255, 255, 255), gui_.font_small);
-        y = card.bottom + 10;
+    mj::Value snap;
+    {
+        std::lock_guard<std::mutex> lk(snap_mtx_);
+        snap = snap_;
     }
+    mj::Value ex;
+    std::string id;
+    if (find_executor(selected_exec_, ex) && ex.get_str("kind", "") == "maa") {
+        id = ex.get_str("id", "");
+    } else {
+        for (const auto& e : hub_->executors()) {
+            if (e.kind == "maa") { find_executor(e.id, ex); id = e.id; break; }
+        }
+    }
+
+    gui_.text(content.left, content.top, L"\u5c0f\u5de5\u5177", gui_.theme.text, gui_.font_bold);
+    gui_.text(content.left + 72, content.top + 3,
+              id.empty() ? L"\u672a\u627e\u5230 MAA \u6267\u884c\u5668"
+                         : (L"\u5f53\u524d\u5b9e\u4f8b\uff1a" + gui::widen(ex.get_str("label", ""))),
+              gui_.theme.dim, gui_.font_small);
+    {
+        std::string notice;
+        { std::lock_guard<std::mutex> lk(msg_mtx_); notice = core_msg_; }
+        if (!notice.empty()) {
+            gui_.text_clipped({ content.left + 250, content.top + 2, content.right, content.top + 22 },
+                              gui::widen(notice),
+                              notice.find("\u5931\u8d25") != std::string::npos ? gui_.theme.err : gui_.theme.ok,
+                              gui_.font_small);
+        }
+    }
+
+    int y = content.top + 30;
+    int hit = gui_.option_strip("tb-subtabs", { content.left, y, content.right, y + 28 },
+                                { L"\u516c\u62db\u8bc6\u522b", L"\u4ed3\u5e93 / \u5e72\u5458\u8bc6\u522b",
+                                  L"\u751f\u606f\u6f14\u7b97", L"\u725b\u725b\u5c0f\u6e38\u620f & \u89c6\u9891\u8bc6\u522b" },
+                                toolbox_tab_);
+    if (hit >= 0) toolbox_tab_ = hit;
+    y += 38;
+
+    auto dispatch_tool = [this, id](const std::string& task, const mj::Value& params, const char* msg) {
+        if (id.empty()) { set_notice("\u672a\u627e\u5230 MAA \u6267\u884c\u5668"); return; }
+        post_action([this, id, task, params] {
+            apply_startup_connect(id);
+            if (!hub_->connect_executor(id)) {
+                set_notice("\u8fde\u63a5\u5931\u8d25\uff1a" + hub_->executor_status(id).get_str("last_error", ""));
+                return;
+            }
+            action_run(id, task, params);
+        }, msg);
+    };
+
+    mj::Value exec_data = mj::Value::object();
+    if (!id.empty()) {
+        if (auto* d = snap.find("data"); d && d->is_object()) {
+            if (auto* ed = d->find(id); ed && ed->is_object()) exec_data = *ed;
+        }
+    }
+    bool busy = !id.empty() && (hub_->is_seq_running(id) || ex.get_bool("busy", false) || ex.get_str("run", "") == "running");
+
+    RECT body{ content.left, y, content.right, content.bottom };
+    gui_.panel(body);
+
+    if (toolbox_tab_ == 0) {
+        int ay = body.top + 14;
+        if (!busy) {
+            if (gui_.button("tb-rec-run", { body.left + 14, ay, body.left + 214, ay + 30 },
+                            L"\u25b6 \u5f00\u59cb\u516c\u62db\u8bc6\u522b (\u4ec5\u8ba1\u7b97)", 1, !id.empty())) {
+                mj::Value p = mj::Value::object();
+                p.set("times", (int64_t)0);
+                p.set("refresh", false);
+                mj::Value sel = mj::Value::array();
+                sel.push((int64_t)6); sel.push((int64_t)5); sel.push((int64_t)4); sel.push((int64_t)3);
+                p.set("select", std::move(sel));
+                p.set("confirm", mj::Value::array());
+                dispatch_tool("Recruit", p, "\u516c\u62db\u8bc6\u522b");
+            }
+        } else {
+            if (gui_.button("tb-rec-stop", { body.left + 14, ay, body.left + 124, ay + 30 }, L"\u23f9 \u505c\u6b62", 2)) {
+                post_action([this, id] { hub_->request_stop_executor(id); }, "\u505c\u6b62");
+            }
+        }
+        gui_.text(body.left + 228, ay + 7,
+                  L"\u8bc6\u522b\u5f53\u524d\u516c\u62db\u8bcd\u6761\u7ec4\u5408\u4e0e\u53ef\u51fa\u5e72\u5458\uff08\u4e0d\u6d88\u8017\u62db\u8058\u8bb8\u53ef\uff09",
+                  gui_.theme.dim, gui_.font_small);
+
+        RECT res_r{ body.left + 14, ay + 42, body.right - 14, body.bottom - 14 };
+        gui_.round_rect(res_r, gui_.theme.card_bg_soft, gui_.theme.border, 4);
+        std::vector<std::wstring> lines;
+        if (auto* rr = exec_data.find("recruit_results"); rr && rr->is_object()) {
+            lines.push_back(L"\u6700\u8fd1\u516c\u62db\u8bc6\u522b\u7ed3\u679c\uff1a");
+            lines.push_back(gui::widen(mj::Value::dump_pretty(*rr)));
+        }
+        if (auto* evs = snap.find("events"); evs && evs->is_array()) {
+            for (auto it = evs->items().rbegin(); it != evs->items().rend() && lines.size() < 40; ++it) {
+                if (it->get_str("exec_id", "") != id) continue;
+                std::string t = it->get_str("task", "");
+                std::string w = it->get_str("what", "");
+                if (t.find("Recruit") == std::string::npos && w.find("Recruit") == std::string::npos) continue;
+                lines.push_back(gui::widen("[" + w + "] " + it->get_str("raw", "")));
+            }
+        }
+        if (lines.empty()) {
+            lines.push_back(L"\u6682\u65e0\u516c\u62db\u8bc6\u522b\u8bb0\u5f55\u3002\u8bf7\u5728\u6e38\u620f\u516c\u5f00\u62db\u52df\u754c\u9762\u70b9\u51fb\u4e0a\u65b9\u6309\u94ae\u5f00\u59cb\u8bc6\u522b\u3002");
+        }
+        gui_.begin_scroll({ res_r.left + 8, res_r.top + 8, res_r.right - 8, res_r.bottom - 8 },
+                          (int)lines.size() * 20 + 16, scroll_["tb-rec"]);
+        int ly = res_r.top + 10 - (int)scroll_["tb-rec"];
+        for (const auto& l : lines) {
+            if (ly + 20 >= res_r.top && ly <= res_r.bottom) {
+                gui_.text_clipped({ res_r.left + 12, ly, res_r.right - 12, ly + 18 }, l, gui_.theme.text, gui_.font_small);
+            }
+            ly += 20;
+        }
+        gui_.end_scroll();
+    } else if (toolbox_tab_ == 1) {
+        int ay = body.top + 14;
+        if (gui_.button("tb-depot-run", { body.left + 14, ay, body.left + 144, ay + 28 },
+                        L"\u25b6 \u8bc6\u522b\u4ed3\u5e93 (Depot)", 1, !id.empty() && !busy)) {
+            dispatch_tool("Depot", mj::Value::object(), "\u4ed3\u5e93\u8bc6\u522b");
+        }
+        if (gui_.button("tb-oper-run", { body.left + 154, ay, body.left + 290, ay + 28 },
+                        L"\u25b6 \u8bc6\u522b\u5e72\u5458 (OperBox)", 1, !id.empty() && !busy)) {
+            dispatch_tool("OperBox", mj::Value::object(), "\u5e72\u5458\u8bc6\u522b");
+        }
+        if (gui_.button("tb-userdata-exp", { body.left + 300, ay, body.left + 404, ay + 28 },
+                        L"\u5bfc\u51fa JSON", 0, !id.empty())) {
+            std::string p = util::exe_dir() + "\\state\\export_" + id + "_userdata.json";
+            if (util::write_file(p, mj::Value::dump_pretty(exec_data))) {
+                set_notice("\u5df2\u5bfc\u51fa\u81f3 " + p);
+            } else {
+                set_notice("\u5bfc\u51fa\u5931\u8d25");
+            }
+        }
+        int dhit = gui_.option_strip("tb-data-sub", { body.right - 168, ay, body.right - 14, ay + 28 },
+                                     { L"\u4ed3\u5e93", L"\u5e72\u5458 Box" }, tb_depot_sub_);
+        if (dhit >= 0) tb_depot_sub_ = dhit;
+
+        RECT res_r{ body.left + 14, ay + 38, body.right - 14, body.bottom - 14 };
+        gui_.round_rect(res_r, gui_.theme.card_bg_soft, gui_.theme.border, 4);
+        const char* dk = (tb_depot_sub_ == 0) ? "depot" : "oper_box";
+        std::vector<std::wstring> lines;
+        if (auto* d = exec_data.find(dk); d && d->is_object()) {
+            if (tb_depot_sub_ == 0) {
+                if (auto* dd = d->find("details"); dd && dd->is_object()) {
+                    for (auto& kv : dd->members()) {
+                        lines.push_back(gui::widen(kv.first + ": " + mj::Value::dump(kv.second)));
+                    }
+                }
+            } else {
+                if (auto* ops = d->find("all_opers"); ops && ops->is_array()) {
+                    lines.push_back(L"\u5df2\u8bc6\u522b\u5e72\u5458\u603b\u6570\uff1a" + std::to_wstring(ops->items().size()));
+                    for (const auto& op : ops->items()) {
+                        std::string nm = op.get_str("name", op.get_str("id", ""));
+                        int own = op.get_bool("own", false) ? 1 : 0;
+                        int el = (int)op.get_int("elite", 0);
+                        int lv = (int)op.get_int("level", 1);
+                        int pot = (int)op.get_int("potential", 0);
+                        lines.push_back(gui::widen(nm + (own ? ("  E" + std::to_string(el) + " Lv." + std::to_string(lv) + " P" + std::to_string(pot)) : "  (\u672a\u62e5\u6709)")));
+                    }
+                }
+            }
+            if (lines.empty()) lines.push_back(gui::widen(mj::Value::dump_pretty(*d)));
+        }
+        if (lines.empty()) {
+            lines.push_back(L"\u6682\u65e0\u8bc6\u522b\u6570\u636e\u3002\u8bf7\u70b9\u51fb\u4e0a\u65b9\u6309\u94ae\u6267\u884c\u4ed3\u5e93\u6216\u5e72\u5458\u8bc6\u522b\u3002");
+        }
+        gui_.begin_scroll({ res_r.left + 8, res_r.top + 8, res_r.right - 8, res_r.bottom - 8 },
+                          (int)lines.size() * 20 + 16, scroll_["tb-depot"]);
+        int ly = res_r.top + 10 - (int)scroll_["tb-depot"];
+        for (const auto& l : lines) {
+            if (ly + 20 >= res_r.top && ly <= res_r.bottom) {
+                gui_.text_clipped({ res_r.left + 12, ly, res_r.right - 12, ly + 18 }, l, gui_.theme.text, gui_.font_small);
+            }
+            ly += 20;
+        }
+        gui_.end_scroll();
+    } else if (toolbox_tab_ == 2) {
+        int y0 = body.top + 14;
+        int lx = body.left + 18, rx2 = body.left + 130, rr = body.right - 18;
+        gui_.text(lx, y0 + 4, L"\u6f14\u7b97\u4e3b\u9898", gui_.theme.dim, gui_.font_small);
+        int th = gui_.option_strip("tb-ra-theme", { rx2, y0, rx2 + 260, y0 + 26 },
+                                   { L"\u6c99\u6d32\u9057\u95fb (Tales)", L"\u6c99\u4e2d\u4e4b\u706b (Fire)" }, tb_ra_theme_);
+        if (th >= 0) tb_ra_theme_ = th;
+        y0 += 36;
+
+        gui_.text(lx, y0 + 4, L"\u8fd0\u884c\u6a21\u5f0f", gui_.theme.dim, gui_.font_small);
+        int md = gui_.option_strip("tb-ra-mode", { rx2, y0, rx2 + 260, y0 + 26 },
+                                   { L"\u5237\u7e41\u8363(\u65e0\u5b58\u6863)", L"\u5237\u7e41\u8363(\u8bfb\u6863)" }, tb_ra_mode_);
+        if (md >= 0) tb_ra_mode_ = md;
+        y0 += 36;
+
+        gui_.text(lx, y0 + 4, L"\u5236\u4f5c\u5de5\u5177", gui_.theme.dim, gui_.font_small);
+        gui_.text_input("tb-ra-tools", { rx2, y0, rr, y0 + 26 }, tb_ra_tools_, L"\u5206\u53f7\u5206\u9694\uff0c\u7559\u7a7a\u4e0d\u5236\u4f5c");
+        y0 += 36;
+
+        gui_.text(lx, y0 + 4, L"\u5236\u4f5c\u8f6e\u6570", gui_.theme.dim, gui_.font_small);
+        gui_.number_input("tb-ra-batch", { rx2, y0, rx2 + 120, y0 + 26 }, L"", tb_ra_batches_, 1, 1, 999);
+        int ih = gui_.option_strip("tb-ra-inc", { rx2 + 132, y0, rr, y0 + 26 },
+                                   { L"\u6309\u70b9\u51fb\u6b21\u6570", L"\u6309\u5929\u6570\u589e\u91cf" }, tb_ra_inc_);
+        if (ih >= 0) tb_ra_inc_ = ih;
+        y0 += 36;
+
+        CheckState cs = tb_ra_clear_store_ ? CheckState::On : CheckState::Off;
+        if (gui_.checkbox3("tb-ra-clr", { rx2, y0, rx2 + 220, y0 + 24 }, L"\u81ea\u52a8\u6e05\u7406\u5546\u5e97", cs)) {
+            tb_ra_clear_store_ = (cs == CheckState::On);
+        }
+        y0 += 40;
+
+        if (!busy) {
+            if (gui_.button("tb-ra-start", { lx, y0, lx + 140, y0 + 32 }, L"\u25b6 \u5f00\u59cb\u751f\u606f\u6f14\u7b97", 1, !id.empty())) {
+                mj::Value p = mj::Value::object();
+                p.set("theme", (int64_t)tb_ra_theme_);
+                p.set("mode", (int64_t)tb_ra_mode_);
+                p.set("tools_to_craft", tb_ra_tools_);
+                p.set("num_craft_batches", (int64_t)tb_ra_batches_);
+                p.set("increment_mode", (int64_t)tb_ra_inc_);
+                p.set("clear_store", tb_ra_clear_store_);
+                dispatch_tool("Reclamation", p, "\u751f\u606f\u6f14\u7b97");
+            }
+        } else {
+            if (gui_.button("tb-ra-stop", { lx, y0, lx + 110, y0 + 32 }, L"\u23f9 \u505c\u6b62", 2)) {
+                post_action([this, id] { hub_->request_stop_executor(id); }, "\u505c\u6b62");
+            }
+        }
+    } else {
+        int y0 = body.top + 14;
+        int lx = body.left + 18, rr = body.right - 18;
+        int mh = gui_.option_strip("tb-mg-kind", { lx, y0, rr, y0 + 26 },
+                                   { L"\u6d3b\u52a8\u5546\u5e97", L"\u6750\u6599\u5408\u6210",
+                                     L"\u81ea\u52a8\u5347\u6f5c", L"\u9690\u79d8\u6218\u7ebf", L"\u89c6\u9891\u8bc6\u522b" },
+                                   tb_mg_kind_);
+        if (mh >= 0) tb_mg_kind_ = mh;
+        y0 += 40;
+
+        if (tb_mg_kind_ == 0) {
+            gui_.text(lx, y0 + 4, L"\u5546\u5e97\u9ed1\u540d\u5355", gui_.theme.dim, gui_.font_small);
+            gui_.text_input("tb-mg-bl", { lx + 96, y0, rr, y0 + 26 }, tb_mg_shop_blacklist_,
+                            L"\u8df3\u8fc7\u8d2d\u4e70\u7684\u7269\u54c1\uff0c\u5206\u53f7\u5206\u9694");
+            y0 += 36;
+        } else if (tb_mg_kind_ == 1) {
+            gui_.text(lx, y0 + 4,
+                      L"\u81ea\u52a8\u8ba1\u7b97\u5de5\u5382\u5408\u6210\u914d\u65b9\u5e76\u6279\u91cf\u5408\u6210\u6750\u6599\uff08MiniGame@MaterialSynthesis@Begin\uff09",
+                      gui_.theme.dim, gui_.font_small);
+            y0 += 36;
+        } else if (tb_mg_kind_ == 2) {
+            CheckState ts = tb_mg_use_normal_token_ ? CheckState::On : CheckState::Off;
+            if (gui_.checkbox3("tb-mg-tok", { lx, y0, lx + 280, y0 + 24 },
+                               L"\u4e2d\u7ea7\u4fe1\u7269\u4e0d\u8db3\u65f6\u5141\u8bb8\u4f7f\u7528\u901a\u7528\u4fe1\u7269", ts)) {
+                tb_mg_use_normal_token_ = (ts == CheckState::On);
+            }
+            y0 += 36;
+        } else if (tb_mg_kind_ == 3) {
+            gui_.text(lx, y0 + 4, L"\u6d3b\u52a8\u540d\uff08\u53ef\u9009\uff09", gui_.theme.dim, gui_.font_small);
+            gui_.text_input("tb-mg-sf", { lx + 110, y0, rr, y0 + 26 }, tb_mg_secret_event_,
+                            L"\u9690\u79d8\u6218\u7ebf Custom task (MiniGame@SecretFront@Begin)");
+            y0 += 36;
+        } else {
+            gui_.text(lx, y0 + 4, L"\u5f55\u5c4f\u89c6\u9891", gui_.theme.dim, gui_.font_small);
+            gui_.text_input("tb-vid-path", { lx + 86, y0, rr - 72, y0 + 26 }, tb_video_path_,
+                            L"\u9009\u62e9 .mp4 / .mkv \u6218\u6597\u89c6\u9891\u8fdb\u884c\u8bc6\u522b");
+            if (gui_.button("tb-vid-pick", { rr - 66, y0, rr, y0 + 26 }, L"\u6d4f\u89c8", 0)) {
+                std::string p = browse_file_dialog(L"\u9009\u62e9\u6218\u6597\u89c6\u9891",
+                                                   L"Video\0*.mp4;*.mkv;*.avi\0All Files\0*.*\0");
+                if (!p.empty()) tb_video_path_ = p;
+            }
+            y0 += 36;
+        }
+
+        if (!busy) {
+            if (gui_.button("tb-mg-run", { lx, y0, lx + 130, y0 + 32 }, L"\u25b6 \u5f00\u59cb\u6267\u884c", 1, !id.empty())) {
+                if (tb_mg_kind_ == 4) {
+                    if (tb_video_path_.empty()) {
+                        set_notice("\u8bf7\u5148\u9009\u62e9\u89c6\u9891\u6587\u4ef6");
+                    } else {
+                        mj::Value p = mj::Value::object();
+                        p.set("filename", tb_video_path_);
+                        dispatch_tool("VideoRecognition", p, "\u89c6\u9891\u8bc6\u522b");
+                    }
+                } else {
+                    mj::Value p = mj::Value::object();
+                    const char* tname = tb_mg_kind_ == 0 ? "SS@Store@Begin"
+                                      : tb_mg_kind_ == 1 ? "MiniGame@MaterialSynthesis@Begin"
+                                      : tb_mg_kind_ == 2 ? "MiniGame@AutoRaisePotential@Begin"
+                                                         : "MiniGame@SecretFront@Begin";
+                    p.set("task_names", tname);
+                    if (tb_mg_kind_ == 0 && !tb_mg_shop_blacklist_.empty()) {
+                        p.set("event_shop_blacklist", tb_mg_shop_blacklist_);
+                    }
+                    if (tb_mg_kind_ == 2) {
+                        p.set("use_normal_token", tb_mg_use_normal_token_);
+                    }
+                    dispatch_tool("Custom", p, "\u5c0f\u6e38\u620f");
+                }
+            }
+        } else {
+            if (gui_.button("tb-mg-stop", { lx, y0, lx + 110, y0 + 32 }, L"\u23f9 \u505c\u6b62", 2)) {
+                post_action([this, id] { hub_->request_stop_executor(id); }, "\u505c\u6b62");
+            }
+        }
+    }
+}
+
+// ================================================================ 定时计划（MaaHub 统一调度）
+void MaaHubWindow::open_edit_schedule(const mj::Value* entry, const std::string& default_exec) {
+    edit_sched_exec_ids_.clear();
+    auto execs = hub_->executors();
+    for (const auto& e : execs) edit_sched_exec_ids_.push_back(e.id);
+    edit_sched_exec_idx_ = 0;
+
+    if (entry && entry->is_object()) {
+        edit_sched_id_ = entry->get_str("id", "");
+        std::string eid = entry->get_str("exec_id", "");
+        for (size_t i = 0; i < edit_sched_exec_ids_.size(); ++i) {
+            if (edit_sched_exec_ids_[i] == eid) { edit_sched_exec_idx_ = (int)i; break; }
+        }
+        edit_sched_enabled_ = entry->get_bool("enabled", true);
+        edit_sched_force_ = entry->get_bool("force_start", false);
+        edit_sched_close_ = entry->get_bool("close_game_after", false);
+        edit_sched_config_ = entry->get_str("config", "Default");
+        edit_sched_source_ = entry->get_str("source", "");
+        edit_sched_times_.clear();
+        if (auto* ts = entry->find("times"); ts && ts->is_array()) {
+            for (const auto& t : ts->items()) {
+                if (!edit_sched_times_.empty()) edit_sched_times_ += ", ";
+                edit_sched_times_ += t.as_string();
+            }
+        }
+        if (edit_sched_times_.empty()) {
+            int h = (int)entry->get_int("hour", 4), m = (int)entry->get_int("min", 0);
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%02d:%02d", h < 0 ? 4 : h, m < 0 ? 0 : m);
+            edit_sched_times_ = buf;
+        }
+        for (int i = 0; i < 7; ++i) edit_sched_wd_[i] = false;
+        if (auto* wd = entry->find("weekdays"); wd && wd->is_array() && !wd->items().empty()) {
+            for (const auto& d : wd->items()) {
+                int v = (int)d.as_int(-1);
+                if (v >= 0 && v < 7) edit_sched_wd_[v] = true;
+            }
+        } else {
+            for (int i = 0; i < 7; ++i) edit_sched_wd_[i] = true;
+        }
+    } else {
+        edit_sched_id_.clear();
+        for (size_t i = 0; i < edit_sched_exec_ids_.size(); ++i) {
+            if (edit_sched_exec_ids_[i] == default_exec) { edit_sched_exec_idx_ = (int)i; break; }
+        }
+        edit_sched_enabled_ = true;
+        edit_sched_times_ = "04:00";
+        for (int i = 0; i < 7; ++i) edit_sched_wd_[i] = true;
+        edit_sched_force_ = false;
+        edit_sched_close_ = false;
+        edit_sched_config_ = "Default";
+        edit_sched_source_ = "MaaHub";
+    }
+    show_edit_sched_ = true;
+}
+
+void MaaHubWindow::draw_edit_schedule_overlay() {
+    if (!show_edit_sched_) return;
+    RECT cl;
+    GetClientRect(hwnd_, &cl);
+    gui_.fill(cl, RGB(0x10, 0x10, 0x10));
+
+    const int W = 420, H = 344;
+    RECT card{ (cl.right - W) / 2, (cl.bottom - H) / 2, (cl.right + W) / 2, (cl.bottom + H) / 2 };
+    gui_.round_rect(card, gui_.theme.panel, gui_.theme.border, 6);
+    gui_.text(card.left + 16, card.top + 14,
+              edit_sched_id_.empty() ? L"\u65b0\u5efa\u5b9a\u65f6\u8ba1\u5212" : L"\u7f16\u8f91\u5b9a\u65f6\u8ba1\u5212",
+              gui_.theme.text, gui_.font_title);
+
+    int y = card.top + 46;
+    const int lx = card.left + 16, rx = card.left + 96, rw = card.right - 16;
+
+    std::vector<std::wstring> exec_labels;
+    auto execs = hub_->executors();
+    edit_sched_exec_ids_.clear();
+    for (const auto& e : execs) {
+        edit_sched_exec_ids_.push_back(e.id);
+        exec_labels.push_back(gui::widen((e.kind == "maa" ? "[MAA] " : "[End] ") + e.label));
+    }
+    if (exec_labels.empty()) exec_labels.push_back(L"\uff08\u65e0\u53ef\u7528\u6267\u884c\u5668\uff09");
+    if (edit_sched_exec_idx_ >= (int)exec_labels.size()) edit_sched_exec_idx_ = 0;
+
+    gui_.text(lx, y + 4, L"\u6267\u884c\u5668", gui_.theme.dim, gui_.font_small);
+    int ep = gui_.combo("edsch-exec", { rx, y, rw, y + 24 }, exec_labels, edit_sched_exec_idx_);
+    if (ep >= 0) edit_sched_exec_idx_ = ep;
+    y += 32;
+
+    CheckState es = edit_sched_enabled_ ? CheckState::On : CheckState::Off;
+    if (gui_.checkbox3("edsch-en", { rx, y, rw, y + 24 }, L"\u542f\u7528\u6b64\u5b9a\u65f6\u8ba1\u5212", es)) {
+        edit_sched_enabled_ = (es == CheckState::On);
+    }
+    y += 30;
+
+    gui_.text(lx, y + 4, L"\u89e6\u53d1\u65f6\u95f4", gui_.theme.dim, gui_.font_small);
+    gui_.text_input("edsch-times", { rx, y, rw, y + 24 }, edit_sched_times_,
+                    L"HH:MM\uff0c\u591a\u65f6\u6bb5\u9017\u53f7\u5206\u9694\uff0c\u5982 04:00, 16:00");
+    y += 32;
+
+    gui_.text(lx, y + 4, L"\u91cd\u590d\u661f\u671f", gui_.theme.dim, gui_.font_small);
+    {
+        const wchar_t* wnames[] = { L"\u65e5", L"\u4e00", L"\u4e8c", L"\u4e09", L"\u56db", L"\u4e94", L"\u516d" };
+        int bw = ((rw - rx) - 6 * 4) / 7;
+        for (int d = 0; d < 7; ++d) {
+            RECT wr{ rx + d * (bw + 4), y, rx + d * (bw + 4) + bw, y + 24 };
+            if (gui_.button(("edsch-wd-" + std::to_string(d)).c_str(), wr, wnames[d], edit_sched_wd_[d] ? 1 : 0)) {
+                edit_sched_wd_[d] = !edit_sched_wd_[d];
+            }
+        }
+    }
+    y += 34;
+
+    CheckState fs = edit_sched_force_ ? CheckState::On : CheckState::Off;
+    if (gui_.checkbox3("edsch-force", { rx, y, rw, y + 24 },
+                       L"\u5230\u70b9\u5f3a\u5236\u6267\u884c\uff08\u82e5\u6b63\u5728\u8fd0\u884c\u5219\u505c\u6b62\u5f53\u524d\u4efb\u52a1\uff09", fs)) {
+        edit_sched_force_ = (fs == CheckState::On);
+    }
+    y += 28;
+
+    CheckState cg = edit_sched_close_ ? CheckState::On : CheckState::Off;
+    if (gui_.checkbox3("edsch-close", { rx, y, rw, y + 24 },
+                       L"\u5b8c\u6210\u540e\u81ea\u52a8\u5173\u95ed\u6e38\u620f", cg)) {
+        edit_sched_close_ = (cg == CheckState::On);
+    }
+    y += 30;
+
+    gui_.text(lx, y + 4, L"\u914d\u7f6e\u5907\u6ce8", gui_.theme.dim, gui_.font_small);
+    gui_.text_input("edsch-cfg", { rx, y, rw, y + 24 }, edit_sched_config_, L"Default");
+
+    RECT ok_b{ card.right - 96, card.bottom - 40, card.right - 16, card.bottom - 14 };
+    RECT cancel_b{ card.right - 184, card.bottom - 40, card.right - 104, card.bottom - 14 };
+    gui_.flush_combo_popup();
+    if (gui_.button("edsch-cancel", cancel_b, L"\u53d6\u6d88", 0)) show_edit_sched_ = false;
+    if (gui_.button("edsch-ok", ok_b, L"\u4fdd\u5b58", 1, !edit_sched_exec_ids_.empty())) {
+        mj::Value times_arr = mj::Value::array();
+        std::string tok;
+        for (size_t i = 0; i <= edit_sched_times_.size(); ++i) {
+            char ch = (i < edit_sched_times_.size()) ? edit_sched_times_[i] : ',';
+            if (ch == ',' || ch == ';' || ch == ' ') {
+                if (!tok.empty()) {
+                    size_t col = tok.find(':');
+                    if (col != std::string::npos && col > 0 && col + 1 < tok.size()) {
+                        try {
+                            int h = std::stoi(tok.substr(0, col));
+                            int m = std::stoi(tok.substr(col + 1));
+                            if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+                                char buf[8];
+                                snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+                                times_arr.push(std::string(buf));
+                            }
+                        } catch (...) {}
+                    }
+                    tok.clear();
+                }
+            } else {
+                tok += ch;
+            }
+        }
+        if (times_arr.items().empty()) {
+            set_notice("\u65f6\u95f4\u683c\u5f0f\u65e0\u6548\uff0c\u8bf7\u8f93\u5165\u5982 04:00");
+        } else {
+            mj::Value entry = mj::Value::object();
+            if (!edit_sched_id_.empty()) entry.set("id", edit_sched_id_);
+            entry.set("exec_id", edit_sched_exec_ids_[edit_sched_exec_idx_]);
+            entry.set("enabled", edit_sched_enabled_);
+            entry.set("times", std::move(times_arr));
+            mj::Value wd = mj::Value::array();
+            for (int d = 0; d < 7; ++d) if (edit_sched_wd_[d]) wd.push((int64_t)d);
+            if (wd.items().empty()) for (int d = 0; d < 7; ++d) wd.push((int64_t)d);
+            entry.set("weekdays", std::move(wd));
+            entry.set("force_start", edit_sched_force_);
+            entry.set("close_game_after", edit_sched_close_);
+            entry.set("config", edit_sched_config_.empty() ? "Default" : edit_sched_config_);
+            entry.set("source", edit_sched_source_.empty() ? ("MaaHub:" + util::random_hex(3)) : edit_sched_source_);
+            show_edit_sched_ = false;
+            post_action([this, entry] {
+                hub_->upsert_schedule(entry);
+                refresh_snapshot();
+                set_notice("\u5b9a\u65f6\u8ba1\u5212\u5df2\u4fdd\u5b58");
+            }, "\u4fdd\u5b58\u5b9a\u65f6\u8ba1\u5212");
+        }
+    }
+}
+
+void MaaHubWindow::page_schedules(RECT content) {
+    mj::Value snap;
+    {
+        std::lock_guard<std::mutex> lk(snap_mtx_);
+        snap = snap_;
+    }
+
+    RECT bar{ content.left, content.top, content.right, content.top + 42 };
+    gui_.panel(bar);
+    int bx = bar.left + 10;
+    if (gui_.button("sched-new", { bx, bar.top + 7, bx + 104, bar.top + 34 }, L"\uff0b \u65b0\u5efa\u5b9a\u65f6", 1)) {
+        open_edit_schedule(nullptr, selected_exec_);
+    }
+    bx += 112;
+    int fh = gui_.option_strip("sched-filter", { bx, bar.top + 7, (std::min)((int)bar.right - 10, bx + 240), bar.top + 34 },
+                               { L"\u5168\u90e8", L"\u5df2\u542f\u7528", L"MAA", L"End" }, sched_filter_);
+    if (fh >= 0) sched_filter_ = fh;
+
+    int y = bar.bottom + 8;
+    {
+        std::string notice;
+        { std::lock_guard<std::mutex> lk(msg_mtx_); notice = core_msg_; }
+        if (!notice.empty()) {
+            gui_.text_clipped({ content.left + 4, y, content.right - 4, y + 18 },
+                              gui::widen(notice),
+                              notice.find("\u5931\u8d25") != std::string::npos ? gui_.theme.err : gui_.theme.ok,
+                              gui_.font_small);
+            y += 22;
+        }
+    }
+
+    RECT panel{ content.left, y, content.right, content.bottom };
+    gui_.panel(panel, L"\u23f0 MaaHub \u7edf\u4e00\u5b9a\u65f6\u8ba1\u5212\uff08\u8bed\u4e49\u5bf9\u9f50 Core \u5b9a\u65f6\u5668\uff1a\u5206\u949f\u7cbe\u786e\u89e6\u53d1\uff0c\u5fd9\u65f6\u8df3\u8fc7\uff09");
+
+    std::vector<mj::Value> rows;
+    if (auto* sc = snap.find("schedules"); sc && sc->is_object()) {
+        if (auto* ent = sc->find("entries"); ent && ent->is_array()) {
+            for (const auto& e : ent->items()) {
+                if (sched_filter_ == 1 && !e.get_bool("enabled", false)) continue;
+                if (sched_filter_ == 2 && e.get_str("kind", "") != "maa") continue;
+                if (sched_filter_ == 3 && e.get_str("kind", "") != "maaend") continue;
+                rows.push_back(e);
+            }
+        }
+    }
+
+    int ty = panel.top + 36;
+    int pw = panel.right - panel.left;
+    int cols[] = {
+        panel.left + pw * 2 / 100,
+        panel.left + pw * 8 / 100,
+        panel.left + pw * 34 / 100,
+        panel.left + pw * 52 / 100,
+        panel.left + pw * 66 / 100,
+        panel.left + pw * 81 / 100
+    };
+    const wchar_t* heads[] = { L"\u542f\u7528", L"\u6267\u884c\u5668", L"\u65f6\u6bb5", L"\u661f\u671f", L"\u7b56\u7565/\u4e0a\u6b21", L"\u64cd\u4f5c" };
+    for (int i = 0; i < 6; ++i) gui_.text(cols[i], ty, heads[i], gui_.theme.dim, gui_.font_small);
+    ty += 22;
+    gui_.fill({ panel.left + 12, ty - 4, panel.right - 12, ty - 3 }, gui_.theme.border);
+
+    auto fmt_weekdays = [](const mj::Value* wd) -> std::wstring {
+        if (!wd || !wd->is_array() || wd->items().size() >= 7 || wd->items().empty()) return L"\u6bcf\u5929";
+        bool has[7] = {};
+        for (const auto& d : wd->items()) {
+            int v = (int)d.as_int(-1);
+            if (v >= 0 && v < 7) has[v] = true;
+        }
+        if (has[1] && has[2] && has[3] && has[4] && has[5] && !has[0] && !has[6]) return L"\u5de5\u4f5c\u65e5";
+        static const wchar_t* kW[] = { L"\u65e5", L"\u4e00", L"\u4e8c", L"\u4e09", L"\u56db", L"\u4e94", L"\u516d" };
+        std::wstring out;
+        for (int i = 0; i < 7; ++i) {
+            if (!has[i]) continue;
+            if (!out.empty()) out += L" ";
+            out += kW[i];
+        }
+        return out.empty() ? L"\u6bcf\u5929" : out;
+    };
+
+    const int row_h = 38;
+    gui_.begin_scroll({ panel.left + 8, ty, panel.right - 8, panel.bottom - 10 },
+                      (int)rows.size() * row_h + 10, scroll_["sched-list"]);
+    int ry = ty + 4 - (int)scroll_["sched-list"];
+    if (rows.empty()) {
+        gui_.text(panel.left + 16, ry + 8,
+                  L"\u6682\u65e0\u5b9a\u65f6\u8ba1\u5212 \u2014 \u53ef\u70b9\u300c\uff0b \u65b0\u5efa\u5b9a\u65f6\u300d\u6216\u5728\u6838\u5fc3\u9875\u5bfc\u5165\u914d\u7f6e",
+                  gui_.theme.dim, gui_.font_small);
+    }
+    for (const auto& r : rows) {
+        if (ry + row_h < ty) { ry += row_h; continue; }
+        if (!gui_.row_fully_visible(ry, row_h)) break;
+        std::string sid = r.get_str("id", "");
+        bool en = r.get_bool("enabled", false);
+        CheckState st = en ? CheckState::On : CheckState::Off;
+        if (gui_.checkbox3(("sch-en-" + sid).c_str(), { cols[0], ry + 6, cols[0] + 28, ry + 28 }, L"", st)) {
+            bool nv = (st == CheckState::On);
+            post_action([this, sid, nv] {
+                hub_->toggle_schedule(sid, nv);
+                refresh_snapshot();
+            }, "\u5207\u6362\u5b9a\u65f6");
+        }
+
+        std::string kind = r.get_str("kind", "");
+        std::string lbl = r.get_str("label", r.get_str("exec_id", ""));
+        gui_.text_clipped({ cols[1], ry + 6, cols[2] - 8, ry + 28 },
+                          gui::widen((kind == "maa" ? "[MAA] " : "[End] ") + lbl),
+                          gui_.theme.text, gui_.font_small);
+
+        std::string tstr;
+        if (auto* ts = r.find("times"); ts && ts->is_array()) {
+            for (const auto& t : ts->items()) {
+                if (!tstr.empty()) tstr += ", ";
+                tstr += t.as_string();
+            }
+        }
+        if (tstr.empty()) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%02d:%02d", (int)r.get_int("hour", 0), (int)r.get_int("min", 0));
+            tstr = buf;
+        }
+        gui_.text_clipped({ cols[2], ry + 6, cols[3] - 8, ry + 28 },
+                          gui::widen(tstr), gui_.theme.primary, gui_.font_small);
+
+        gui_.text_clipped({ cols[3], ry + 6, cols[4] - 8, ry + 28 },
+                          fmt_weekdays(r.find("weekdays")), gui_.theme.dim, gui_.font_small);
+
+        std::string meta;
+        if (r.get_bool("force_start", false)) meta += "\u5f3a\u5236 ";
+        if (r.get_bool("close_game_after", false)) meta += "\u5173\u6e38 ";
+        if (r.get_str("last_run_status", "") == "skipped_busy") meta += "\u8df3\u8fc7 ";
+        std::string lr = r.get_str("last_run_date", "");
+        if (!lr.empty()) {
+            std::string lrt = r.get_str("last_run_time", "");
+            meta += lr.substr(lr.size() > 5 ? 5 : 0) + (lrt.empty() ? "" : (" " + lrt));
+        }
+        if (meta.empty()) meta = "\u2014";
+        gui_.text_clipped({ cols[4], ry + 6, cols[5] - 8, ry + 28 },
+                          gui::widen(meta), gui_.theme.dim, gui_.font_small);
+
+        int ax = cols[5];
+        int bw = ((panel.right - 12 - ax) - 8) / 3;
+        if (bw < 28) bw = 28;
+        if (gui_.button(("sch-run-" + sid).c_str(), { ax, ry + 4, ax + bw, ry + 28 }, L"\u8dd1", 0)) {
+            post_action([this, sid] {
+                bool ok = hub_->run_schedule_now(sid);
+                set_notice(ok ? "\u5df2\u89e6\u53d1\u5b9a\u65f6\u4efb\u52a1\u5e8f\u5217" : "\u65e0\u6cd5\u89e6\u53d1\uff08\u6267\u884c\u5668\u5fd9\u6216\u4efb\u52a1\u5217\u8868\u4e3a\u7a7a\uff09");
+            }, "\u6267\u884c\u5b9a\u65f6");
+        }
+        if (gui_.button(("sch-ed-" + sid).c_str(), { ax + bw + 4, ry + 4, ax + bw * 2 + 4, ry + 28 }, L"\u7f16", 0)) {
+            open_edit_schedule(&r);
+        }
+        if (gui_.button(("sch-del-" + sid).c_str(), { ax + bw * 2 + 8, ry + 4, ax + bw * 3 + 8, ry + 28 }, L"\u5220", 2)) {
+            post_action([this, sid] {
+                hub_->remove_schedule(sid);
+                refresh_snapshot();
+                set_notice("\u5df2\u5220\u9664\u5b9a\u65f6\u8ba1\u5212");
+            }, "\u5220\u9664\u5b9a\u65f6");
+        }
+        ry += row_h;
+        gui_.fill({ panel.left + 12, ry - 3, panel.right - 12, ry - 2 }, gui_.theme.row_alt);
+    }
+    gui_.end_scroll();
 }
 
 void MaaHubWindow::page_cores(RECT content) {
@@ -4442,47 +5417,75 @@ void MaaHubWindow::action_save_settings() {
     }, "保存设置");
 }
 
-void MaaHubWindow::action_import_config() {
-    // 安装路径选择器（Vista IFileDialog FOS_PICKFOLDERS；也允许直接选配置文件）
+std::string MaaHubWindow::browse_file_dialog(const wchar_t* title, const wchar_t* filter) {
+    wchar_t buf[MAX_PATH * 2] = { 0 };
+    OPENFILENAMEW ofn = { 0 };
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrTitle = title;
+    ofn.lpstrFilter = filter ? filter : L"JSON\0*.json\0All Files\0*.*\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&ofn)) return util::wide_to_utf8(buf);
+    return "";
+}
+
+std::string MaaHubWindow::browse_folder_or_config_dialog() {
     std::string path;
-    {
-        IFileDialog* dlg = nullptr;
-        HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
-                                      IID_PPV_ARGS(&dlg));
-        if (SUCCEEDED(hr)) {
-            DWORD opts = 0;
-            dlg->GetOptions(&opts);
-            // 只选文件夹；FOS_FILEMUSTEXIST 与 PICKFOLDERS 组合会禁止单选文件，去掉
-            dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST);
-            // 标题：选择 MAA / MaaEnd 安装目录（或直接选 gui.json / mxu-MaaEnd.json）
-            dlg->SetTitle(L"\u9009\u62e9 MAA / MaaEnd \u5b89\u88c5\u76ee\u5f55"
-                          L"\uff08\u6216\u76f4\u63a5\u9009 gui.json / mxu-MaaEnd.json\uff09");
-            if (!import_path_.empty()) {
-                std::wstring wpath = util::utf8_to_wide(import_path_);
-                IShellItem* si = nullptr;
-                if (SUCCEEDED(SHCreateItemFromParsingName(wpath.c_str(), nullptr,
-                                                          IID_PPV_ARGS(&si)))) {
-                    dlg->SetDefaultFolder(si);
-                    si->Release();
-                }
+    IFileDialog* dlg = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dlg));
+    if (SUCCEEDED(hr)) {
+        DWORD opts = 0;
+        dlg->GetOptions(&opts);
+        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST);
+        dlg->SetTitle(L"\u9009\u62e9 MAA / MaaEnd \u5b89\u88c5\u76ee\u5f55");
+        if (!import_path_.empty()) {
+            std::wstring wpath = util::utf8_to_wide(import_path_);
+            IShellItem* si = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(wpath.c_str(), nullptr,
+                                                      IID_PPV_ARGS(&si)))) {
+                dlg->SetDefaultFolder(si);
+                si->Release();
             }
-            hr = dlg->Show(hwnd_);
-            if (SUCCEEDED(hr)) {
-                IShellItem* res = nullptr;
-                if (SUCCEEDED(dlg->GetResult(&res))) {
-                    PWSTR wpath = nullptr;
-                    if (SUCCEEDED(res->GetDisplayName(SIGDN_FILESYSPATH, &wpath))) {
-                        path = util::wide_to_utf8(wpath);
-                        CoTaskMemFree(wpath);
-                    }
-                    res->Release();
-                }
-            }
-            dlg->Release();
         }
-        if (path.empty()) return;   // 用户取消或对话框失败
-        import_path_ = path;        // 记住本次位置
+        hr = dlg->Show(hwnd_);
+        if (SUCCEEDED(hr)) {
+            IShellItem* res = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&res))) {
+                PWSTR wpath = nullptr;
+                if (SUCCEEDED(res->GetDisplayName(SIGDN_FILESYSPATH, &wpath))) {
+                    path = util::wide_to_utf8(wpath);
+                    CoTaskMemFree(wpath);
+                }
+                res->Release();
+            }
+        }
+        dlg->Release();
     }
+    return path;
+}
+
+std::string MaaHubWindow::read_clipboard_utf8(HWND owner) {
+    std::string out;
+    if (!OpenClipboard(owner)) return out;
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    if (h) {
+        const wchar_t* p = (const wchar_t*)GlobalLock(h);
+        if (p) {
+            out = util::wide_to_utf8(p);
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+    return out;
+}
+
+void MaaHubWindow::action_import_config() {
+    std::string path = browse_folder_or_config_dialog();
+    if (path.empty()) return;
+    import_path_ = path;        // 记住本次位置
 
     HWND hwnd = hwnd_;
     post_action([this, hwnd, path] {

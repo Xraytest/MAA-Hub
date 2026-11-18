@@ -679,6 +679,12 @@ public:
         return ui;
     }
 
+    static std::string fetch_url(const std::string& url, int timeout_ms = 15000,
+                                 const AppSettings* settings = nullptr,
+                                 const std::vector<std::pair<std::string, std::string>>& headers = {}) {
+        return http_get(url, timeout_ms, settings, headers);
+    }
+
     // ---------------------------------------------------------------- 拉取核心
     // 下载 zip → 校验 sha256 → tar 解包 → 定位程序目录 → 登记为新核心（可设为默认）
     // progress: 0~100；返回核心 id（失败返回空）

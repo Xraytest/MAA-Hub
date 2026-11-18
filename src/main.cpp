@@ -411,25 +411,27 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
         if (!entries || !entries->is_array()) { printf("schedules=0\n"); return 0; }
         printf("schedules=%zu\n", entries->items().size());
         for (auto& e : entries->items()) {
-            std::string when;
-            if (e.get_str("kind", "") == "maaend") {
-                std::string days;
-                if (auto* w = e.find("weekdays"); w && w->is_array())
-                    for (auto& d : w->items()) {
-                        if (!days.empty()) days += ",";
-                        days += std::to_string(d.as_int(-1));
-                    }
-                std::string ts;
-                if (auto* t = e.find("times"); t && t->is_array())
-                    for (auto& x : t->items()) {
-                        if (!ts.empty()) ts += ",";
-                        ts += x.as_string();
-                    }
-                when = "wd=[" + days + "] times=[" + ts + "]";
-            } else {
-                when = "daily " + std::to_string(e.get_int("hour", -1)) + ":"
-                     + std::to_string(e.get_int("min", -1));
+            // 统一模型：两种 kind 都有 weekdays + times（normalize 保证）
+            std::string days;
+            if (auto* w = e.find("weekdays"); w && w->is_array())
+                for (auto& d : w->items()) {
+                    if (!days.empty()) days += ",";
+                    days += std::to_string(d.as_int(-1));
+                }
+            std::string ts;
+            if (auto* t = e.find("times"); t && t->is_array())
+                for (auto& x : t->items()) {
+                    if (!ts.empty()) ts += ",";
+                    ts += x.as_string();
+                }
+            if (ts.empty()) {
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%02d:%02d", (int)e.get_int("hour", -1),
+                         (int)e.get_int("min", -1));
+                ts = buf;
             }
+            std::string when = "wd=[" + days + "] times=[" + ts + "]";
+            if (e.get_bool("force_start", false)) when += " force";
             printf("%s\t%s\t%s\tenabled=%s\t%s\tlast=%s\n",
                    e.get_str("exec_id", "?").c_str(), e.get_str("kind", "?").c_str(),
                    e.get_str("label", "").c_str(),
@@ -439,35 +441,30 @@ static int run_cli(const std::vector<std::string>& args, const mj::Value& config
         return 0;
     }
     if (cmd == "sched-run") {
-        // 手动触发一条：--cli sched-run <exec_id> [<source>]；source 省略=该 exec 第一条
+        // 手动触发一条：--cli sched-run <schedule_id|exec_id> [source]；
+        // 参数是条目 id 时精确匹配；否则按 exec_id（+可选 source）取第一条。
+        // 统一走 run_schedule_now（含 close_game_after / force_start 语义），异步派发。
         std::string target = cli_arg(args, 1);
         std::string source = cli_arg(args, 2);
         mj::Value snap = hub.schedules_snapshot();
         auto* entries = snap.find("entries");
         if (!entries || !entries->is_array()) { printf("no schedules\n"); return 1; }
-        const mj::Value* found = nullptr;
+        std::string sid;
         for (auto& e : entries->items()) {
-            if (e.get_str("exec_id", "") != target) continue;
-            if (!source.empty() && e.get_str("source", "") != source) continue;
-            found = &e;
-            break;
+            if (!e.get_str("id", "").empty() && e.get_str("id", "") == target) { sid = target; break; }
+            if (e.get_str("exec_id", "") == target
+                && (source.empty() || e.get_str("source", "") == source)) {
+                sid = e.get_str("id", "");
+                break;
+            }
         }
-        if (!found) { printf("schedule not found: %s\n", target.c_str()); return 1; }
-        // 读该 exec 的任务串（一键长草选择）
-        mj::Value lists = mj::Value::object();
-        std::string content;
-        if (util::read_file(util::exe_dir() + "\\state\\task-lists.json", content))
-            mj::try_parse(content, lists);
-        auto* lst = lists.find(target);
-        std::vector<std::string> tasks;
-        if (lst && lst->is_array())
-            for (auto& t : lst->items()) if (t.is_string() && !t.as_string().empty())
-                tasks.push_back(t.as_string());
-        if (tasks.empty()) { printf("no task list for %s (set in GUI or import)\n", target.c_str()); return 1; }
-        printf("sched-run exec=%s tasks=%zu\n", target.c_str(), tasks.size());
-        std::string result = hub.run_task_sequence(target, tasks);
-        printf("SCHED %s\n", result.c_str());
-        return result == "done" ? 0 : 1;
+        if (sid.empty()) { printf("schedule not found: %s\n", target.c_str()); return 1; }
+        if (!hub.run_schedule_now(sid)) {
+            printf("sched-run failed (executor busy or empty task list)\n");
+            return 1;
+        }
+        printf("sched-run dispatched id=%s\n", sid.c_str());
+        return 0;
     }
     if (cmd == "sched-tick") {
         // 手动跑一次调度扫描（不等待 10s tick）；返回触发的条数
