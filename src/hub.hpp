@@ -258,18 +258,68 @@ public:
         }
         // shutdown 会等 worker 线程退出，而 worker 事件回调也要拿 mtx_，必须在锁外调用
         if (old) old->shutdown();
+        CoreManager::remove_tree(cores_->cores_root() + "\\executors\\" + id);
         return true;
     }
 
     bool update_executor(const std::string& id, const mj::Value& patch) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        auto it = executors_.find(id);
-        if (it == executors_.end()) return false;
-        if (patch.has("label")) it->second.label = patch.get_str("label", it->second.label);
-        if (patch.has("account_id")) it->second.account_id = patch.get_str("account_id", "");
-        if (patch.has("enabled")) it->second.enabled = patch.get_bool("enabled", true);
-        save_executors_locked();
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            auto it = executors_.find(id);
+            if (it == executors_.end()) return false;
+            if (patch.has("label")) it->second.label = patch.get_str("label", it->second.label);
+            if (patch.has("account_id")) it->second.account_id = patch.get_str("account_id", "");
+            if (patch.has("enabled")) it->second.enabled = patch.get_bool("enabled", true);
+            CoreInfo latest = cores_->default_core(it->second.kind);
+            if (!latest.id.empty()) it->second.core_id = latest.id;
+            it->second.config = build_worker_config(it->second);
+            save_executors_locked();
+        }
         return true;
+    }
+
+    void sync_executors_to_latest_core(const std::string& kind) {
+        CoreInfo latest = cores_->default_core(kind);
+        if (latest.id.empty() || latest.path.empty()) return;
+        std::vector<std::string> ids;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (const auto& kv : executors_) {
+                if (kv.second.kind == kind) ids.push_back(kv.first);
+            }
+        }
+        for (const auto& id : ids) {
+            std::shared_ptr<WorkerClient> old;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                auto it = executors_.find(id);
+                if (it == executors_.end()) continue;
+                old = it->second.worker;
+                it->second.worker.reset();
+            }
+            if (old) old->shutdown();
+            cores_->sync_executor_core(id, kind, /*force=*/true);
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                auto it = executors_.find(id);
+                if (it == executors_.end()) continue;
+                it->second.core_id = latest.id;
+                it->second.config = build_worker_config(it->second);
+                it->second.catalog = mj::Value::array();
+                it->second.catalog_ts = 0;
+            }
+        }
+        save_executors();
+        for (const auto& id : ids) {
+            spawn_worker(id);
+        }
+    }
+
+    bool ensure_worker(const std::string& id) {
+        if (auto w = worker_of(id); w && w->alive()) return true;
+        spawn_worker(id);
+        auto w = worker_of(id);
+        return w && w->alive();
     }
 
     // 覆盖某执行器的连接参数（mode / adb_path / touch_mode / mouse_method …）并重启其 worker
@@ -289,6 +339,21 @@ public:
 
     // ================================================================ 执行器操作
     bool connect_executor(const std::string& id) {
+        ExecutorEntry cur;
+        if (get_executor(id, cur) && cur.kind == "maa") {
+            std::string mode = cur.config.get_path_str("connect.mode", "win32");
+            std::string addr = cur.config.get_path_str("adb.address", "");
+            if (mode == "adb" && !addr.empty()) {
+                for (const auto& other : executors()) {
+                    if (other.id == id || other.kind != "maa") continue;
+                    if (other.config.get_path_str("connect.mode", "win32") != "adb") continue;
+                    if (other.config.get_path_str("adb.address", "") != addr) continue;
+                    if (!running_task_of(other.id).empty()) continue;
+                    if (worker_of(other.id)) disconnect_executor(other.id);
+                }
+            }
+        }
+        ensure_worker(id);
         auto w = worker_of(id);
         if (!w) return false;
         mj::Value r;
@@ -695,13 +760,11 @@ public:
             j.set("version", "");
             j.set("last_error", "");
             j.set("task_count", 0);
-            CoreInfo core;
-            if (!cores_->get(e.core_id, core) || core.path.empty()) {
-                core = cores_->default_core(e.kind);
-            }
+            CoreInfo core = cores_->default_core(e.kind);
             if (!core.id.empty()) {
                 j.set("core_name", core.name);
                 j.set("core_version", core.version);
+                j.set("core_dll_version", core.core_ver);
             }
             Account acc;
             if (!e.account_id.empty() && accounts_->get(e.account_id, acc)) {
@@ -765,13 +828,11 @@ public:
                 j.set("account_label", "");
                 j.set("daily_done_today", false);
             }
-            CoreInfo core;
-            if (!cores_->get(e.core_id, core) || core.path.empty()) {
-                core = cores_->default_core(e.kind);
-            }
+            CoreInfo core = cores_->default_core(e.kind);
             if (!core.id.empty()) {
                 j.set("core_name", core.name);
                 j.set("core_version", core.version);
+                j.set("core_dll_version", core.core_ver);
             }
             // 任务目录（后台线程查询，UI 只读快照，绝不阻塞渲染）
             j.set("catalog", executor_catalog(id, 0));
@@ -1106,8 +1167,10 @@ public:
                     if (ex.get_str("exec_id", "") + "\x1f" + ex.get_str("source", "") != key)
                         continue;
                     std::string lrd = ex.get_str("last_run_date", "");
+                    std::string lrt = ex.get_str("last_run_time", "");
                     ex = in;
                     if (!lrd.empty()) ex.set("last_run_date", lrd);
+                    if (!lrt.empty()) ex.set("last_run_time", lrt);
                     replaced = true;
                     break;
                 }
@@ -1140,11 +1203,28 @@ public:
         // 本地时间（wDayOfWeek 0=周日，直接对应 weekdays 约定；0=周日..6=周六）
         SYSTEMTIME st;
         GetLocalTime(&st);
-        char hh[3] = { 0, 0, 0 }, mm[3] = { 0, 0, 0 };
-        hh[0] = char('0' + st.wHour / 10);   hh[1] = char('0' + st.wHour % 10);
-        mm[0] = char('0' + st.wMinute / 10); mm[1] = char('0' + st.wMinute % 10);
-        std::string hhmm = std::string(hh) + ":" + mm;
+        const int cur_m = (int)st.wHour * 60 + (int)st.wMinute;
         std::string today = util::today_str();
+        auto match_slot = [&](int h, int m, std::string& slot_out) -> bool {
+            if (h < 0 || h > 23 || m < 0 || m > 59) return false;
+            const int sched_m = h * 60 + m;
+            if (cur_m < sched_m || cur_m - sched_m > 10) return false;
+            char buf[6];
+            snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+            slot_out = buf;
+            return true;
+        };
+        auto parse_hhmm = [](const std::string& s, int& h, int& m) -> bool {
+            size_t col = s.find(':');
+            if (col == std::string::npos || col == 0 || col + 1 >= s.size()) return false;
+            try {
+                h = std::stoi(s.substr(0, col));
+                m = std::stoi(s.substr(col + 1));
+                return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+            } catch (...) {
+                return false;
+            }
+        };
 
         // 任务序列：GUI 一键长草选择是唯一权威（state\task-lists.json）
         mj::Value lists = mj::Value::object();
@@ -1157,7 +1237,7 @@ public:
         }
 
         struct Fire { std::string exec_id; std::vector<std::string> tasks; };
-        struct Due { size_t idx; std::string key; };
+        struct Due { size_t idx; std::string key; std::string slot; };
         std::vector<Fire> fires;
         std::vector<Due> due;
         std::set<std::string> queued_execs;
@@ -1169,7 +1249,8 @@ public:
             const std::string exec_id = entry.get_str("exec_id", "");
             if (exec_id.empty() || !running_task_of(exec_id).empty()
                 || is_seq_running(exec_id)) continue; // 忙：跳过且不标记
-            // 到点判定
+            // 到点判定（含 10 分钟宽限窗口）
+            std::string matched_slot;
             if (entry.get_str("kind", "") == "maaend") {
                 auto* wd = entry.find("weekdays");
                 if (!wd || !wd->is_array()) continue;
@@ -1178,16 +1259,25 @@ public:
                     if (d.as_int(-1) == (int64_t)st.wDayOfWeek) { day_ok = true; break; }
                 if (!day_ok) continue;
                 auto* ts = entry.find("times");
-                bool time_hit = false;
-                if (ts && ts->is_array())
-                    for (auto& t : ts->items())
-                        if (t.as_string() == hhmm) { time_hit = true; break; }
-                if (!time_hit) continue;
+                const std::string lrd = entry.get_str("last_run_date", "");
+                const std::string lrt = entry.get_str("last_run_time", "");
+                if (ts && ts->is_array()) {
+                    for (auto& t : ts->items()) {
+                        int h = -1, m = -1;
+                        std::string cand;
+                        if (!parse_hhmm(t.as_string(), h, m) || !match_slot(h, m, cand)) continue;
+                        if (lrd == today && (lrt == cand || (lrt.empty() && cand == "07:30"))) continue;
+                        matched_slot = cand;
+                        break;
+                    }
+                }
+                if (matched_slot.empty()) continue;
             } else {   // maa：hour/min 单点
-                if (entry.get_int("hour", -1) != (int64_t)st.wHour
-                    || entry.get_int("min", -1) != (int64_t)st.wMinute) continue;
+                int h = (int)entry.get_int("hour", -1);
+                int m = (int)entry.get_int("min", -1);
+                if (!match_slot(h, m, matched_slot)) continue;
+                if (entry.get_str("last_run_date", "") == today) continue;   // 当天已触发
             }
-            if (entry.get_str("last_run_date", "") == today) continue;   // 当天已触发
             auto* lst = lists.find(exec_id);
             if (!lst || !lst->is_array() || lst->items().empty()) continue;
             std::vector<std::string> tasks;
@@ -1202,7 +1292,7 @@ public:
             if (!get_executor(exec_id, e) || !e.enabled) continue;
             if (stopping_) return 0;
             if (!worker_of(exec_id)) spawn_worker(exec_id);
-            due.push_back({ i, exec_id + "\x1f" + entry.get_str("source", "") });
+            due.push_back({ i, exec_id + "\x1f" + entry.get_str("source", ""), matched_slot });
             fires.push_back({ exec_id, std::move(tasks) });
         }
         if (fires.empty() || stopping_) return 0;
@@ -1217,8 +1307,10 @@ public:
                     if (d.idx >= arr.size()) continue;
                     mj::Value& e2 = arr[d.idx];
                     // 内容一致性检查：导入并发替换后索引可能错位
-                    if (e2.get_str("exec_id", "") + "\x1f" + e2.get_str("source", "") == d.key)
+                    if (e2.get_str("exec_id", "") + "\x1f" + e2.get_str("source", "") == d.key) {
                         e2.set("last_run_date", today);
+                        e2.set("last_run_time", d.slot);
+                    }
                 }
             }
         }
@@ -1450,15 +1542,49 @@ private:
         return exec_stop_flags_.count(exec_id) > 0;
     }
 
+    std::string device_key_for(const std::string& exec_id) const {
+        ExecutorEntry e;
+        if (!get_executor(exec_id, e)) return "unknown:" + exec_id;
+        if (e.kind == "maa" && e.config.get_path_str("connect.mode", "win32") == "adb") {
+            return "adb:" + e.config.get_path_str("adb.address", "default");
+        }
+        return "win32:" + e.kind;
+    }
+
+    std::shared_ptr<std::mutex> device_mutex_for(const std::string& exec_id) {
+        std::string key = device_key_for(exec_id);
+        std::lock_guard<std::mutex> lk(dev_mtx_map_lk_);
+        auto& ptr = dev_mtx_map_[key];
+        if (!ptr) ptr = std::make_shared<std::mutex>();
+        return ptr;
+    }
+
     void exec_worker(Plan plan) {
         std::string status = "done";
         std::string fail_reason;
+        bool had_step_error = false;
+        bool had_step_ok = false;
+
+        // 同一物理设备（如共用 127.0.0.1:16384 的多个 MAA 执行器或同一个 Win32 游戏）
+        // 按设备键序串行加锁执行，防止定时重叠时互抢账号/连接。
+        std::map<std::string, std::shared_ptr<std::mutex>> dev_locks;
+        for (const auto& step : plan.steps) {
+            std::string key = device_key_for(step.exec_id);
+            if (!dev_locks.count(key)) dev_locks[key] = device_mutex_for(step.exec_id);
+        }
+        std::vector<std::unique_lock<std::mutex>> held_locks;
+        held_locks.reserve(dev_locks.size());
+        for (auto& kv : dev_locks) held_locks.emplace_back(*kv.second);
+
         std::set<std::string> prepared;   // 每个执行器整串只准备一次
         for (auto& step : plan.steps) {
             if (stop_flag_ || stopping_ || is_exec_stopped(step.exec_id)) {
                 status = "stopped";
                 break;
             }
+            ExecutorEntry cur_exec;
+            get_executor(step.exec_id, cur_exec);
+            if (!worker_of(step.exec_id)) ensure_worker(step.exec_id);
             auto w = worker_of(step.exec_id);
             if (!w) {
                 set_task_result(step.exec_id, step.task, "error");
@@ -1466,78 +1592,121 @@ private:
                 break;
             }
             mj::Value st;
+            bool need_connect = false;
             if (w->call("status", mj::Value::object(), 15000, st)) {
-                if (st.get_str("conn", "") != "connected") {
-                    // 连不上就停在这里：后续任务同样依赖这个连接，跳过只会整串空跑
-                    if (!connect_executor(step.exec_id)) {
-                        set_task_result(step.exec_id, step.task, "error");
-                        status = "connect-failed";
-                        break;
-                    }
-                }
+                need_connect = (st.get_str("conn", "") != "connected");
             }
-            // MaaEnd 的 pretask（LaunchGamePC 等）要在第一段任务前跑：游戏没起来就拉起，
-            // 已在跑则适配器内部直接跳过。失败只记 trace，不阻断整串（窗口可能本来就在）。
+            // MaaEnd 的 pretask（LaunchGamePC 等）要在首次连接前跑：游戏没起来就先拉起，
+            // 已在跑则适配器内部直接跳过。失败只记 trace，不阻断连接尝试。
             if (prepared.insert(step.exec_id).second) {
                 mj::Value pr;
                 if (!w->call("prepare", mj::Value::object(), 360000, pr)) {
                     std::string why = pr.get_str("error", "");
                     util::trace("[prep] " + step.exec_id + " skipped " + why);
                 }
+                if (cur_exec.kind == "maa") need_connect = true;
             }
-            int64_t tid = run_on_executor(step.exec_id, step.task, step.params);
-            if (tid <= 0) {
-                set_task_result(step.exec_id, step.task, "error");
-                status = "failed";
-                break;
+            if (need_connect) {
+                // 连不上就停在这里：后续任务同样依赖这个连接，跳过只会整串空跑
+                if (!connect_executor(step.exec_id)) {
+                    set_task_result(step.exec_id, step.task, "error");
+                    status = "connect-failed";
+                    break;
+                }
             }
-            ExecutorEntry e;
-            if (get_executor(step.exec_id, e) && !e.account_id.empty()
-                && (step.task == "Award" || step.task == "DailyRewards")) {
-                accounts_->mark_daily_done(e.account_id);
-            }
-            // 轮询任务完成；stopping_ 时立即退出，避免 Hub 析构后仍访问成员
-            int idle_rounds = 0;
-            const double t0 = util::now_sec();
-            std::string run_state, run_error;
-            bool lost = false;
-            while (!stop_flag_ && !stopping_ && !is_exec_stopped(step.exec_id)) {
-                Sleep(500);
-                mj::Value s2;
-                if (!w->call("status", mj::Value::object(), 15000, s2)) {
-                    // worker 不再应答基本就是进程没了（核心崩在 DLL 里就是这样）；
-                    // 继续等只会把"这一步根本没跑成"读成最后一个 run_state 报成 done
-                    if (++idle_rounds > 3) {
-                        lost = true;
-                        set_task_result(step.exec_id, step.task, "error");
-                        status = "failed";
-                        fail_reason = step.task + ": executor 无响应（worker 可能已崩溃）";
+
+            const int max_attempts = (step.task == "StartUp") ? 2 : 1;
+            bool step_ok = false;
+            bool fatal = false;
+            std::string step_err;
+            for (int attempt = 0; attempt < max_attempts; ++attempt) {
+                if (attempt > 0) {
+                    util::trace("[exec] StartUp failed on first attempt for " + step.exec_id + ", retrying once");
+                    if (!connect_executor(step.exec_id)) {
+                        step_err = "StartUp: reconnect failed before retry";
+                        fatal = true;
                         break;
                     }
-                    continue;
                 }
-                run_state = s2.get_str("run", "idle");
-                run_error = s2.get_str("last_error", "");
-                if (run_state == "running" || run_state == "stopping") {
-                    idle_rounds = 0;
-                    continue;
+                int64_t tid = run_on_executor(step.exec_id, step.task, step.params);
+                if (tid <= 0) {
+                    step_err = step.task + ": 启动失败";
+                    if (step.task == "StartUp" && attempt + 1 < max_attempts) continue;
+                    if (step.task == "StartUp") fatal = true;
+                    break;
                 }
-                // append 之后 MaaCore 要过一会儿才进入 running：首轮就判完成会让
-                // 下一步在"上一个仍在跑"时被 AsstAppendTask 拒绝，整串 failed
-                if (util::now_sec() - t0 >= 2.0 && ++idle_rounds >= 2) break;
-            }
-            if (stop_flag_ || stopping_ || is_exec_stopped(step.exec_id)) {
-                status = "stopped";
+                ExecutorEntry e;
+                if (get_executor(step.exec_id, e) && !e.account_id.empty()
+                    && (step.task == "Award" || step.task == "DailyRewards")) {
+                    accounts_->mark_daily_done(e.account_id);
+                }
+                // 轮询任务完成；stopping_ 时立即退出，避免 Hub 析构后仍访问成员
+                int idle_rounds = 0;
+                const double t0 = util::now_sec();
+                std::string run_state, run_error;
+                bool lost = false;
+                while (!stop_flag_ && !stopping_ && !is_exec_stopped(step.exec_id)) {
+                    Sleep(500);
+                    mj::Value s2;
+                    if (!w->call("status", mj::Value::object(), 15000, s2)) {
+                        // worker 不再应答基本就是进程没了（核心崩在 DLL 里就是这样）；
+                        // 继续等只会把"这一步根本没跑成"读成最后一个 run_state 报成 done
+                        if (++idle_rounds > 3) {
+                            lost = true;
+                            step_err = step.task + ": executor 无响应（worker 可能已崩溃）";
+                            break;
+                        }
+                        continue;
+                    }
+                    run_state = s2.get_str("run", "idle");
+                    run_error = s2.get_str("last_error", "");
+                    if (run_state == "running" || run_state == "stopping") {
+                        idle_rounds = 0;
+                        continue;
+                    }
+                    // append 之后 MaaCore 要过一会儿才进入 running：首轮就判完成会让
+                    // 下一步在"上一个仍在跑"时被 AsstAppendTask 拒绝，整串 failed
+                    if (util::now_sec() - t0 >= 2.0 && ++idle_rounds >= 2) break;
+                }
+                if (stop_flag_ || stopping_ || is_exec_stopped(step.exec_id)) {
+                    status = "stopped";
+                    fatal = true;
+                    break;
+                }
+                if (lost) {
+                    fatal = true;
+                    break;
+                }
+                // 适配器把失败写在 run 里；不读它就会把"这一步根本没跑成"报成 done
+                if (run_state == "failed") {
+                    step_err = step.task + ": " + run_error;
+                    if (step.task == "StartUp" && attempt + 1 < max_attempts) continue;
+                    if (step.task == "StartUp") fatal = true;
+                    break;
+                }
+                step_ok = true;
                 break;
             }
-            // 适配器把失败写在 run 里；不读它就会把"这一步根本没跑成"报成 done
-            if (!lost && run_state == "failed") {
+            if (status == "stopped") break;
+            if (!step_ok) {
                 set_task_result(step.exec_id, step.task, "error");
-                status = "failed";
-                fail_reason = step.task + ": " + run_error;
-                break;
+                if (!step_err.empty()) {
+                    if (!fail_reason.empty()) fail_reason += "; ";
+                    fail_reason += step_err;
+                }
+                if (fatal) {
+                    status = "failed";
+                    break;
+                }
+                util::trace("[exec] step failed but continuing sequence: " + step.exec_id + " " + step.task + " (" + step_err + ")");
+                had_step_error = true;
+                continue;
             }
+            had_step_ok = true;
             set_task_result(step.exec_id, step.task, "ok");
+        }
+        if (status == "done" && had_step_error) {
+            status = had_step_ok ? "partial" : "failed";
         }
         if (stop_flag_ || stopping_) status = "stopped";
         for (auto& s : plan.steps) {
@@ -1601,14 +1770,11 @@ private:
     }
 
     mj::Value build_worker_config(const ExecutorEntry& e) const {
-        CoreInfo core;
-        // 绑定的核心可能已被删除：回退到该类型的默认核心（保证可用性）
-        if (!cores_->get(e.core_id, core) || core.path.empty()) {
-            core = cores_->default_core(e.kind);
-        }
+        CoreInfo core = cores_->default_core(e.kind);
+        std::string exec_dir = cores_->sync_executor_core(e.id, e.kind);
         mj::Value wcfg = mj::Value::object();
         wcfg.set("exec_id", e.id);   // maa 适配器据此隔离 AsstSetUserDir 日志目录
-        wcfg.set("install_dir", core.path);
+        wcfg.set("install_dir", exec_dir.empty() ? core.path : exec_dir);
         wcfg.set("display_name", e.label);
         wcfg.set("game_window_class", "UnityWndClass");
         wcfg.set("game_window_title_regex", e.kind == "maa" ? "Arknights" : "Endfield");
@@ -1760,13 +1926,25 @@ private:
         if (!util::read_file(util::exe_dir() + "\\state\\executors.json", content)) return;
         mj::Value v;
         if (!mj::try_parse(content, v)) return;
+        bool healed = false;
         if (auto* arr = v.find("executors"); arr && arr->is_array()) {
             for (auto& e : arr->items()) {
                 ExecutorEntry entry = ExecutorEntry::from_json(e);
+                std::string fixed = util::fix_mojibake(entry.label);
+                if (fixed != entry.label) {
+                    entry.label = fixed;
+                    healed = true;
+                }
+                CoreInfo latest = cores_->default_core(entry.kind);
+                if (!latest.id.empty() && entry.core_id != latest.id) {
+                    entry.core_id = latest.id;
+                    healed = true;
+                }
                 entry.config = build_worker_config(entry);
                 executors_[entry.id] = entry;
             }
         }
+        if (healed) save_executors_locked();
     }
 
     // 调用方已持有 mtx_ 时用这个：save_executors 内部还会再加一次锁，
@@ -1872,6 +2050,8 @@ private:
     mutable std::mutex sched_mtx_;
     uint64_t last_sched_save_ = 0;
     std::mutex sched_save_mtx_;
+    mutable std::mutex dev_mtx_map_lk_;
+    std::map<std::string, std::shared_ptr<std::mutex>> dev_mtx_map_;
 };
 
 } // namespace hub

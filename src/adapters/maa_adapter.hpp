@@ -93,8 +93,36 @@ public:
 
     // ------------------------------------------------------------ 连接
     bool connect() override {
-        if (!handle_) { st_.last_error = "not loaded"; return false; }
-        st_.conn = "connecting";
+        void* old = nullptr;
+        bool need_recreate = false;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            if (!handle_) { st_.last_error = "not loaded"; return false; }
+            if (st_.conn != "unknown") {
+                old = handle_;
+                handle_ = nullptr;
+                need_recreate = true;
+            }
+            st_.conn = "connecting";
+        }
+        if (need_recreate) {
+            if (old) {
+                fn_.AsstStop(old);
+                fn_.AsstDestroy(old);
+            }
+            {
+                std::lock_guard<std::mutex> lk(ev_mtx_);
+                events_.clear();
+            }
+            void* fresh = cb_ ? fn_.AsstCreateEx((void*)cb_, (void*)this) : nullptr;
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            handle_ = fresh;
+            if (!handle_) {
+                st_.conn = "failed";
+                st_.last_error = "AsstCreateEx returned null on reconnect";
+                return false;
+            }
+        }
         std::string mode = cfg_.get_path_str("connect.mode", "win32");
         if (mode == "adb") {
             std::string adb = cfg_.get_path_str("adb.adb_path", "");
@@ -211,10 +239,31 @@ public:
     }
 
     void disconnect() override {
-        // r24：原实现只改状态字符串。AsstApi 没有单连接断开接口，这里至少
-        // 停掉正在执行的任务链；实例统一在 unload() 里 AsstDestroy 回收。
-        if (handle_) fn_.AsstStop(handle_);
-        st_.conn = "disconnected";
+        // 停止当前任务链并销毁/重建 AsstHandle，彻底关闭 MaaTouch adb shell 子进程，
+        // 避免多个 MAA 执行器同时占用同一模拟器 ADB 的 MaaTouch 通道。
+        void* old = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            old = handle_;
+            handle_ = nullptr;
+            st_.conn = "disconnected";
+            st_.ctrl_hwnd = 0;
+            st_.run = "idle";
+            chain_err_ = false;
+        }
+        if (old) {
+            fn_.AsstStop(old);
+            fn_.AsstDestroy(old);
+        }
+        {
+            std::lock_guard<std::mutex> lk(ev_mtx_);
+            events_.clear();
+        }
+        void* fresh = cb_ ? fn_.AsstCreateEx((void*)cb_, (void*)this) : nullptr;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            handle_ = fresh;
+        }
     }
 
     bool is_connected() override {
@@ -234,11 +283,16 @@ public:
             return false;
         }
         if (!fn_.AsstStart(handle_)) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
             st_.last_error = "AsstStart failed";
             return false;
         }
-        st_.run = "running";
-        chain_err_ = false;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.run = "running";
+            st_.last_error.clear();
+            chain_err_ = false;
+        }
         out = tid;
         return true;
     }
@@ -259,7 +313,7 @@ public:
         bool ctrl_alive = handle_ && fn_.AsstConnected && (fn_.AsstConnected(handle_) != 0);
         double now = util::now_sec();
         bool need_probe = false;
-        if (cfg_.get_path_str("connect.mode", "win32") == "win32") {
+        {
             std::lock_guard<std::mutex> lk(st_mtx_);
             need_probe = (now - last_win_probe_) >= 1.0;
         }
@@ -267,10 +321,14 @@ public:
         std::string win_title;
         if (need_probe) {
             util::WindowInfo wi;
-            win_alive = util::find_window(
-                cfg_.get_str("game_window_class", "UnityWndClass"),
-                cfg_.get_str("game_window_title_regex", "Arknights"), wi);
-            if (win_alive) win_title = util::window_title(wi.hwnd);
+            if (cfg_.get_path_str("connect.mode", "win32") == "win32") {
+                win_alive = util::find_window(
+                    cfg_.get_str("game_window_class", "UnityWndClass"),
+                    cfg_.get_str("game_window_title_regex", "Arknights"), wi);
+            } else {
+                win_alive = util::find_emulator_window(wi) || ctrl_alive;
+            }
+            if (win_alive && wi.hwnd) win_title = util::window_title(wi.hwnd);
         }
         std::lock_guard<std::mutex> lk(st_mtx_);
         if (need_probe) {

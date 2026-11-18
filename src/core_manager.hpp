@@ -30,7 +30,8 @@ struct CoreInfo {
     std::string kind;         // maa | maaend
     std::string name;         // 显示名，如 "MAA 官服核心"
     std::string path;         // 程序目录
-    std::string version;      // 探测到的版本
+    std::string version;      // 发行包/资源版本（MAA: MaaCore 版本; MaaEnd: interface.json 版本）
+    std::string core_ver;     // 底层核心 DLL 版本（MaaCore Ver / MaaEnd Core Ver）
     std::string source;       // adopt | download | manual
     std::string release_tag;  // 来源 release tag（下载安装时记录，版本比较以此为准）
     double created_at = 0;
@@ -44,6 +45,7 @@ struct CoreInfo {
         v.set("name", name);
         v.set("path", path);
         v.set("version", version);
+        v.set("core_ver", core_ver);
         v.set("source", source);
         v.set("release_tag", release_tag);
         v.set("created_at", created_at);
@@ -55,9 +57,10 @@ struct CoreInfo {
         CoreInfo c;
         c.id = v.get_str("id", "");
         c.kind = v.get_str("kind", "");
-        c.name = v.get_str("name", "");
+        c.name = util::fix_mojibake(v.get_str("name", ""));
         c.path = v.get_str("path", "");
         c.version = v.get_str("version", "");
+        c.core_ver = v.get_str("core_ver", "");
         c.source = v.get_str("source", "manual");
         c.release_tag = v.get_str("release_tag", "");
         c.created_at = v.get_int("created_at", 0);
@@ -94,6 +97,7 @@ public:
         : dir_(std::move(state_dir)), cores_root_(std::move(cores_root)) {
         util::ensure_dir(cores_root_);
         if (!load()) rebuild_from_cores_dir();
+        dedup_and_enrich();
     }
 
     // 核心根目录（UI 展示用）
@@ -131,6 +135,22 @@ public:
     }
 
     static void remove_tree(const std::string& path) {
+        if (path.empty() || !util::dir_exists(path)) return;
+        // 先解除顶层目录联接（junction），避免 SHFileOperationW 误删共享目录内容或失败
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(util::utf8_to_wide(path + "\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                std::wstring nm = fd.cFileName;
+                if (nm == L"." || nm == L"..") continue;
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    std::wstring sub = util::utf8_to_wide(path) + L"\\" + nm;
+                    RemoveDirectoryW(sub.c_str());
+                }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
         std::wstring p = util::utf8_to_wide(path);
         // SHFileOperation 需要双 null 结尾
         std::vector<wchar_t> buf(p.begin(), p.end());
@@ -140,8 +160,190 @@ public:
         op.wFunc = FO_DELETE;
         op.pFrom = buf.data();
         op.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_SILENT;
-    const int fop_rc = SHFileOperationW(&op);   // r24：失败不再无声吞掉
-    if (fop_rc) util::trace("remove_tree rc=" + std::to_string(fop_rc) + " path=" + path);
+        const int fop_rc = SHFileOperationW(&op);   // r24：失败不再无声吞掉
+        if (fop_rc) util::trace("remove_tree rc=" + std::to_string(fop_rc) + " path=" + path);
+    }
+
+    static bool create_dir_junction(const std::string& link_path, const std::string& target_path) {
+        std::wstring wlink = util::utf8_to_wide(link_path);
+        std::wstring wtgt = util::utf8_to_wide(target_path);
+        if (util::dir_exists(link_path)) RemoveDirectoryW(wlink.c_str());
+        std::wstring cmd = L"cmd.exe /c mklink /J \"" + wlink + L"\" \"" + wtgt + L"\"";
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> cmdv(cmd.begin(), cmd.end());
+        cmdv.push_back(L'\0');
+        if (!CreateProcessW(nullptr, cmdv.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            return false;
+        }
+        WaitForSingleObject(pi.hProcess, 5000);
+        DWORD ec = 1;
+        GetExitCodeProcess(pi.hProcess, &ec);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return ec == 0 && util::dir_exists(link_path);
+    }
+
+    static bool hardlink_or_copy_tree(const std::string& src, const std::string& dst) {
+        util::ensure_dir(dst);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(util::utf8_to_wide(src + "\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        bool ok = true;
+        do {
+            std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            std::string s = src + "\\" + util::wide_to_utf8(name);
+            std::string d = dst + "\\" + util::wide_to_utf8(name);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!hardlink_or_copy_tree(s, d)) { ok = false; break; }
+            } else {
+                std::wstring ws = util::utf8_to_wide(s);
+                std::wstring wd = util::utf8_to_wide(d);
+                DeleteFileW(wd.c_str());
+                if (!CreateHardLinkW(wd.c_str(), ws.c_str(), nullptr)) {
+                    if (!CopyFileW(ws.c_str(), wd.c_str(), FALSE)) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        return ok;
+    }
+
+    void reload() {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            cores_.clear();
+            if (!load()) rebuild_from_cores_dir();
+        }
+        dedup_and_enrich();
+    }
+
+    // 严格只保留 MAA Core 与 MaaEnd Core 各 1 份，并补全 version / core_ver
+    void dedup_and_enrich() {
+        std::vector<CoreInfo> snapshot;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            snapshot = cores_;
+        }
+        std::vector<CoreInfo> next;
+        for (const char* k : { "maa", "maaend" }) {
+            CoreInfo chosen;
+            for (const auto& c : snapshot) {
+                if (c.kind != k) continue;
+                if (c.is_default || chosen.id.empty()) chosen = c;
+            }
+            if (chosen.id.empty()) continue;
+            chosen.is_default = true;
+            chosen.name = (std::string(k) == "maa") ? "MAA Core" : "MaaEnd Core";
+            if (std::string(k) == "maaend") {
+                std::string fv = read_version_from_files("maaend", chosen.path);
+                if (!fv.empty()) chosen.version = fv;
+                if (chosen.core_ver.empty()) chosen.core_ver = probe_dll_version("maaend", chosen.path);
+            } else {
+                if (chosen.version.empty()) chosen.version = probe_version("maa", chosen.path);
+                if (chosen.core_ver.empty()) {
+                    chosen.core_ver = chosen.version.empty()
+                        ? probe_dll_version("maa", chosen.path) : chosen.version;
+                }
+            }
+            next.push_back(std::move(chosen));
+        }
+        bool changed = (next.size() != snapshot.size());
+        if (!changed) {
+            for (size_t i = 0; i < next.size(); ++i) {
+                if (next[i].id != snapshot[i].id || next[i].name != snapshot[i].name
+                    || next[i].version != snapshot[i].version || next[i].core_ver != snapshot[i].core_ver
+                    || next[i].is_default != snapshot[i].is_default) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if (changed) {
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                cores_ = std::move(next);
+            }
+            save();
+        }
+    }
+
+    // 为执行器同步复制一份最新核心到 <cores_root>\executors\<exec_id>
+    // （DLL/agent 目录硬链接或复制隔离；大型资源目录用目录联接共享以省盘且保持每实例独立目录）
+    std::string sync_executor_core(const std::string& exec_id, const std::string& kind, bool force = false) {
+        CoreInfo c = default_core(kind);
+        if (c.id.empty() || c.path.empty() || exec_id.empty()) return "";
+        std::string dst = cores_root_ + "\\executors\\" + exec_id;
+        std::string marker_path = dst + "\\.core_sync";
+        std::string want = c.id + "|" + c.version + "|" + c.core_ver + "|" + c.path;
+        std::string cur;
+        if (!force && util::read_file(marker_path, cur) && cur == want && valid_core_dir(kind, dst)) {
+            return dst;
+        }
+        if (util::dir_exists(dst)) {
+            WIN32_FIND_DATAW fd;
+            HANDLE h = FindFirstFileW(util::utf8_to_wide(dst + "\\*").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    std::wstring nm = fd.cFileName;
+                    if (nm == L"." || nm == L"..") continue;
+                    std::string sub_u8 = util::wide_to_utf8(nm);
+                    if (sub_u8 == "cache" || sub_u8 == "debug") continue;
+                    std::string full = dst + "\\" + sub_u8;
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                            RemoveDirectoryW(util::utf8_to_wide(full).c_str());
+                        } else {
+                            remove_tree(full);
+                        }
+                    } else {
+                        DeleteFileW(util::utf8_to_wide(full).c_str());
+                    }
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+        }
+        util::ensure_dir(dst);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(util::utf8_to_wide(c.path + "\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return c.path;
+        do {
+            std::wstring nm = fd.cFileName;
+            if (nm == L"." || nm == L"..") continue;
+            std::string name = util::wide_to_utf8(nm);
+            if (name == "cache" || name == "debug" || name == "logs"
+                || name == ".tmp" || name == ".core_sync") {
+                continue;
+            }
+            std::string s = c.path + "\\" + name;
+            std::string d = dst + "\\" + name;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (name == "maafw" || name == "agent") {
+                    hardlink_or_copy_tree(s, d);
+                } else {
+                    if (!create_dir_junction(d, s)) hardlink_or_copy_tree(s, d);
+                }
+            } else {
+                std::wstring ws = util::utf8_to_wide(s);
+                std::wstring wd = util::utf8_to_wide(d);
+                DeleteFileW(wd.c_str());
+                if (!CreateHardLinkW(wd.c_str(), ws.c_str(), nullptr)) {
+                    CopyFileW(ws.c_str(), wd.c_str(), FALSE);
+                }
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        if (!valid_core_dir(kind, dst)) return c.path;
+        util::write_file(marker_path, want);
+        return dst;
     }
 
 
@@ -193,19 +395,21 @@ public:
         c.id = "core-" + util::random_hex(8);
         c.kind = kind;
         c.path = dest;
-        c.name = (kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + (" " + version);
+        c.name = (kind == "maa" ? "MAA Core" : "MaaEnd Core");
         c.source = "import";
         c.created_at = util::now_sec();
         c.version = version;
+        c.core_ver = probe_dll_version(kind, dest);
+        c.is_default = true;
         {
             std::lock_guard<std::mutex> lk(mtx_);
-            bool has_default = std::any_of(cores_.begin(), cores_.end(), [&](const CoreInfo& x) {
-                return x.kind == kind && x.is_default;
-            });
-            c.is_default = !has_default;
+            for (auto& x : cores_) {
+                if (x.kind == kind) x.is_default = false;
+            }
             cores_.push_back(c);
         }
         save();
+        dedup_and_enrich();
         return c.id;
     }
 
@@ -237,8 +441,8 @@ public:
     }
 
     // ---------------------------------------------------------------- 版本探测
-    // 优先用子进程加载 DLL 查询（权威）；失败回退到接口文件
-    static std::string probe_version(const std::string& kind, const std::string& path) {
+    // 子进程加载 DLL 查询真实版本（MaaCore Ver / MaaEnd Core Ver），失败返回空串
+    static std::string probe_dll_version(const std::string& kind, const std::string& path) {
         wchar_t exe[MAX_PATH];
         GetModuleFileNameW(nullptr, exe, MAX_PATH);
         std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --core-version "
@@ -287,6 +491,17 @@ public:
                 CloseHandle(rp);
             }
         }
+        return "";
+    }
+
+    static std::string probe_version(const std::string& kind, const std::string& path) {
+        if (kind == "maaend") {
+            std::string fv = read_version_from_files(kind, path);
+            if (!fv.empty()) return fv;
+            return probe_dll_version(kind, path);
+        }
+        std::string dv = probe_dll_version(kind, path);
+        if (!dv.empty()) return dv;
         return read_version_from_files(kind, path);
     }
 
@@ -606,18 +821,20 @@ public:
         c.kind = kind;
         c.path = dest;
         c.name = display_name.empty()
-            ? (std::string(kind == "maa" ? "MAA 核心" : "MaaEnd 核心") + " " + version)
+            ? (std::string(kind == "maa" ? "MAA Core" : "MaaEnd Core"))
             : display_name;
         c.source = "download";
         c.release_tag = release_tag;
         c.created_at = util::now_sec();
         c.version = version;
+        c.core_ver = probe_dll_version(kind, dest);
         {
             std::lock_guard<std::mutex> lk(self.mtx_);
             self.cores_.push_back(c);
         }
         self.save();
         if (set_default) self.set_default(c.id);
+        self.dedup_and_enrich();
         if (progress) *progress = 100;
         set_stage("完成");
         // 清掉 .tmp（zip + 解包副本，通常 >1GB），避免白占磁盘
@@ -735,9 +952,15 @@ private:
         if (!util::read_file(dir_ + "\\cores.json", content)) return false;
         mj::Value v;
         if (!mj::try_parse(content, v)) return false;
+        bool healed = false;
         if (auto* arr = v.find("cores"); arr && arr->is_array()) {
-            for (auto& c : arr->items()) cores_.push_back(CoreInfo::from_json(c));
+            for (auto& c : arr->items()) {
+                CoreInfo ci = CoreInfo::from_json(c);
+                if (ci.name != c.get_str("name", "")) healed = true;
+                cores_.push_back(std::move(ci));
+            }
         }
+        if (healed) save();
         return true;
     }
 

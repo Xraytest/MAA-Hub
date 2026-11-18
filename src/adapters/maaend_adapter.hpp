@@ -925,6 +925,67 @@ public:
         return def;
     }
 
+    bool parse_fit_window(int& fw, int& fh) const {
+        std::string fit = cfg_.get_path_str("connect.fit_window", "1280x720");
+        const size_t xp = fit.find('x');
+        fw = atoi(fit.c_str());
+        fh = xp == std::string::npos ? 0 : atoi(fit.c_str() + xp + 1);
+        return fit != "off" && fit != "none" && fw > 0 && fh > 0;
+    }
+
+    static void ensure_endfield_registry_resolution(int w, int h) {
+        if (w <= 0 || h <= 0) return;
+        HKEY hk = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Hypergryph\\Endfield",
+                            0, nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr) != ERROR_SUCCESS) {
+            return;
+        }
+        auto set_dword = [&](const wchar_t* name, DWORD val) {
+            RegSetValueExW(hk, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
+        };
+        set_dword(L"video_resolution_width_h583690364", (DWORD)w);
+        set_dword(L"video_resolution_height_h2517654917", (DWORD)h);
+        set_dword(L"Screenmanager Resolution Width_h182942802", (DWORD)w);
+        set_dword(L"Screenmanager Resolution Height_h2627697771", (DWORD)h);
+        set_dword(L"Screenmanager Resolution Window Width_h2524650974", (DWORD)w);
+        set_dword(L"Screenmanager Resolution Window Height_h1684712807", (DWORD)h);
+        set_dword(L"Screenmanager Fullscreen mode_h3630240806", 3u);
+        set_dword(L"Screenmanager Resolution Use Native_h1405027254", 0u);
+        RegCloseKey(hk);
+    }
+
+    void check_and_refit_window() const {
+        int fw = 0, fh = 0;
+        if (!parse_fit_window(fw, fh)) return;
+        HWND hwnd = nullptr;
+        double now = util::now_sec();
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            if (st_.conn != "connected" || st_.ctrl_hwnd == 0) return;
+            if ((now - last_refit_check_) < 1.0) return;
+            hwnd = (HWND)(intptr_t)st_.ctrl_hwnd;
+            last_refit_check_ = now;
+        }
+        RECT cr{};
+        if (!IsWindow(hwnd) || !GetClientRect(hwnd, &cr)) return;
+        const int cur_w = (int)(cr.right - cr.left);
+        const int cur_h = (int)(cr.bottom - cr.top);
+        if (cur_w == fw && cur_h == fh) return;
+
+        ensure_endfield_registry_resolution(fw, fh);
+        int cw = 0, ch = 0;
+        const bool fitted = util::fit_client_size(hwnd, fw, fh, &cw, &ch);
+        util::trace("maaend auto-refit client want=" + std::to_string(fw) + "x" + std::to_string(fh)
+                    + " was=" + std::to_string(cur_w) + "x" + std::to_string(cur_h)
+                    + " actual=" + std::to_string(cw) + "x" + std::to_string(ch)
+                    + (fitted ? " ok" : " stuck"));
+        if (cw > 0 && ch > 0) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.res_w = cw;
+            st_.res_h = ch;
+        }
+    }
+
     bool connect() override {
         auto set_fail = [&](const std::string& err) {
             std::lock_guard<std::mutex> lk(st_mtx_);
@@ -960,13 +1021,11 @@ public:
         // 客户区必须与 pipeline 基准尺寸一致。游戏被拉成 1280x768 这类非 16:9
         // 尺寸后，UI 图标相对模板整体缩放，模板匹配会静默失败——DailyRewards
         // 就是在这里空转的（WorldMenu 图标在 ROI 内却匹配不上）。
-        std::string fit = cfg_.get_path_str("connect.fit_window", "1280x720");
-        const size_t xp = fit.find('x');
-        const int fw = atoi(fit.c_str());
-        const int fh = xp == std::string::npos ? 0 : atoi(fit.c_str() + xp + 1);
-        const bool do_fit = (fit != "off" && fit != "none" && fw > 0 && fh > 0);
+        int fw = 0, fh = 0;
+        const bool do_fit = parse_fit_window(fw, fh);
         int client_w = 0, client_h = 0;
         if (do_fit) {
+            ensure_endfield_registry_resolution(fw, fh);
             const bool fitted = util::fit_client_size(wi.hwnd, fw, fh, &client_w, &client_h);
             util::trace("maaend fit client want=" + std::to_string(fw) + "x" + std::to_string(fh) +
                         " actual=" + std::to_string(client_w) + "x" + std::to_string(client_h) +
@@ -1111,9 +1170,13 @@ public:
         std::string exe = st_.install_dir + "\\" + p.exec;
         std::replace(exe.begin(), exe.end(), '/', '\\');
         if (exe.size() < 4 || exe.substr(exe.size() - 4) != ".exe") exe += ".exe";
+        ensure_endfield_registry_resolution(1280, 720);
         std::string cmd = "\"" + exe + "\"";
         for (const auto& a : p.args)
             cmd += (a.find(' ') == std::string::npos) ? (" " + a) : (" \"" + a + "\"");
+        if (name == "LaunchGamePC") {
+            cmd += " \"{\\\"LaunchGamePCGameSetting\\\":\\\"Yes\\\",\\\"LaunchGamePCDisplayType\\\":\\\"Window\\\",\\\"LaunchGamePCResolution\\\":\\\"1280x720\\\"}\"";
+        }
         util::trace("maaend pretask " + name + " cmd=" + cmd);
 
         STARTUPINFOW si{};
@@ -1186,6 +1249,7 @@ public:
             st_.last_error = "not connected";
             return false;
         }
+        check_and_refit_window();
         mj::Value plan = build_plan(task, params);
         const mj::Value& ov = plan["override"];
         std::string entry = plan.get_str("entry", task);
@@ -1202,6 +1266,7 @@ public:
         {
             std::lock_guard<std::mutex> lk(st_mtx_);
             st_.run = "running";
+            st_.last_error.clear();
         }
         out = tid;
         return true;
@@ -1228,7 +1293,10 @@ public:
         if (!tasker_) return false;
         bool r = fn_.MaaTaskerRunning(tasker_) != 0;
         // 框架日志有缓冲，真机卡死时最后几行永远停在内存里。轮询顺手冲刷一次。
-        if (r && fn_.MaaGlobalLoggingFlush) fn_.MaaGlobalLoggingFlush();
+        if (r) {
+            if (fn_.MaaGlobalLoggingFlush) fn_.MaaGlobalLoggingFlush();
+            check_and_refit_window();
+        }
         return r;
     }
 
@@ -1271,6 +1339,7 @@ public:
             util::WindowInfo wi;
             running = util::find_window(cls, title, wi);
             wtitle = running ? util::window_title(wi.hwnd) : std::string();
+            if (running) check_and_refit_window();
         }
 
         std::lock_guard<std::mutex> lk(st_mtx_);
@@ -1454,17 +1523,20 @@ private:
                 ev.details.set("_raw", mj::Value(raw));
             }
         }
-        std::lock_guard<std::mutex> lk(st_mtx_);
-        if (message.find("Task.Succeeded") != std::string::npos
-            || message.find("Tasker.Task.Completed") != std::string::npos) {
-            st_.run = "idle";
-        } else if (message.find("Task.Failed") != std::string::npos) {
-            st_.run = "failed";
-            st_.last_error = raw.substr(0, 400);
-            // 节点级原因只能去核心日志找：在 Task.Failed 之后调
-            // MaaTaskerGetTaskDetail 会在 MaaFramework.dll 里 0xc0000005，
-            // 直接把 worker 进程打挂（maaend-v5.15.0-beta.1 实测两次）
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            if (message.find("Task.Succeeded") != std::string::npos
+                || message.find("Tasker.Task.Completed") != std::string::npos) {
+                st_.run = "idle";
+            } else if (message.find("Task.Failed") != std::string::npos) {
+                st_.run = "failed";
+                st_.last_error = raw.substr(0, 400);
+                // 节点级原因只能去核心日志找：在 Task.Failed 之后调
+                // MaaTaskerGetTaskDetail 会在 MaaFramework.dll 里 0xc0000005，
+                // 直接把 worker 进程打挂（maaend-v5.15.0-beta.1 实测两次）
+            }
         }
+        if (message == "Node.PipelineNode.Starting") check_and_refit_window();
         emit(std::move(ev));
     }
 
@@ -1472,6 +1544,7 @@ private:
     mj::Value interface_;
     mutable AppStatus st_;
     mutable double last_win_probe_ = 0;
+    mutable double last_refit_check_ = 0;
     mutable bool cached_win_running_ = false;
     mutable std::string cached_win_title_;
     mutable std::mutex st_mtx_;

@@ -99,14 +99,23 @@ static int core_version_mode(const std::string& kind, const std::string& path) {
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
                              | LOAD_LIBRARY_SEARCH_USER_DIRS);
     DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(wpath.c_str());
+    DLL_DIRECTORY_COOKIE cookie2 = nullptr;
+    if (kind == "maaend") {
+        cookie2 = AddDllDirectory(util::utf8_to_wide(path + "\\maafw").c_str());
+    }
+    auto cleanup_cookies = [&]() {
+        if (cookie2) { RemoveDllDirectory(cookie2); cookie2 = nullptr; }
+        if (cookie) { RemoveDllDirectory(cookie); cookie = nullptr; }
+    };
     HMODULE h = nullptr;
     std::wstring dll = util::utf8_to_wide(kind == "maa"
         ? path + "\\MaaCore.dll" : path + "\\maafw\\MaaFramework.dll");
     h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!h) h = LoadLibraryW(dll.c_str());
     if (!h) {
         fprintf(stderr, "[core-version] LoadLibrary failed: %s (err=%lu)\n",
                 util::wide_to_utf8(dll).c_str(), GetLastError());
-        if (cookie) RemoveDllDirectory(cookie);
+        cleanup_cookies();
         return 1;
     }
     using Fn = const char* (*)();
@@ -114,12 +123,12 @@ static int core_version_mode(const std::string& kind, const std::string& path) {
     if (!f) {
         fprintf(stderr, "[core-version] export not found (err=%lu)\n", GetLastError());
         FreeLibrary(h);
-        if (cookie) RemoveDllDirectory(cookie);
+        cleanup_cookies();
         return 1;
     }
     printf("%s", f());
     FreeLibrary(h);
-    if (cookie) RemoveDllDirectory(cookie);
+    cleanup_cookies();
     return 0;
 }
 

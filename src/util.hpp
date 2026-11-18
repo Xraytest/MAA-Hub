@@ -152,6 +152,53 @@ inline bool find_window(const std::string& class_regex, const std::string& title
     return ctx.found;
 }
 
+inline bool find_emulator_window(WindowInfo& out) {
+    struct Ctx {
+        WindowInfo* out;
+        bool found = false;
+    } ctx{ &out };
+
+    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* c = (Ctx*)lp;
+        if (!IsWindowVisible(hwnd)) return TRUE;
+        wchar_t title[512] = {};
+        if (GetWindowTextW(hwnd, title, 512) <= 0) return TRUE;
+        std::string t = util::wide_to_utf8(title);
+        std::string hay = t;
+        for (auto& ch : hay) ch = (char)tolower((unsigned char)ch);
+        static const char* kNeedles[] = {
+            "mumu", "\xe6\x98\x8e\xe6\x97\xa5\xe6\x96\xb9\xe8\x88\x9f", "arknights",
+            "\xe9\x9b\xb7\xe7\x94\xb5", "ldplayer", "nox", "\xe5\xa4\x9c\xe7\xa5\x9e",
+            "bluestacks", "\xe9\x80\x8d\xe9\x81\xa5"
+        };
+        for (const char* n : kNeedles) {
+            if (hay.find(n) != std::string::npos) {
+                c->out->hwnd = hwnd;
+                c->found = true;
+                return FALSE;
+            }
+        }
+        return TRUE;
+    }, (LPARAM)&ctx);
+    return ctx.found;
+}
+
+inline std::string fix_mojibake(std::string s) {
+    auto rep = [&](const char* bad, const char* good) {
+        std::string b(bad), g(good);
+        size_t pos = 0;
+        while ((pos = s.find(b, pos)) != std::string::npos) {
+            s.replace(pos, b.size(), g);
+            pos += g.size();
+        }
+    };
+    rep("\xe6\xa6\x9b\xe6\xa8\xbf\xee\x85\xbb\xe7\x80\xb9\xe7\x82\xb0\xe7\xb7\xa5",
+        "\xe9\xbb\x98\xe8\xae\xa4\xe5\xae\x9e\xe4\xbe\x8b");
+    rep("\xe9\x8f\x8d\xe7\xa8\xbf\xe7\xb8\xbe",
+        "\xe6\xa0\xb8\xe5\xbf\x83");
+    return s;
+}
+
 // 把窗口客户区校正成指定尺寸，并复查是否真的生效（r25）。
 // 旧版只看 SetWindowPos 返回值：会自锁客户区的游戏（Endfield 实测锁 1280x768）
 // 照样返回 TRUE 而尺寸没变，随后核心把抓图按高度等比缩放（1280x768→1200x720），

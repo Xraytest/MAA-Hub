@@ -91,13 +91,17 @@ private:
     void draw_executor_list(RECT r);
     static constexpr int EXEC_ROW_H = 26;
     // 右列日志区（官方 TaskQueueView Column=2）
-    void draw_log_column(RECT area, const std::string& id);
+    void draw_log_column(RECT area, const std::string& id, const std::string& kind);
     void page_executor(RECT content);
     void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);
     void draw_post_action(RECT area, const std::string& id);
     void draw_task_ctx_menu();
     void draw_rename_box(RECT area, const std::string& id);
     void draw_new_exec_overlay();
+    void draw_edit_exec_overlay();
+    void draw_exec_ctx_menu();
+    void open_edit_executor(const std::string& id);
+    void save_nav_state();
     void draw_power_countdown_overlay();
     static void execute_power_action(const std::string& kind);
     void save_task_alias();
@@ -147,6 +151,8 @@ private:
 
     // 动作
     void action_create_executor();
+    void action_save_edit_executor();
+    void action_delete_executor(const std::string& id);
     void action_connect(const std::string& id);
     void action_disconnect(const std::string& id);
     void action_run(const std::string& id, const std::string& task, const mj::Value& params);
@@ -246,6 +252,28 @@ private:
     int new_kind_ = 0;
     int new_acc_idx_ = 0;                 // 0 = 不绑定
     std::string new_label_;
+    // 编辑执行器浮层 & 左侧列表右键菜单
+    bool exec_ctx_open_ = false;
+    int exec_ctx_x_ = 0, exec_ctx_y_ = 0;
+    std::string exec_ctx_id_;
+    bool show_edit_exec_ = false;
+    std::string edit_exec_id_;
+    std::string edit_exec_kind_;
+    std::string edit_label_;
+    int edit_acc_idx_ = 0;
+    std::string edit_conn_adb_;
+    std::string edit_conn_addr_;
+    std::string edit_conn_cfg_;
+    int edit_conn_touch_ = 0;             // 0=maatouch 1=minitouch 2=adb
+    int edit_end_sc_ = 0;                 // 0=screendc 1=framepool 2=dxgidesktopdup 3=gdi 4=printwindow
+    int edit_end_mm_ = 0;                 // 0=seize 1=sendmessage 2=postmessage 3=legacyevent
+    int edit_end_km_ = 0;                 // 0=seize 1=sendmessage 2=postmessage 3=legacyevent
+    std::string edit_end_fit_ = "1280x720";
+    bool edit_confirm_del_ = false;
+    // 上次页面记忆 + MAA 日志清空时间戳
+    std::string last_saved_page_;
+    std::string last_saved_exec_;
+    std::map<std::string, int64_t> maa_log_cleared_ts_;
     // 账号表单
     int acc_form_game_ = 0;
     int acc_form_match_ = 0;
@@ -281,6 +309,7 @@ private:
     std::string core_msg_;
     std::mutex msg_mtx_;   // 保护 core_msg_：backend/post_action 线程写，UI 绘制线程读
     UpdateInfo update_info_;
+    std::map<std::string, UpdateInfo> update_infos_;
     std::mutex upd_mtx_;   // 保护 update_info_ / has_update_info_（backend 写、UI 读）
     bool has_update_info_ = false;
 
@@ -300,6 +329,7 @@ private:
     double last_update_check_ = 0;
     bool startup_checked_ = false;   // backend 线程独占：启动检查是否已尝试过
     std::string dl_stage_;
+    std::map<std::string, double> last_auto_conn_;
 
     static const UINT WM_APP_SNAP = WM_APP + 1;
     static const UINT WM_APP_IMPORT = WM_APP + 2;   // backend 线程完成导入 -> UI 线程合并任务列表

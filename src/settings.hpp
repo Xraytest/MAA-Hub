@@ -37,6 +37,9 @@ struct AppSettings {
     std::string github_token;                    // GitHub API Token（提高限额）
     // 界面主题（官方 GuiSettings）：light | dark | system
     std::string theme = "light";
+    // 上次浏览页面与选中执行器记忆
+    std::string last_page = "executor";
+    std::string last_exec_id;
 
     mj::Value to_json() const {
         mj::Value v = mj::Value::object();
@@ -68,6 +71,10 @@ struct AppSettings {
         st.set("github_token", github_token);
         v.set("startup_update", std::move(st));
         v.set("theme", theme);
+        mj::Value ui = mj::Value::object();
+        ui.set("last_page", last_page);
+        ui.set("last_exec_id", last_exec_id);
+        v.set("ui", std::move(ui));
         return v;
     }
 
@@ -100,6 +107,10 @@ struct AppSettings {
             s.github_token = su->get_str("github_token", "");
         }
         s.theme = v.get_str("theme", "light");
+        if (auto* ui = v.find("ui")) {
+            s.last_page = ui->get_str("last_page", "executor");
+            s.last_exec_id = ui->get_str("last_exec_id", "");
+        }
         return s;
     }
 
