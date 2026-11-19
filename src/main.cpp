@@ -166,9 +166,10 @@ static std::string cli_read_blob(const std::string& s) {
 
 static int run_cli(const std::vector<std::string>& args, const mj::Value& config) {
     std::string cmd = args.empty() ? "" : args[0];
-    if (cmd.empty()) {
+    if (cmd.empty() || cmd == "help" || cmd == "--help" || cmd == "-h") {
         printf("usage: MaaHub --cli ping|devices|tasks|import|sched-list|sched-run|sched-tick|serve|connect|run|seq|stop|events|get-connect|set-connect|override|accounts|add-account|use-account|link|core-check|core-update\n");
-        return 2;
+        // help 显式请求返回 0；空命令保持 rc=2 兼容旧脚本
+        return cmd.empty() ? 2 : 0;
     }
     Hub hub(config);
     hub.ensure_default_executors();
