@@ -70,6 +70,7 @@
 
 - 职责：左栏执行器列表 + 主区（实例页 / 账号管理 / 核心管理 / 智能规划 / 事件日志 / 设置）、标题栏、导航、导入回调。
 - **最近（11-09）**：核心管理页（拉取/检查/设默认/删除，8 列表格）、导入回调 → `merge_schedules` + `WM_APP_IMPORT`；`page_` 路由 6 个页面。
+- **11-19 r28**：核心卡右上新增「自动更新」勾选框（读 live 设置、当帧落盘），顶栏提示行补两级开关说明。
 - 11-03：视觉审计修复「自动战斗/欢迎页」三处遗留缺陷、自定义标题栏、任务切换过渡动画。
 - 已知问题：设置页曾单帧 53 s；默认窗口 1006×639 装不下 8 列，无最大化按钮。
 
@@ -88,6 +89,7 @@
 - 职责：代理（none/http/socks5）、镜像源 CDK、LLM、主题、启动、更新策略；持久化 `state\settings.json`。
 - 最近（11-08，+57 行）：补「启动设置」「更新设置」两组（含持久化与测试）。
 - **最近（11-10 夜，对齐 MAA 官方 Update 组）**：`CheckOnStartup` / `CheckOnSchedule`（6 h）/ `AutoDownloadUpdatePackage` / `AutoInstallUpdatePackage` / `VersionType`(stable·beta·nightly) / `UpdateSource`(auto·github·mirrorchyan) / `GitHubToken`；旧 `update_force_github` 静默忽略。启动与定时检查都落在**后台线程**（UI 不阻塞），检查到更新后按「自动下载 / 自动安装」两项决定是否直接拉包并设为默认。设置页新增「更新设置」组（4 开关 + 渠道/源分段控件 + Token 输入 + 链路说明）。
+- **最近（11-19 r28，核心自动更新两级开关）**：核心管理页每张核心卡新增「自动更新」勾选框（`update_auto_maa` / `update_auto_maaend`，勾选当帧落盘）——决定该类核心是否参与自动更新；处理粒度仍由设置页「自动下载 / 自动安装」决定。修复 r27 前语义缺陷：后台链路 `set_default` 曾硬编码 true（勾不勾「自动安装」都切默认核心）；现在「下载开/安装关」= 下载登记候选核心不切默认，「双开」= 下载 + 设默认 + 同步全部执行器。`settings_persist_test.py` 修复常红（废弃键断言）并改为备份/恢复真实设置，不再破坏 state。
 
 ### 12. 智能规划 — `planner.hpp`（20 KB）
 

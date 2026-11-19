@@ -3942,7 +3942,9 @@ void MaaHubWindow::page_cores(RECT content) {
     }
     {
         std::wstring root = L"核心目录：" + gui::widen(hub_->cores().cores_root())
-                          + L"（核心随时更新，执行器自动复制最新核心，无独立版本）";
+                          + L"（核心随时更新，执行器自动复制最新核心，无独立版本；"
+                            L"卡片右上「自动更新」开启后，启动/定时检查发现新版即按设置页"
+                            L"「自动下载/自动安装」策略自动处理）";
         gui_.text_clipped({ bar.left + 14, bar.top + 40, bar.right - 14, bar.top + 60 },
                           root, gui_.theme.dim, gui_.font_small);
     }
@@ -4011,6 +4013,27 @@ void MaaHubWindow::page_cores(RECT content) {
         if (gui_.button(ck_btn.c_str(), ckb, L"检查更新", 0)) {
             std::string k = kind_str;
             post_action([this, k] { action_check_update(k); }, "检查更新");
+        }
+
+        // r28：「自动更新」开关 —— 读 live 设置渲染，变更当帧即落盘（线程安全 store.update）
+        AppSettings live = hub_->app_settings();
+        bool auto_on = (std::string(kind_str) == "maa") ? live.update_auto_maa
+                                                        : live.update_auto_maaend;
+        CheckState acs = auto_on ? CheckState::On : CheckState::Off;
+        RECT aub{ card.right - 268, card.top + 10, card.right - 114, card.top + 34 };
+        gui_.checkbox3((std::string("core-auto-") + kind_str).c_str(), aub, L"自动更新", acs);
+        if ((acs == CheckState::On) != auto_on) {
+            bool now_on = (acs == CheckState::On);
+            std::string kk = kind_str;
+            post_action([this, kk, now_on] {
+                bool ok = hub_->settings().update([&](AppSettings& s) {
+                    if (kk == "maa") s.update_auto_maa = now_on;
+                    else s.update_auto_maaend = now_on;
+                });
+                set_notice(ok ? ((kk == "maa" ? std::string("MAA") : std::string("MaaEnd"))
+                                 + " 核心自动更新已" + (now_on ? "开启" : "关闭"))
+                               : "设置保存失败：无法写入 settings.json");
+            }, "核心自动更新开关");
         }
 
         const bool has_core = c.is_object() && !c.get_str("id", "").empty();
@@ -4438,27 +4461,41 @@ void MaaHubWindow::backend_loop() {
                         has_update_info_ = true;
                     }
                     if (ui.ok && ui.has_update) {
-                        if (st.update_auto_download && !ui.download_url.empty()) {
+                        // r28 两级开关：核心管理页每类核心的「自动更新」（update_auto_maa/
+                        // maaend）决定是否自动处理；处理粒度由设置页「自动下载/自动安装」决定。
+                        // 修复：原先 set_default 硬编码 true，勾不勾「自动安装」都会切默认核心。
+                        bool auto_on = (std::string(k) == "maa") ? st.update_auto_maa
+                                                                 : st.update_auto_maaend;
+                        if (auto_on && st.update_auto_download && !ui.download_url.empty()) {
                             set_notice("发现新版本 " + ui.latest + "，自动下载中…");
                             dl_progress_ = 0;
                             dl_stage_ = "下载";
                             std::string installed;
                             std::string id = CoreManager::pull_core(
                                 k, ui.download_url, "", &dl_progress_, &dl_stage_, &st,
-                                ui.latest_tag, true, ui.asset_sha256,
-                                &installed);
+                                ui.latest_tag, /*set_default=*/st.update_auto_install,
+                                ui.asset_sha256, &installed);
                             dl_progress_ = -1;
                             if (!id.empty()) {
                                 hub_->cores().reload();
-                                hub_->sync_executors_to_latest_core(k);
-                                std::lock_guard<std::mutex> lk(upd_mtx_);
-                                update_infos_[k].has_update = false;
-                                update_info_.has_update = false;
+                                if (st.update_auto_install) {
+                                    hub_->sync_executors_to_latest_core(k);
+                                    std::lock_guard<std::mutex> lk(upd_mtx_);
+                                    update_infos_[k].has_update = false;
+                                    update_info_.has_update = false;
+                                }
                             }
-                            set_notice(id.empty() ? ("自动更新失败：" + dl_stage_)
-                                                  : ("已自动更新到 " + installed + " 并同步全部执行器"));
+                            set_notice(id.empty()
+                                           ? ("自动更新失败：" + dl_stage_)
+                                           : (st.update_auto_install
+                                                  ? ("已自动更新到 " + installed + " 并同步全部执行器")
+                                                  : ("新核心 " + installed
+                                                     + " 已下载登记（自动安装未开启，未切换默认，"
+                                                       "可在核心管理页手动设为默认）")));
                         } else {
-                            set_notice("发现新版本 " + ui.latest + "（自动下载未开启）");
+                            set_notice("发现新版本 " + ui.latest
+                                       + (auto_on ? "（设置页「自动下载」未开启）"
+                                                  : "（该核心未开启自动更新）"));
                         }
                     }
                 }

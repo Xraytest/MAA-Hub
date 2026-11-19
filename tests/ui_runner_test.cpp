@@ -345,6 +345,29 @@ int main() {
         }
     }
 
+    // 11.（r28）设置模型往返：per-kind 自动更新开关 + 旧配置缺键默认 false
+    {
+        hub::AppSettings s;
+        s.update_auto_download = true;
+        s.update_auto_install = true;
+        s.update_auto_maa = true;
+        s.update_auto_maaend = false;
+        hub::AppSettings r = hub::AppSettings::from_json(s.to_json());
+        assert(r.update_auto_download == true);
+        assert(r.update_auto_install == true);
+        assert(r.update_auto_maa == true);      // 开关经 to_json/from_json 不丢
+        assert(r.update_auto_maaend == false);
+        // 旧配置（无 update_auto_* 键）→ 默认 false，绝不能凭空开启自动更新
+        mj::Value legacy = mj::Value::object();
+        mj::Value su = mj::Value::object();
+        su.set("update_check_on_start", mj::Value(true));
+        legacy.set("startup_update", std::move(su));
+        hub::AppSettings l = hub::AppSettings::from_json(legacy);
+        assert(l.update_auto_maa == false);
+        assert(l.update_auto_maaend == false);
+        assert(l.update_check_on_start == true);
+    }
+
     printf("UI_RUNNER_TEST PASS\n");
     return 0;
 }

@@ -32,6 +32,10 @@ struct AppSettings {
     bool update_check_on_schedule = true;   // 定时检查（运行期间每 6 小时）
     bool update_auto_download = false;      // 自动下载更新包
     bool update_auto_install = false;       // 自动安装（下载后切换为默认核心）
+    // 核心管理页每张核心卡的「自动更新」开关（r28）：该类核心是否参与自动更新；
+    // 检查到新版后按 update_auto_download / update_auto_install 两级策略处理
+    bool update_auto_maa = false;           // MAA 核心自动更新
+    bool update_auto_maaend = false;        // MaaEnd 核心自动更新
     std::string update_version_type = "stable";  // 更新渠道：stable | beta | nightly
     std::string update_source = "auto";          // 更新源：auto | github | mirrorchyan
     std::string github_token;                    // GitHub API Token（提高限额）
@@ -66,6 +70,8 @@ struct AppSettings {
         st.set("update_check_on_schedule", update_check_on_schedule);
         st.set("update_auto_download", update_auto_download);
         st.set("update_auto_install", update_auto_install);
+        st.set("update_auto_maa", update_auto_maa);
+        st.set("update_auto_maaend", update_auto_maaend);
         st.set("update_version_type", update_version_type);
         st.set("update_source", update_source);
         st.set("github_token", github_token);
@@ -102,6 +108,8 @@ struct AppSettings {
             s.update_check_on_schedule = su->get_bool("update_check_on_schedule", true);
             s.update_auto_download = su->get_bool("update_auto_download", false);
             s.update_auto_install = su->get_bool("update_auto_install", false);
+            s.update_auto_maa = su->get_bool("update_auto_maa", false);
+            s.update_auto_maaend = su->get_bool("update_auto_maaend", false);
             s.update_version_type = su->get_str("update_version_type", "stable");
             s.update_source = su->get_str("update_source", "auto");
             s.github_token = su->get_str("github_token", "");
