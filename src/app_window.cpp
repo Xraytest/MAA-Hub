@@ -134,6 +134,7 @@ bool MaaHubWindow::create() {
         nullptr, nullptr, hInst_, nullptr);
     if (!hwnd_) return false;
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, (LONG_PTR)this);
+    gui_.set_hwnd(hwnd_);
 
     // 应用界面主题（官方 界面设置-界面主题：light/dark/system）
     {
@@ -425,9 +426,32 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     switch (m) {
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
         input_.mouse.x = GET_X_LPARAM(lp);
         input_.mouse.y = GET_Y_LPARAM(lp);
+        uint64_t now = GetTickCount64();
+        if (input_.down || now - last_move_paint_ms_ >= 16) {
+            last_move_paint_ms_ = now;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        if ((HWND)lp != hwnd) {
+            input_.down = false;
+            drag_pending_task_.clear();
+            drag_task_.clear();
+            gif_dragging_ = false;
+            gui_.cancel_active();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_GETMINMAXINFO:
+        if (!offscreen_) {
+            auto* mmi = (MINMAXINFO*)lp;
+            mmi->ptMinTrackSize.x = 800 + RAIL_W;
+            mmi->ptMinTrackSize.y = 520;
+        }
         return 0;
     case WM_LBUTTONDOWN:
         input_.mouse.x = GET_X_LPARAM(lp);
@@ -486,7 +510,7 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
                 std::lock_guard<std::mutex> lk(pa_mtx_);
                 power_active = !pending_power_action_.empty();
             }
-            if (seen != snap_seen_ || power_active) {
+            if (seen != snap_seen_ || power_active || dl_progress_.load() >= 0) {
                 snap_seen_ = seen;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -495,6 +519,13 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     case WM_APP_SNAP:
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    case WM_APP_DEFERRED: {
+        auto fn = std::move(deferred_ui_);
+        deferred_ui_ = nullptr;
+        if (fn) fn();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     case WM_APP_IMPORT: {
         // backend 线程完成配置导入：取走 task_lists 并合并进内存权威 task_list_，
         // 然后统一落盘（不直写 state/task-lists.json，避免与内存态互相覆盖）
@@ -533,8 +564,17 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         HDC dc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
+        if (rc.right <= 0 || rc.bottom <= 0) {
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         if (!mem_dc_ || mem_size_.cx != rc.right || mem_size_.cy != rc.bottom) {
-            if (mem_dc_) { DeleteDC(mem_dc_); DeleteObject(mem_bmp_); }
+            if (mem_dc_) {
+                if (mem_old_bmp_) { SelectObject(mem_dc_, mem_old_bmp_); mem_old_bmp_ = nullptr; }
+                if (mem_bmp_) { DeleteObject(mem_bmp_); mem_bmp_ = nullptr; }
+                DeleteDC(mem_dc_);
+                mem_dc_ = nullptr;
+            }
             HDC screen = GetDC(hwnd);
             mem_dc_ = CreateCompatibleDC(screen);
             BITMAPINFO bi{};
@@ -545,7 +585,7 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
             bi.bmiHeader.biBitCount = 32;
             mem_bmp_ = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &mem_bits_, nullptr, 0);
             ReleaseDC(hwnd, screen);
-            SelectObject(mem_dc_, mem_bmp_);
+            mem_old_bmp_ = SelectObject(mem_dc_, mem_bmp_);
             mem_size_ = { rc.right, rc.bottom };
         }
         on_paint(mem_dc_, rc);
@@ -626,6 +666,13 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         return DefWindowProcW(hwnd, m, wp, lp);
     }
     case WM_DESTROY:
+        KillTimer(hwnd, TIMER_REFRESH);
+        if (mem_dc_) {
+            if (mem_old_bmp_) { SelectObject(mem_dc_, mem_old_bmp_); mem_old_bmp_ = nullptr; }
+            if (mem_bmp_) { DeleteObject(mem_bmp_); mem_bmp_ = nullptr; }
+            DeleteDC(mem_dc_);
+            mem_dc_ = nullptr;
+        }
         // r25：先摘托盘再退——进程没了图标还挂着，就是资源管理器里的幽灵图标
         tray_remove();
         if (tray_big_) { DestroyIcon(tray_big_); tray_big_ = nullptr; }
@@ -637,11 +684,22 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, m, wp, lp);
 }
 
+void MaaHubWindow::defer_ui(std::function<void()> fn) {
+    deferred_ui_ = std::move(fn);
+    if (hwnd_) PostMessageW(hwnd_, WM_APP_DEFERRED, 0, 0);
+}
+
 void MaaHubWindow::on_paint(HDC dc, RECT client) {
     // 帧耗时监控：单帧 > 500ms 记录告警（用于定位 UI 卡死）
     double frame_t0 = util::now_sec();
     gui_.set_dc(dc, client);
-    gui_.begin(input_);
+    bool power_active = false;
+    {
+        std::lock_guard<std::mutex> lk(pa_mtx_);
+        power_active = !pending_power_action_.empty();
+    }
+    bool global_modal = show_new_exec_ || show_edit_exec_ || exec_ctx_open_ || show_edit_sched_ || power_active;
+    gui_.begin(global_modal ? gui::Input{} : input_);
     gui_.fill(client, gui_.theme.bg);
     sync_window_title();
 
@@ -657,7 +715,6 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
 
     draw_left_rail(rail);
     draw_top_tabs(tabbar);
-    draw_gif_widget(client);
 
     try {
         if (page_ == "executor" && !selected_exec_.empty()) page_executor(content);
@@ -676,6 +733,8 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
         fprintf(stderr, "[paint] UNKNOWN EXCEPTION in page %s\n", page_.c_str());
     }
 
+    draw_gif_widget(client);
+    if (global_modal) gui_.begin(input_);
     draw_new_exec_overlay();   // 左栏「+ 新建」的弹窗，盖在所有页面之上
     draw_edit_exec_overlay();
     draw_exec_ctx_menu();
@@ -787,7 +846,6 @@ void MaaHubWindow::draw_top_tabs(RECT r) {
         tabs.push_back({ "copilot",   L"\u81ea\u52a8\u6218\u6597" });
         tabs.push_back({ "toolbox",   L"\u5c0f\u5de5\u5177" });
     }
-    tabs.push_back({ "schedules", L"\u5b9a\u65f6\u8ba1\u5212" });
 
     int y = r.top + 6;
     const int h = r.bottom - r.top - 12;
@@ -908,7 +966,8 @@ void MaaHubWindow::draw_executor_list(RECT r) {
         // 侧栏里靠底色区分选中，未选中不描边，否则一列方框很碎
         gui_.round_rect(ir, sel ? gui_.theme.primary_light : (hov ? gui_.theme.hover : CLR_INVALID),
                         sel ? gui_.theme.primary : CLR_INVALID, 4);
-        mj::Value st = hub_->executor_status(e.id, 0.4);
+        mj::Value st;
+        find_executor(e.id, st);
         std::string conn = st.get_str("conn", "unknown");
         std::string run = st.get_str("run", "");
         COLORREF dot = conn == "connected" ? gui_.theme.ok :
@@ -2088,6 +2147,10 @@ void MaaHubWindow::page_executor(RECT content) {
     // 只有左列卡片有独立背景（RegionBrushOpacity25 + 1px BorderBrush + CornerRadius 4），
     // 中/右列直接放在页面背景上。
     RECT frame{ content.left + 10, content.top + 8, content.right - 10, content.bottom - 12 };
+    gui::Input saved_in = gui_.input();
+    bool local_modal = show_add_task_ || show_post_action_ || ctx_menu_open_
+                    || !renaming_task_.empty() || task_split_open_;
+    if (local_modal) gui_.begin(gui::Input{});
     const int COL_W = (frame.right - frame.left) / 3;
     RECT col0{ frame.left, frame.top, frame.left + COL_W, frame.bottom };
     RECT col1{ col0.right, frame.top, col0.right + COL_W, frame.bottom };
@@ -2513,8 +2576,24 @@ void MaaHubWindow::page_executor(RECT content) {
         // 滚动偏移必须真的减进内容起点，否则滚轮只动滚动条、内容不动
         PanelCtx pctx{ gui_, rx, panel_start_y, right_col.right,
                        ui.params, id, sel_task, advanced_view_,
-                       [this](const wchar_t* title, const wchar_t* filter) {
-                           return browse_file_dialog(title, filter);
+                       nullptr,
+                       [this, id, sel_task](const std::string& key, const wchar_t* title, const wchar_t* filter) {
+                           std::wstring t = title ? title : L"";
+                           std::wstring f;
+                           if (filter) {
+                               size_t i = 0;
+                               while (filter[i] || filter[i + 1]) ++i;
+                               f.assign(filter, i + 2);
+                           }
+                           defer_ui([this, id, sel_task, key, t, f] {
+                               std::string picked = browse_file_dialog(
+                                   t.empty() ? nullptr : t.c_str(),
+                                   f.empty() ? nullptr : f.c_str());
+                               if (!picked.empty()) {
+                                   hub_->set_task_param(id, sel_task, key, mj::Value(picked));
+                                   panel_params_stale_ = true;
+                               }
+                           });
                        } };
         draw_task_panel(pctx, &specs);
         measured = pctx.y - panel_start_y + 16;
@@ -2561,10 +2640,9 @@ void MaaHubWindow::page_executor(RECT content) {
     //   Row1 = 「完成后」：ActionTitle + Divider + ActionDescription，右侧齿轮 RadioButton
     //   Row2 = Link Start! / 停止（官方同一时刻只可见一个，Width=100 Height=50 Margin=5，居中）
     //          其下 = 自动重载资源（CanShowAutoReload 时可见）
-    mj::Value est = connected ? hub_->executor_status(id, 0) : mj::Value::object();
-    std::string erun = est.get_str("run", "");
-    bool busy = hub_->is_seq_running(id)
-             || (connected && (est.get_bool("busy", false) || erun == "running" || erun == "stopping"));
+    std::string erun = ex.get_str("run", "");
+    bool busy = hub_->is_seq_running(id) || !hub_->running_task_of(id).empty()
+             || (connected && (ex.get_bool("busy", false) || erun == "running" || erun == "stopping"));
 
     // Grid.Row=1：完成后（官方 StackPanel Width=210 = 内层 185 文本 + 右侧齿轮）
     {
@@ -2650,6 +2728,7 @@ void MaaHubWindow::page_executor(RECT content) {
     }
 
     // ---------------- 浮层（最上层）----------------
+    if (local_modal) gui_.begin(saved_in);
     gui_.flush_combo_popup();   // 下拉层要盖住本帧后续控件，但仍在模态浮层之下
     if (task_split_open_ && split_anchor.right > split_anchor.left) {
         const int mw = 84, mh = 56;
@@ -2700,14 +2779,14 @@ void MaaHubWindow::page_accounts(RECT content) {
     gui_.text_input("acc-ident", { fx + 200, form.top + 10, form.right - 16, form.top + 36 },
                     form_ident_, L"账号标识：MAA 登录名片段 / MaaEnd 邮箱或后四位");
     int fy = form.top + 44;
-    int gi = gui_.option_strip("acc-form-game", { fx, fy, fx + 180, fy + 26 },
+    int gi = gui_.option_strip("acc-form-game", { fx, fy, fx + 230, fy + 26 },
                                { L"明日方舟 (MAA)", L"终末地 (MaaEnd)" }, acc_form_game_);
     if (gi >= 0) acc_form_game_ = gi;
-    fx += 190;
-    int mi = gui_.option_strip("acc-form-match", { fx, fy, fx + 190, fy + 26 },
+    fx += 240;
+    int mi = gui_.option_strip("acc-form-match", { fx, fy, fx + 170, fy + 26 },
                                { L"后四位匹配", L"邮箱匹配" }, acc_form_match_);
     if (mi >= 0) acc_form_match_ = mi;
-    fx += 200;
+    fx += 180;
     RECT ab{ fx, fy, fx + 110, fy + 26 };
     if (gui_.button("acc-add", ab, L"＋ 添加账号", 1, !form_label_.empty())) {
         std::string label = form_label_, ident = form_ident_;
@@ -3111,13 +3190,15 @@ void MaaHubWindow::page_copilot(RECT content) {
         gui_.text_input("copilot-path", { rx, y, rx + iw, y + 26 },
                         copilot_path_, L"\u9009\u62e9 JSON / maa://xxxx");
         if (gui_.button("copilot-pick", { rx + iw + 4, y, rx + iw + 4 + bw1, y + 26 }, L"\u9009\u62e9", 0)) {
-            std::string picked = browse_file_dialog(L"\u9009\u62e9 Copilot \u4f5c\u4e1a JSON",
-                                                    L"Copilot JSON\0*.json\0All Files\0*.*\0");
-            if (!picked.empty()) {
-                copilot_path_ = picked;
-                copilot_stage_.clear();
-                inspect_copilot_file(picked);
-            }
+            defer_ui([this] {
+                std::string picked = browse_file_dialog(L"\u9009\u62e9 Copilot \u4f5c\u4e1a JSON",
+                                                        L"Copilot JSON\0*.json\0All Files\0*.*\0");
+                if (!picked.empty()) {
+                    copilot_path_ = picked;
+                    copilot_stage_.clear();
+                    inspect_copilot_file(picked);
+                }
+            });
         }
         if (gui_.button("copilot-fetch", { rx + iw + bw1 + 8, y, rx + rw, y + 26 }, L"\u83b7\u53d6\u4ee3\u7801", 1)) {
             std::string code = copilot_path_;
@@ -3530,9 +3611,11 @@ void MaaHubWindow::page_toolbox(RECT content) {
             gui_.text_input("tb-vid-path", { lx + 86, y0, rr - 72, y0 + 26 }, tb_video_path_,
                             L"\u9009\u62e9 .mp4 / .mkv \u6218\u6597\u89c6\u9891\u8fdb\u884c\u8bc6\u522b");
             if (gui_.button("tb-vid-pick", { rr - 66, y0, rr, y0 + 26 }, L"\u6d4f\u89c8", 0)) {
-                std::string p = browse_file_dialog(L"\u9009\u62e9\u6218\u6597\u89c6\u9891",
-                                                   L"Video\0*.mp4;*.mkv;*.avi\0All Files\0*.*\0");
-                if (!p.empty()) tb_video_path_ = p;
+                defer_ui([this] {
+                    std::string p = browse_file_dialog(L"\u9009\u62e9\u6218\u6597\u89c6\u9891",
+                                                       L"Video\0*.mp4;*.mkv;*.avi\0All Files\0*.*\0");
+                    if (!p.empty()) tb_video_path_ = p;
+                });
             }
             y0 += 36;
         }
@@ -3924,7 +4007,7 @@ void MaaHubWindow::page_cores(RECT content) {
         std::lock_guard<std::mutex> lk(snap_mtx_);
         snap = snap_;
     }
-    RECT bar{ content.left, content.top, content.right, content.top + 64 };
+    RECT bar{ content.left, content.top, content.right, content.top + 84 };
     gui_.panel(bar);
     int bx = bar.left + 14;
     if (gui_.button("core-check", { bx, bar.top + 8, bx + 116, bar.top + 32 }, L"🔄 检查更新", 1)) {
@@ -3940,21 +4023,20 @@ void MaaHubWindow::page_cores(RECT content) {
                     L"⬇ 更新 MaaEnd Core", 1, dl_progress_.load() < 0)) {
         post_action([this] { action_auto_update("maaend"); }, "更新 MaaEnd Core");
     }
-    {
-        std::wstring root = L"核心目录：" + gui::widen(hub_->cores().cores_root())
-                          + L"（核心随时更新，执行器自动复制最新核心，无独立版本；"
-                            L"卡片右上「自动更新」开启后，启动/定时检查发现新版即按设置页"
-                            L"「自动下载/自动安装」策略自动处理）";
-        gui_.text_clipped({ bar.left + 14, bar.top + 40, bar.right - 14, bar.top + 60 },
-                          root, gui_.theme.dim, gui_.font_small);
-    }
     std::string notice;
     { std::lock_guard<std::mutex> lk(msg_mtx_); notice = core_msg_; }
     if (!notice.empty()) {
-        gui_.text_clipped({ bar.right - 400, bar.top + 10, bar.right - 12, bar.top + 28 },
+        gui_.text_clipped({ bar.left + 14, bar.top + 40, bar.right - 14, bar.top + 58 },
                           gui::widen(notice),
                           notice.find("失败") != std::string::npos ? gui_.theme.err : gui_.theme.ok,
                           gui_.font_small);
+    }
+    {
+        std::wstring root = L"核心目录：" + gui::widen(hub_->cores().cores_root())
+                          + L"（核心随时更新，执行器自动复制最新核心；"
+                            L"「自动更新」开启后按设置页策略自动处理）";
+        gui_.text_clipped({ bar.left + 14, bar.top + 60, bar.right - 14, bar.top + 78 },
+                          root, gui_.theme.dim, gui_.font_small);
     }
 
     int y = bar.bottom + 12;
@@ -3962,7 +4044,9 @@ void MaaHubWindow::page_cores(RECT content) {
     if (dp >= 0) {
         RECT prog{ content.left, y, content.right, y + 32 };
         gui_.round_rect(prog, gui_.theme.card_bg, gui_.theme.border, 4);
-        std::wstring line = L"正在处理：" + gui::widen(dl_stage_) + L"  " + std::to_wstring(dp) + L"%";
+        std::string stage;
+        { std::lock_guard<std::mutex> lk(msg_mtx_); stage = dl_stage_; }
+        std::wstring line = L"正在处理：" + gui::widen(stage) + L"  " + std::to_wstring(dp) + L"%";
         gui_.text(prog.left + 14, prog.top + 7, line.c_str(), gui_.theme.primary, gui_.font);
         y = prog.bottom + 10;
     }
@@ -4127,9 +4211,9 @@ void MaaHubWindow::page_planner(RECT content) {
         std::lock_guard<std::mutex> lk(snap_mtx_);
         snap = snap_;
     }
-    RECT ir{ content.left, content.top, content.right - 300, content.top + 30 };
+    RECT ir{ content.left, content.top, content.right - 348, content.top + 30 };
     gui_.text_input("goal-input", ir, goal_, L"输入目标，例如：清理所有执行器的今日日常");
-    RECT pr{ content.right - 290, content.top, content.right - 170, content.top + 30 };
+    RECT pr{ content.right - 338, content.top, content.right - 170, content.top + 30 };
     static const std::vector<std::wstring> popts = { L"默认", L"LLM", L"启发式" };
     int clicked = gui_.option_strip("planner-sel", pr, popts, planner_sel_);
     if (clicked >= 0) planner_sel_ = clicked;
@@ -4469,12 +4553,15 @@ void MaaHubWindow::backend_loop() {
                         if (auto_on && st.update_auto_download && !ui.download_url.empty()) {
                             set_notice("发现新版本 " + ui.latest + "，自动下载中…");
                             dl_progress_ = 0;
-                            dl_stage_ = "下载";
+                            {
+                                std::lock_guard<std::mutex> lk(msg_mtx_);
+                                dl_stage_ = "下载";
+                            }
                             std::string installed;
                             std::string id = CoreManager::pull_core(
                                 k, ui.download_url, "", &dl_progress_, &dl_stage_, &st,
                                 ui.latest_tag, /*set_default=*/st.update_auto_install,
-                                ui.asset_sha256, &installed);
+                                ui.asset_sha256, &installed, nullptr, &msg_mtx_);
                             dl_progress_ = -1;
                             if (!id.empty()) {
                                 hub_->cores().reload();
@@ -4485,8 +4572,13 @@ void MaaHubWindow::backend_loop() {
                                     update_info_.has_update = false;
                                 }
                             }
+                            std::string err_stage;
+                            if (id.empty()) {
+                                std::lock_guard<std::mutex> lk(msg_mtx_);
+                                err_stage = dl_stage_;
+                            }
                             set_notice(id.empty()
-                                           ? ("自动更新失败：" + dl_stage_)
+                                           ? ("自动更新失败：" + err_stage)
                                            : (st.update_auto_install
                                                   ? ("已自动更新到 " + installed + " 并同步全部执行器")
                                                   : ("新核心 " + installed
@@ -5135,15 +5227,23 @@ void MaaHubWindow::action_auto_update(const std::string& kind) {
     }
     set_notice("开始下载 " + ui.latest + " …");
     dl_progress_ = 0;
-    dl_stage_ = "下载";
+    {
+        std::lock_guard<std::mutex> lk(msg_mtx_);
+        dl_stage_ = "下载";
+    }
     std::string installed;
     bool unchanged = false;
     std::string id = CoreManager::pull_core(kind, ui.download_url, "", &dl_progress_, &dl_stage_,
                                             &st, ui.latest_tag, /*set_default=*/true,
-                                            ui.asset_sha256, &installed, &unchanged);
+                                            ui.asset_sha256, &installed, &unchanged, &msg_mtx_);
     dl_progress_ = -1;
     if (id.empty()) {
-        set_notice("更新失败：" + dl_stage_);
+        std::string err_stage;
+        {
+            std::lock_guard<std::mutex> lk(msg_mtx_);
+            err_stage = dl_stage_;
+        }
+        set_notice("更新失败：" + err_stage);
         return;
     }
     hub_->cores().reload();
@@ -5200,19 +5300,28 @@ void MaaHubWindow::page_settings(RECT content) {
         }
     }
 
-    int y = content.top;
+    int view_h = content.bottom - content.top;
+    int& measured = content_h_["settings"];
+    int ch = measured > 0 ? measured : (std::max)(view_h, 920);
+    float& sy = scroll_["settings"];
+    gui_.begin_scroll(content, ch, sy);
+
+    int rr = content.right - 12;
+    int y0 = content.top - (int)sy;
+    int y = y0;
     auto group = [&](const wchar_t* title) {
         // 官方设置页是 HandyControl TitleElement：小节标题为普通加粗文字 + 分隔线，
         // 不是整块主色高亮条
         gui_.text(content.left, y + 2, title, gui_.theme.text, gui_.font_bold);
         y += 22;
-        gui_.divider({ content.left, y, content.right, y + 1 });
-        y += 12;
+        gui_.divider({ content.left, y, rr, y + 1 });
+        y += 10;
     };
     auto note = [&](const std::wstring& text) {
-        gui_.text_clipped({ content.left, y, content.right, y + 34 },
-                          text, gui_.theme.dim, gui_.font_small);
-        y += 36;
+        int lines = 1;
+        for (wchar_t c : text) if (c == L'\n') ++lines;
+        gui_.text(content.left, y, text, gui_.theme.dim, gui_.font_small);
+        y += lines * 18 + 8;
     };
 
     // ---------------- 更新与代理 ----------------
@@ -5226,14 +5335,14 @@ void MaaHubWindow::page_settings(RECT content) {
     if (set_proxy_mode_ != 0) {
         // 标签统一 56px，输入框等宽（地址/端口一行，用户名/密码一行）
         const int PL = 56;
-        int half = (content.right - content.left - PL - 12) / 2;
+        int half = (rr - content.left - PL - 12 - 52) / 2;
         gui_.text(content.left, y + 4, L"\u5730\u5740", gui_.theme.dim, gui_.font_small);
         gui_.text_input("set-proxy-host", { content.left + PL, y, content.left + PL + half, y + 26 },
                         set_proxy_host_, L"127.0.0.1");
         gui_.text(content.left + PL + half + 12, y + 4, L"\u7aef\u53e3",
                   gui_.theme.dim, gui_.font_small);
         gui_.text_input("set-proxy-port",
-                        { content.left + PL + half + 12 + 40, y, content.right, y + 26 },
+                        { content.left + PL + half + 12 + 40, y, rr, y + 26 },
                         set_proxy_port_, L"7890");
         y += 30;
         gui_.text(content.left, y + 4, L"\u7528\u6237\u540d", gui_.theme.dim, gui_.font_small);
@@ -5242,22 +5351,22 @@ void MaaHubWindow::page_settings(RECT content) {
         gui_.text(content.left + PL + half + 12, y + 4, L"\u5bc6\u7801",
                   gui_.theme.dim, gui_.font_small);
         gui_.text_input("set-proxy-pass",
-                        { content.left + PL + half + 12 + 40, y, content.right, y + 26 },
-                        set_proxy_pass_, L"\u53ef\u9009");
+                        { content.left + PL + half + 12 + 40, y, rr, y + 26 },
+                        set_proxy_pass_, L"\u53ef\u9009", 0, true);
         y += 34;
     }
     gui_.text(content.left, y + 4, L"Mirror\u9171 CDK", gui_.theme.dim, gui_.font_small);
-    gui_.text_input("set-cdk", { content.left + 96, y, content.right, y + 26 },
-                    set_cdk_, L"\u586b\u5199\u540e\u4f18\u5148\u4f7f\u7528 Mirror\u9171 \u4e0b\u8f7d");
+    gui_.text_input("set-cdk", { content.left + 96, y, rr, y + 26 },
+                    set_cdk_, L"\u586b\u5199\u540e\u4f18\u5148\u4f7f\u7528 Mirror\u9171 \u4e0b\u8f7d", 0, true);
     y += 32;
     note(L"\u7559\u7a7a\u5219\u6309 GitHub \u2192 gh-proxy \u2192 ghfast \u2192 moeyy \u987a\u5e8f\u56de\u9000");
 
     // ---------------- 连接设置 ----------------
     group(L"\u8fde\u63a5\u8bbe\u7f6e");
-    note(L"\u5b98\u65b9\u5171 24 \u9879\u3002MaaHub \u5df2\u5b9e\u73b0\u5176\u4e2d\u5fc3\u90e8\u5206\uff1a"
+    note(L"\u5b98\u65b9\u5171 24 \u9879\u3002MaaHub \u5df2\u5b9e\u73b0\u5176\u6838\u5fc3\u90e8\u5206\uff1a"
          L"\u81ea\u52a8\u68c0\u6d4b\u8fde\u63a5\u3001\u6bcf\u6b21\u91cd\u65b0\u68c0\u6d4b\u3001\u8fde\u63a5\u914d\u7f6e\u3001\u8fde\u63a5\u5730\u5740\u3001"
-         L"\u622a\u56fe\u65b9\u5f0f\u3001\u9f20\u6807\u8f93\u5165\u3001\u952e\u76d8\u8f93\u5165\u3001\u89e6\u63a7\u6a21\u5f0f\u3002\u8fd9\u4e9b\u9879\u76ee\u524d"
-         L"\u5728\u5404\u6267\u884c\u5668\u7684\u300c\u5f00\u59cb\u5524\u9192\u300d\u4efb\u52a1\u9762\u677f\u4e2d\u914d\u7f6e\uff08\u6bcf\u6267\u884c\u5668\u72ec\u7acb\uff09\u3002"
+         L"\u622a\u56fe\u65b9\u5f0f\u3001\u9f20\u6807\u8f93\u5165\u3001\u952e\u76d8\u8f93\u5165\u3001\u89e6\u63a7\u6a21\u5f0f\u3002\n"
+         L"\u8fd9\u4e9b\u9879\u76ee\u524d\u5728\u5404\u6267\u884c\u5668\u7684\u300c\u5f00\u59cb\u5524\u9192\u300d\u4efb\u52a1\u9762\u677f\u4e2d\u914d\u7f6e\uff08\u6bcf\u6267\u884c\u5668\u72ec\u7acb\uff09\uff1b"
          L"\u5176\u4f59\u4e3a\u6a21\u62df\u5668\u4e13\u5c5e\uff08ADB \u66ff\u6362\u3001\u7a97\u53e3\u6062\u590d\u7b49\uff09\u3002");
 
     // ---------------- 界面设置 ----------------
@@ -5335,16 +5444,18 @@ void MaaHubWindow::page_settings(RECT content) {
             y += 28;
         }
         gui_.text(content.left, y + 4, L"\u66f4\u65b0\u6e20\u9053", gui_.theme.dim, gui_.font_small);
-        gui_.option_strip("set-upd-channel", { content.left + 74, y, content.left + 374, y + 26 },
-                          { L"\u6b63\u5f0f\u7248", L"\u6d4b\u8bd5\u7248", L"Nightly" }, set_upd_channel_);
+        int ch_hit = gui_.option_strip("set-upd-channel", { content.left + 74, y, content.left + 374, y + 26 },
+                                       { L"\u6b63\u5f0f\u7248", L"\u6d4b\u8bd5\u7248", L"Nightly" }, set_upd_channel_);
+        if (ch_hit >= 0) set_upd_channel_ = ch_hit;
         y += 30;
         gui_.text(content.left, y + 4, L"\u66f4\u65b0\u6e90", gui_.theme.dim, gui_.font_small);
-        gui_.option_strip("set-upd-source", { content.left + 74, y, content.left + 374, y + 26 },
-                          { L"\u81ea\u52a8", L"GitHub", L"Mirror\u9171" }, set_upd_source_);
+        int src_hit = gui_.option_strip("set-upd-source", { content.left + 74, y, content.left + 374, y + 26 },
+                                        { L"\u81ea\u52a8", L"GitHub", L"Mirror\u9171" }, set_upd_source_);
+        if (src_hit >= 0) set_upd_source_ = src_hit;
         y += 30;
         gui_.text(content.left, y + 4, L"GitHub Token", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-gh-token", { content.left + 110, y, content.right, y + 26 },
-                        set_gh_token_, L"ghp_...\uff08\u53ef\u9009\uff0c\u63d0\u9ad8 API \u9650\u989d\uff09");
+        gui_.text_input("set-gh-token", { content.left + 110, y, rr, y + 26 },
+                        set_gh_token_, L"ghp_...\uff08\u53ef\u9009\uff0c\u63d0\u9ad8 API \u9650\u989d\uff09", 0, true);
         y += 30;
         note(L"\u66f4\u65b0\u94fe\u8def\uff1a\u68c0\u67e5 \u2192 \u4e0b\u8f7d \u2192 sha256 \u6821\u9a8c \u2192 \u89e3\u5305 \u2192 \u767b\u8bb0 \u2192 \u8bbe\u4e3a\u9ed8\u8ba4\u6838\u5fc3\u3002");
     }
@@ -5361,16 +5472,16 @@ void MaaHubWindow::page_settings(RECT content) {
         // 标签统一占 74px，输入框撑满剩余宽度（避免宽度参差）
         const int LBL = 74;
         gui_.text(content.left, y + 4, L"Base URL", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-llm-base", { content.left + LBL, y, content.right, y + 26 },
+        gui_.text_input("set-llm-base", { content.left + LBL, y, rr, y + 26 },
                         set_llm_url_, L"https://api.deepseek.com");
         y += 30;
         gui_.text(content.left, y + 4, L"\u6a21\u578b", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-llm-model", { content.left + LBL, y, content.right, y + 26 },
+        gui_.text_input("set-llm-model", { content.left + LBL, y, rr, y + 26 },
                         set_llm_model_, L"deepseek-chat");
         y += 30;
         gui_.text(content.left, y + 4, L"API Key", gui_.theme.dim, gui_.font_small);
-        gui_.text_input("set-llm-key", { content.left + LBL, y, content.right, y + 26 },
-                        set_llm_key_, L"sk-...");
+        gui_.text_input("set-llm-key", { content.left + LBL, y, rr, y + 26 },
+                        set_llm_key_, L"sk-...", 0, true);
         y += 30;
         note(L"\u672a\u914d\u7f6e\u6216\u4e0d\u53ef\u8fbe\u65f6\u81ea\u52a8\u9000\u56de\u542f\u53d1\u5f0f\u89c4\u5212");
     }
@@ -5383,19 +5494,23 @@ void MaaHubWindow::page_settings(RECT content) {
         }
         RECT ib{ content.left + 156, y, content.left + 296, y + 30 };
         if (gui_.button("set-import", ib, L"\u5bfc\u5165\u914d\u7f6e...", 0)) {
-            action_import_config();
+            defer_ui([this] { action_import_config(); });
         }
         std::string notice;
         { std::lock_guard<std::mutex> lk(msg_mtx_); notice = core_msg_; }
         if (!notice.empty()) {
             // r24：起点从 +156 移到 +312，原来和「导入配置...」按钮同位置互相遮盖
-            gui_.text_clipped({ content.left + 312, y + 6, content.right, y + 28 },
+            gui_.text_clipped({ content.left + 312, y + 6, rr, y + 28 },
                               gui::widen(notice),
                               notice.find("失败") != std::string::npos
                                   ? gui_.theme.err : gui_.theme.ok,
                               gui_.font);
         }
+        y += 38;
     }
+    measured = y - y0 + 12;
+    if (measured < view_h) measured = view_h;
+    gui_.end_scroll();
 }
 
 

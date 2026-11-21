@@ -206,6 +206,7 @@ private:
     void backend_loop();
     void poll_task_states();
     void post_action(std::function<void()> fn, const std::string& busy_text);
+    void defer_ui(std::function<void()> fn);
     void refresh_snapshot();
     void refresh_snapshot_fast();   // 即时快照：只读持久化文件，启动首帧用
     void set_notice(const std::string& s);
@@ -257,8 +258,11 @@ private:
     gui::Input input_;
     HDC mem_dc_ = nullptr;
     HBITMAP mem_bmp_ = nullptr;
+    HGDIOBJ mem_old_bmp_ = nullptr;
     void* mem_bits_ = nullptr;
     SIZE mem_size_{ 0, 0 };
+    uint64_t last_move_paint_ms_ = 0;
+    std::function<void()> deferred_ui_;
 
     // UI 状态
     std::string page_ = "executor";        // executor | accounts | cores | planner | events
@@ -395,6 +399,7 @@ private:
     static const UINT WM_APP_SNAP = WM_APP + 1;
     static const UINT WM_APP_IMPORT = WM_APP + 2;   // backend 线程完成导入 -> UI 线程合并任务列表
     static const UINT WM_APP_TRAY = WM_APP + 3;     // r25：托盘回调（NIM v4：事件=LOWORD(lParam)）
+    static const UINT WM_APP_DEFERRED = WM_APP + 4; // 延后到 WM_PAINT 之外执行的模态对话框
     static const UINT_PTR TIMER_REFRESH = 1;
     // ---- r25：系统托盘（此前全仓没有一次 Shell_NotifyIcon，关窗=进程结束） ----
     static const WORD kTrayId = 1;                  // 本窗口唯一图标 uID

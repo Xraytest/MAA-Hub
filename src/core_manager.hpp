@@ -699,8 +699,17 @@ public:
                                  bool set_default = false,
                                  const std::string& expected_sha256 = "",
                                  std::string* installed_version = nullptr,
-                                 bool* already_latest = nullptr) {
-        auto set_stage = [&](const std::string& s) { if (stage) *stage = s; };
+                                 bool* already_latest = nullptr,
+                                 std::mutex* stage_mtx = nullptr) {
+        auto set_stage = [&](const std::string& s) {
+            if (!stage) return;
+            if (stage_mtx) {
+                std::lock_guard<std::mutex> lk(*stage_mtx);
+                *stage = s;
+            } else {
+                *stage = s;
+            }
+        };
         set_stage("准备下载");
 
         std::string tmp = default_cores_root() + "\\.tmp";

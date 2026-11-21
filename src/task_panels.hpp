@@ -24,6 +24,7 @@ struct PanelCtx {
     const std::string& task;
     bool advanced = false;   // 官方「常规设置 / 高级设置」两页：同一面板只画其中一页
     std::function<std::string(const wchar_t*, const wchar_t*)> pick_file = nullptr;
+    std::function<void(const std::string&, const wchar_t*, const wchar_t*)> pick_file_async = nullptr;
     // r24：dirty 感知写入。控件没被操作时不再回写 params，避免用帧初值覆盖
     // 外部（backend 导入线程）刚写入 Hub 的参数；未改动帧由调用方对比
     // before/params 决定零持久化写回。
@@ -156,9 +157,13 @@ inline void pc_file(PanelCtx& c, const std::string& key, const std::wstring& lab
                    hint.empty() ? nullptr : hint.c_str());
     RECT br{ c.right - BTN, c.y, c.right, c.y + 24 };
     if (c.g.button((c.exec_id + ":" + c.task + ":" + key + ":pick").c_str(),
-                   br, L"\u6d4f\u89c8", 0, (bool)c.pick_file)) {
-        std::string picked = c.pick_file(label.c_str(), filter);
-        if (!picked.empty()) v = picked;
+                   br, L"\u6d4f\u89c8", 0, (bool)c.pick_file_async || (bool)c.pick_file)) {
+        if (c.pick_file_async) {
+            c.pick_file_async(key, label.c_str(), filter);
+        } else {
+            std::string picked = c.pick_file(label.c_str(), filter);
+            if (!picked.empty()) v = picked;
+        }
     }
     c.set_str(key, v, v != before);
     c.y += 36;

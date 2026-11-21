@@ -59,6 +59,15 @@ struct Theme {
     COLORREF item_bg = RGB(0xFF, 0xFF, 0xFF);
     COLORREF item_hover = RGB(0xF2, 0xF2, 0xF2);
     COLORREF trace_text = RGB(0x80, 0x80, 0x80);    // TraceLogBrush（Light=Gray）
+    COLORREF danger_bg = RGB(254, 242, 242);
+    COLORREF warn_bg = RGB(255, 248, 235);
+    COLORREF warn_text = RGB(180, 120, 10);
+    COLORREF disabled_bg = RGB(245, 246, 248);
+    COLORREF disabled_text = RGB(160, 168, 178);
+    COLORREF scroll_track = RGB(0xF0, 0xF0, 0xF0);
+    COLORREF scroll_thumb = RGB(0xC6, 0xCA, 0xD2);
+    COLORREF scroll_thumb_hov = RGB(0x8E, 0x94, 0xA0);
+    COLORREF scroll_thumb_edge = RGB(0x42, 0x42, 0x42);
 
     // ---- 亮/暗主题（官方 Res/Themes/Dark.xaml）----
 
@@ -88,6 +97,15 @@ struct Theme {
         t.primary        = RGB(0x32, 0x6C, 0xF3);   // PrimaryBrush（官方，亮暗同色）
         t.primary_dark   = RGB(0x2A, 0x5C, 0xD6);
         t.primary_light  = RGB(0x1E, 0x2A, 0x40);
+        t.danger_bg      = RGB(0x3A, 0x20, 0x22);
+        t.warn_bg        = RGB(0x38, 0x2F, 0x1A);
+        t.warn_text      = RGB(0xF0, 0xC4, 0x52);
+        t.disabled_bg    = RGB(0x28, 0x28, 0x2C);
+        t.disabled_text  = RGB(0x70, 0x70, 0x76);
+        t.scroll_track   = RGB(0x28, 0x28, 0x2C);
+        t.scroll_thumb   = RGB(0x52, 0x52, 0x5A);
+        t.scroll_thumb_hov = RGB(0x72, 0x72, 0x7C);
+        t.scroll_thumb_edge = RGB(0x9E, 0x9E, 0xA8);
         return t;
     }
 
@@ -123,6 +141,13 @@ public:
     HFONT font_small = nullptr; // 11px —— 官方辅助/次级文字
     HFONT font_title = nullptr; // 14px 粗体 —— 官方标题
 
+    ~Gui() {
+        if (font) { DeleteObject(font); font = nullptr; }
+        if (font_bold) { DeleteObject(font_bold); font_bold = nullptr; }
+        if (font_small) { DeleteObject(font_small); font_small = nullptr; }
+        if (font_title) { DeleteObject(font_title); font_title = nullptr; }
+    }
+
     void init_fonts() {
         if (font) return;
         // WPF 的 FontSize 单位是 DIP（96DPI 下 = px），不是磅：官方默认正文 12、辅助 11，
@@ -143,8 +168,17 @@ public:
 
     void end() {
         // active：按住中的控件
-        if (in_.released || !in_.down) active_.clear();
+        if (in_.released || !in_.down) {
+            active_.clear();
+            scroll_drag_ = nullptr;
+        }
         if (in_.rreleased || !in_.rdown) r_active_.clear();
+    }
+
+    void cancel_active() {
+        active_.clear();
+        r_active_.clear();
+        scroll_drag_ = nullptr;
     }
 
     // ------------------------------------------------------------ 图元
@@ -509,23 +543,40 @@ public:
         int view_h = scroll_rect_.bottom - scroll_rect_.top;
         int max_scroll = content_h - view_h;
         if (max_scroll <= 0) return;
-        float frac = *scroll_y_ / (float)max_scroll;
         int thumb_h = view_h * view_h / content_h;
         if (thumb_h < 24) thumb_h = 24;
         if (thumb_h > view_h) thumb_h = view_h;
         int track_h = view_h - thumb_h;
+        float frac = *scroll_y_ / (float)max_scroll;
         int ty = scroll_rect_.top + (int)(track_h * frac);
         int tx = scroll_rect_.right - 6;
-        bool edge_hov = in_.mouse.x >= scroll_rect_.right - 14
-                     && in_.mouse.x <= scroll_rect_.right
-                     && in_.mouse.y >= scroll_rect_.top
-                     && in_.mouse.y <= scroll_rect_.bottom;
+
+        RECT thumb_hit{ tx - 6, ty, scroll_rect_.right, ty + thumb_h };
+        if (in_.pressed && hovered(thumb_hit)) {
+            scroll_drag_ = scroll_y_;
+            scroll_drag_off_ = in_.mouse.y - ty;
+        }
+        if (scroll_drag_ == scroll_y_ && in_.down && track_h > 0) {
+            float pos = (float)(in_.mouse.y - scroll_drag_off_ - scroll_rect_.top);
+            float ns = pos / (float)track_h * (float)max_scroll;
+            if (ns < 0.0f) ns = 0.0f;
+            if (ns > (float)max_scroll) ns = (float)max_scroll;
+            *scroll_y_ = ns;
+            frac = *scroll_y_ / (float)max_scroll;
+            ty = scroll_rect_.top + (int)(track_h * frac);
+        }
+
+        bool edge_hov = (scroll_drag_ == scroll_y_)
+                     || (in_.mouse.x >= scroll_rect_.right - 14
+                         && in_.mouse.x <= scroll_rect_.right
+                         && in_.mouse.y >= scroll_rect_.top
+                         && in_.mouse.y <= scroll_rect_.bottom);
         bool area_hov = PtInRect(&scroll_rect_, in_.mouse);
         if (edge_hov) {
-            fill({ tx, scroll_rect_.top, tx + 4, scroll_rect_.bottom }, RGB(0xF0, 0xF0, 0xF0));
+            fill({ tx, scroll_rect_.top, tx + 4, scroll_rect_.bottom }, theme.scroll_track);
         }
-        COLORREF thumb_c = edge_hov ? RGB(0x42, 0x42, 0x42)
-                         : (area_hov ? RGB(0x8E, 0x94, 0xA0) : RGB(0xC6, 0xCA, 0xD2));
+        COLORREF thumb_c = edge_hov ? theme.scroll_thumb_edge
+                         : (area_hov ? theme.scroll_thumb_hov : theme.scroll_thumb);
         round_rect({ tx, ty, tx + 4, ty + thumb_h }, thumb_c, CLR_INVALID, 2);
     }
 
@@ -559,9 +610,9 @@ public:
         // Foreground=PrimaryTextBrush、基于 ButtonBaseStyle(高28/圆角4/内边距(10,5))
         COLORREF fill = theme.card_bg, border = theme.border, txt = theme.text;
         if (style == 1) { fill = theme.primary; border = theme.primary; txt = RGB(255, 255, 255); }
-        else if (style == 2) { fill = RGB(254, 242, 242); border = theme.err; txt = theme.err; }
-        else if (style == 3) { fill = RGB(255, 248, 235); border = theme.warn; txt = RGB(180, 120, 10); }
-        if (!enabled) { fill = RGB(245, 246, 248); border = theme.border; txt = RGB(160, 168, 178); }
+        else if (style == 2) { fill = theme.danger_bg; border = theme.err; txt = theme.err; }
+        else if (style == 3) { fill = theme.warn_bg; border = theme.warn; txt = theme.warn_text; }
+        if (!enabled) { fill = theme.disabled_bg; border = theme.border; txt = theme.disabled_text; }
         else if (hov) { fill = (style == 1) ? theme.primary_dark : theme.hover; }
 
         round_rect(r, fill, active_ == id && hov ? theme.primary : border, 4);
@@ -744,31 +795,38 @@ public:
 
 
     void text_input(const char* id, RECT r, std::string& value, const wchar_t* hint = nullptr,
-                    int align = 0) {
+                    int align = 0, bool password = false) {
         bool hov = hovered(r);
         if (hov && in_.pressed) {
             active_ = id;
             focus_ = id;
         }
         bool focused = focus_ == id;
+        if (focused && in_.pressed && !hov) {
+            focus_.clear();
+            focused = false;
+        }
         // 官方 MaaTextBoxDefaultStyle：Background=RegionBrushOpacity25、圆角 4
         round_rect(r, theme.card_bg, focused ? theme.primary : theme.border, 4);
         std::wstring w = widen(value);
+        std::wstring disp = password ? std::wstring(w.size(), L'\u2022') : w;
         int ty = r.top + ((r.bottom - r.top) - text_size(L"Ag", font).cy) / 2;
-        if (w.empty() && hint) {
+        RECT tr{ r.left + 4, r.top + 1, r.right - 4, r.bottom - 1 };
+        push_clip(tr);
+        if (disp.empty() && hint) {
             if (align == 1) {
                 SIZE hs = text_size(hint, font);
-                text((r.left + r.right - hs.cx) / 2, ty, hint, RGB(170, 178, 190), font);
+                text((r.left + r.right - hs.cx) / 2, ty, hint, theme.faint, font);
             } else {
-                text(r.left + 8, ty, hint, RGB(170, 178, 190), font);
+                text(r.left + 8, ty, hint, theme.faint, font);
             }
         } else {
             // 水平滚动以露出光标
             int maxw = r.right - r.left - 14;
-            SIZE sz = text_size(w, font);
+            SIZE sz = text_size(disp, font);
             int x = (align == 1) ? (r.left + r.right - sz.cx) / 2 : r.left + 7;
             if (sz.cx > maxw) x = r.left + 7 - (sz.cx - maxw) - 8;
-            text(x, ty, w, theme.text, font);
+            text(x, ty, disp, theme.text, font);
             if (focused && (GetTickCount() / 530) % 2 == 0) {
                 int cx = std::min<int>(x + sz.cx + 1, (int)r.right - 3);
                 HPEN p = CreatePen(PS_SOLID, 1, theme.text);
@@ -779,8 +837,44 @@ public:
                 DeleteObject(p);
             }
         }
+        pop_clip();
         // 键盘输入
         if (focused) {
+            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (ctrl && in_.vk == 'V') {
+                if (OpenClipboard(hwnd_)) {
+                    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+                    if (h) {
+                        const wchar_t* p = (const wchar_t*)GlobalLock(h);
+                        if (p) {
+                            std::wstring clip(p);
+                            GlobalUnlock(h);
+                            std::wstring clean;
+                            clean.reserve(clip.size());
+                            for (wchar_t ch : clip) {
+                                if (ch != L'\r' && ch != L'\n') clean.push_back(ch);
+                            }
+                            value += util::wide_to_utf8(clean);
+                        }
+                    }
+                    CloseClipboard();
+                }
+            } else if (ctrl && in_.vk == 'C' && !password) {
+                if (OpenClipboard(hwnd_)) {
+                    EmptyClipboard();
+                    size_t bytes = (w.size() + 1) * sizeof(wchar_t);
+                    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                    if (hg) {
+                        void* dst = GlobalLock(hg);
+                        if (dst) {
+                            memcpy(dst, w.c_str(), bytes);
+                            GlobalUnlock(hg);
+                        }
+                        if (!SetClipboardData(CF_UNICODETEXT, hg)) GlobalFree(hg);
+                    }
+                    CloseClipboard();
+                }
+            }
             if (!in_.char_inputs.empty()) {
                 for (size_t i = 0; i < in_.char_inputs.size(); ++i) {
                     wchar_t ch = in_.char_inputs[i];
@@ -804,7 +898,6 @@ public:
                 }
             }
             if (in_.vk == VK_RETURN || in_.vk == VK_ESCAPE) focus_.clear();
-            if (in_.vk == VK_DELETE) value.clear();
         }
     }
 
@@ -910,6 +1003,7 @@ public:
     // ------------------------------------------------------------ 渲染目标
     // 切换亮/暗主题（官方界面主题设置；影响所有控件配色）
     void set_theme_mode(bool dark) { theme.set_dark(dark); }
+    void set_hwnd(HWND h) { hwnd_ = h; }
 
     void set_dc(HDC dc, RECT client) {
         dc_ = dc;
@@ -937,6 +1031,7 @@ private:
     }
 
     HDC dc_ = nullptr;
+    HWND hwnd_ = nullptr;
     RECT clip_{ 0, 0, 0, 0 };
     std::vector<RECT> clip_stack_;
     std::vector<int> dc_save_;
@@ -961,6 +1056,8 @@ private:
     RECT scroll_rect_{};
     int scroll_content_h_ = 0;
     float* scroll_y_ = nullptr;
+    float* scroll_drag_ = nullptr;
+    int scroll_drag_off_ = 0;
 };
 
 } // namespace gui
