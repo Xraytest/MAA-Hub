@@ -487,6 +487,16 @@ inline bool panel_fight(PanelCtx& c) {
             c.get_int("stage_reset_mode", 0));
         if (pick >= 0) c.set_int("stage_reset_mode", pick);
         c.y += 36;
+        // 「指定关卡」此前没有目标输入，选项形同虚设——补上；hub 侧消费
+        // stage_reset_target（exec_worker 关卡链的末位）
+        if (c.get_int("stage_reset_mode", 0) == 2) {
+            std::string tgt = c.get_str("stage_reset_target", "");
+            c.g.text_input((c.exec_id + ":Fight:stage_reset_target").c_str(),
+                           { c.x, c.y, c.right, c.y + 30 }, tgt,
+                           L"\u91cd\u7f6e\u540e\u7684\u5173\u5361\uff0c\u5982 1-7");
+            c.set_str("stage_reset_target", tgt);
+            c.y += 36;
+        }
     }
     pc_check(c, "use_alternate_stage", L"\u4f7f\u7528\u5907\u9009\u5173\u5361");
     pc_check(c, "report_to_penguin", L"\u4e0a\u62a5\u6389\u843d\u7edf\u8ba1\u5230\u4f01\u9e45\u7269\u6d41");

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <random>
 #include <mutex>
+#include <thread>
 
 namespace util {
 
@@ -470,6 +471,42 @@ inline void ensure_dir(const std::string& path) {
         if (!cur.empty() && !dir_exists(cur)) CreateDirectoryW(utf8_to_wide(cur).c_str(), nullptr);
         i = next + 1;
     }
+}
+
+// ---------------- agent 子进程 stdout 排空 ----------------
+// CreatePipe 默认缓冲只有 ~4KB：子进程把 stdout 管道写满后，任何写入都会永久阻塞。
+// MaaEnd 的 dynamic_html_log 按官方客户端约定往 stdout 打 UI 日志（客户端持续排空），
+// hub 若只建管道不读，AutoEcoFarm 第 4 次倒计时即写满管道、整个 agent 冻成僵尸
+// （2026-11-18 / 11-21 两次实锤，docs/audit-20261123-daily-failures.md）。
+// 这里把 stdout_read 移交给后台线程持续排空落盘；ProcHandle 置空避免 close() 双重关闭。
+// 注意：worker_client 的 worker 子进程以 stdout 为 IPC 通道、自己在 read_loop 消费，
+// 绝不能用这个函数。
+inline void drain_proc_stdout(ProcHandle& p, const std::string& log_dir, const std::string& stem) {
+    if (!p.stdout_read) return;
+    ensure_dir(log_dir);
+    HANDLE h = p.stdout_read;
+    p.stdout_read = nullptr;   // 句柄所有权移交给排空线程
+    std::wstring path = utf8_to_wide(log_dir + "\\" + stem + ".stdout.log");
+    std::thread([h, path] {
+        static constexpr DWORD kRotateBytes = 4 << 20;   // 单文件 4MB 轮转一次，常年追加设上限
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)
+            && (fa.nFileSizeHigh > 0 || fa.nFileSizeLow > kRotateBytes)) {
+            std::wstring old = path + L".old";
+            MoveFileExW(path.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING);
+        }
+        HANDLE out = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                                 OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        char buf[4096];
+        DWORD n = 0;
+        while (out != INVALID_HANDLE_VALUE
+               && ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            DWORD w = 0;
+            WriteFile(out, buf, n, &w, nullptr);
+        }
+        if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+        CloseHandle(h);   // 子进程退出 -> 管道 EOF，线程自然收尾
+    }).detach();
 }
 
 // 收尾排查用：--cli 跑完任务后卡死时，只有日志能指出卡在 shutdown 的哪一步

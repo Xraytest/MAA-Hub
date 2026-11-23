@@ -1845,6 +1845,37 @@ private:
         return ptr;
     }
 
+    // Fight 的有序关卡链：把 UI 存的关卡策略解析成实际依次尝试的关卡序列。
+    // 链里含去重；「当前/上次」补一条空关卡（核心沿用上次打的图）。
+    // 返回空 = 无策略可介入（保持纯透传原样跑一次）。
+    static std::vector<std::string> resolve_fight_stages(const mj::Value& params) {
+        std::vector<std::string> chain;
+        auto push = [&](const std::string& s) {
+            if (std::find(chain.begin(), chain.end(), s) != chain.end()) return;
+            chain.push_back(s);
+        };
+        std::string stage = params.get_str("stage", "");
+        if (!stage.empty()) push(stage);
+        if (params.get_bool("use_alternate_stage", false)) {
+            std::string csv = params.get_str("candidate_stages", "");
+            size_t p = 0;
+            while (p < csv.size()) {
+                size_t q = csv.find(',', p);
+                std::string tok = csv.substr(p, q == std::string::npos ? std::string::npos : q - p);
+                if (!tok.empty()) push(tok);
+                if (q == std::string::npos) break;
+                p = q + 1;
+            }
+        }
+        const int reset = (int)params.get_int("stage_reset_mode", 0);
+        if (reset == 1) push("");                       // 当前/上次
+        else if (reset == 2) {
+            std::string tgt = params.get_str("stage_reset_target", "");
+            if (!tgt.empty()) push(tgt);                // 指定关卡
+        }
+        return chain;
+    }
+
     void exec_worker(Plan plan) {
         std::string status = "done";
         std::string fail_reason;
@@ -1901,20 +1932,37 @@ private:
                 }
             }
 
-            const int max_attempts = (step.task == "StartUp") ? 2 : 1;
+            // Fight 多关卡落地（2026-11-23）：UI 的 use_alternate_stage / candidate_stages /
+            // stage_reset_mode 此前只存不消费，活动关过期（TL-4 实锤）后整步连败。
+            // 派发时把关卡策略解析成有序尝试链，导航失败降级到下一关再跑。
+            std::vector<std::string> fight_chain =
+                (step.task == "Fight" && cur_exec.kind == "maa")
+                    ? resolve_fight_stages(step.params)
+                    : std::vector<std::string>();
+            const int max_attempts = !fight_chain.empty()
+                ? (int)fight_chain.size()
+                : ((step.task == "StartUp") ? 2 : 1);
             bool step_ok = false;
             bool fatal = false;
             std::string step_err;
             for (int attempt = 0; attempt < max_attempts; ++attempt) {
+                mj::Value post_params = step.params;
                 if (attempt > 0) {
-                    util::trace("[exec] StartUp failed on first attempt for " + step.exec_id + ", retrying once");
-                    if (!connect_executor(step.exec_id)) {
-                        step_err = "StartUp: reconnect failed before retry";
-                        fatal = true;
-                        break;
+                    if (!fight_chain.empty()) {
+                        post_params.set("stage", mj::Value(fight_chain[(size_t)attempt]));
+                        util::trace("[exec] fight stage fallback: " + step.exec_id
+                                    + " '" + fight_chain[(size_t)attempt - 1]
+                                    + "' -> '" + fight_chain[(size_t)attempt] + "'");
+                    } else if (step.task == "StartUp") {
+                        util::trace("[exec] StartUp failed on first attempt for " + step.exec_id + ", retrying once");
+                        if (!connect_executor(step.exec_id)) {
+                            step_err = "StartUp: reconnect failed before retry";
+                            fatal = true;
+                            break;
+                        }
                     }
                 }
-                int64_t tid = run_on_executor(step.exec_id, step.task, step.params);
+                int64_t tid = run_on_executor(step.exec_id, step.task, post_params);
                 if (tid <= 0) {
                     step_err = step.task + ": 启动失败";
                     if (step.task == "StartUp" && attempt + 1 < max_attempts) continue;
@@ -1967,6 +2015,7 @@ private:
                 if (run_state == "failed") {
                     step_err = step.task + ": " + run_error;
                     if (step.task == "StartUp" && attempt + 1 < max_attempts) continue;
+                    if (!fight_chain.empty() && attempt + 1 < max_attempts) continue;
                     if (step.task == "StartUp") fatal = true;
                     break;
                 }

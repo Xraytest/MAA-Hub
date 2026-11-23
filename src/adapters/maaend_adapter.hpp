@@ -839,6 +839,18 @@ public:
                     errors[i] = "spawn failed: " + job.exe;
                     return;
                 }
+                // 2026-11-23 修复：agent 的 stdout 管道此前建了从不读——MaaEnd 的
+                // dynamic_html_log 往 stdout 打 UI 日志，写满 4KB 默认缓冲即把整个
+                // agent 冻成僵尸（AutoEcoFarm 第 4 次倒计时必现，两次实锤，
+                // docs/audit-20261123-daily-failures.md）。排空落盘 debug\<stem>.stdout.log。
+                {
+                    std::string stem = job.exe;
+                    size_t slash = stem.find_last_of("\\/");
+                    if (slash != std::string::npos) stem = stem.substr(slash + 1);
+                    if (stem.size() > 4 && stem.compare(stem.size() - 4, 4, ".exe") == 0)
+                        stem.resize(stem.size() - 4);
+                    util::drain_proc_stdout(proc, st_.install_dir + "\\debug", stem);
+                }
                 {
                     std::lock_guard<std::mutex> lk(proc_mtx_);
                     agent_procs_.push_back(proc);
