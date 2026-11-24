@@ -358,8 +358,22 @@ public:
         if (!w) return false;
         mj::Value r;
         // 连接超时 60s（原 180s 太长：期间 backend 线程被独占，
-        // 用户其他点击全部排队，表现为界面"死机"）
-        return w->call("connect", mj::Value::object(), 60000, r);
+        // 用户其他点击全部排队，表现为界面"死机"）。
+        // 启用自动拉起模拟器时追加启动等待预算，否则 worker 还在等、hub 已判失败。
+        int64_t timeout_ms = 60000;
+        {
+            bool emu = false;
+            if (const mj::Value* v = cur.config.find_path("connect.emulator_launch")) {
+                emu = (v->is_bool() && v->as_bool()) || (v->is_int() && v->as_int(0) != 0);
+            }
+            if (emu) {
+                int64_t wait_s = cur.config.get_path_int("connect.emulator_wait_sec", 90);
+                if (wait_s < 10) wait_s = 10;
+                if (wait_s > 300) wait_s = 300;
+                timeout_ms = 60000 + wait_s * 1000;
+            }
+        }
+        return w->call("connect", mj::Value::object(), (int)timeout_ms, r);
     }
 
     void disconnect_executor(const std::string& id) {

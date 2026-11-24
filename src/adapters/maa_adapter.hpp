@@ -140,6 +140,57 @@ public:
                 bool set_ok = fn_.AsstSetInstanceOption(handle_, INST_TOUCH_MODE, touch.c_str());
                 touch_note = " touch_mode=" + touch + (set_ok ? "" : "(核心不接受)");
             }
+            // 自动拉起模拟器（对齐 MAA GUI「启动设置」）：设备未就绪时先启动再连，
+            // 避免模拟器崩溃/未开机导致整轮 connect-failed。180s 内只触发一次防风暴。
+            bool emu_launch = false;
+            if (const mj::Value* v = cfg_.find_path("connect.emulator_launch")) {
+                emu_launch = (v->is_bool() && v->as_bool())
+                          || (v->is_int() && v->as_int(0) != 0);
+            }
+            if (emu_launch) {
+                auto addr_ready = [&]() -> bool {
+                    std::string out;
+                    std::wstring cmd = L"\"" + util::utf8_to_wide(adb) + L"\" devices";
+                    if (!util::run_capture(cmd, out, 5000)) return false;
+                    return out.find(addr + "\tdevice") != std::string::npos;
+                };
+                if (!addr_ready() && util::now_sec() - last_emu_launch_ >= 180.0) {
+                    std::string path = cfg_.get_path_str("connect.emulator_path", "");
+                    if (path.empty()) path = util::find_mumu_manager_path();
+                    std::string eargs = cfg_.get_path_str("connect.emulator_args", "");
+                    std::string why;
+                    if (path.empty()) {
+                        why = "emulator path not found";
+                    } else {
+                        if (eargs.empty()) {
+                            std::wstring low = util::utf8_to_wide(path);
+                            for (auto& ch : low) ch = (wchar_t)towlower(ch);
+                            if (low.find(L"mumumanager") != std::wstring::npos) {
+                                int idx = util::mumu_index_from_address(addr);
+                                if (idx >= 0)
+                                    eargs = "control --vmindex " + std::to_string(idx) + " launch";
+                                else
+                                    why = "cannot derive MuMu index from " + addr;
+                            } else {
+                                why = "emulator_args empty（非 MuMu 需手填启动命令）";
+                            }
+                        }
+                        if (why.empty() && util::spawn_emulator(path, eargs, why)) {
+                            last_emu_launch_ = util::now_sec();
+                            util::trace("[connect] emulator launch: " + path + " " + eargs);
+                            int wait_sec = (int)cfg_.get_path_int("connect.emulator_wait_sec", 90);
+                            if (wait_sec < 10) wait_sec = 10;
+                            if (wait_sec > 300) wait_sec = 300;
+                            const double t0 = util::now_sec();
+                            while (util::now_sec() - t0 < wait_sec && !addr_ready()) Sleep(2000);
+                            util::trace("[connect] emulator wait done after "
+                                        + std::to_string((int)(util::now_sec() - t0)) + "s addr=" + addr);
+                            why.clear();
+                        }
+                    }
+                    if (!why.empty()) util::trace("[connect] emulator launch failed: " + why);
+                }
+            }
             int r = fn_.AsstAsyncConnect(handle_, adb.c_str(), addr.c_str(), conf.c_str(), true);
             if (r <= 0) {
                 st_.conn = "failed";
@@ -588,6 +639,7 @@ private:
     }
 
     mj::Value cfg_;
+    double last_emu_launch_ = 0;   // 上次自动拉起模拟器时间（180s 防重）
     mutable AppStatus st_;
     mutable double last_win_probe_ = 0;
     mutable bool cached_win_running_ = false;

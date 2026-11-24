@@ -9,6 +9,7 @@
 #include <random>
 #include <mutex>
 #include <thread>
+#include <tlhelp32.h>
 
 namespace util {
 
@@ -524,6 +525,104 @@ inline void trace(const std::string& what) {
         fclose(f);
     }
     LeaveCriticalSection(&cs);
+}
+
+// ---------------- 模拟器启动（对齐 MAA GUI「启动设置」） ----------------
+// 运行中进程的映像路径；找不到返回空
+inline std::string proc_image_path(const wchar_t* exe_name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return {};
+    std::string out;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, exe_name) != 0) continue;
+            HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!p) continue;
+            wchar_t buf[4096];
+            DWORD n = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+            if (QueryFullProcessImageNameW(p, 0, buf, &n)) out = wide_to_utf8(std::wstring(buf, n));
+            CloseHandle(p);
+            if (!out.empty()) break;
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return out;
+}
+
+// MuMu 端口 → 实例索引（MAA PR #17112 同款公式）：
+// port = 16384 + (index%32)*32 + (index/32)*4，反解 index = ((k&7)<<5)|(k>>3)
+// 另支持 5555+2N（emulator-XXXX 备用端口）与 7555。
+// 地址形态兼容：127.0.0.1:16384 与 adb 序列号 emulator-5554（端口 = NNNN+1）。
+inline int mumu_index_from_address(const std::string& address) {
+    int port = 0;
+    if (address.rfind("emulator-", 0) == 0) {
+        port = atoi(address.c_str() + 9) + 1;
+    } else {
+        size_t c = address.rfind(':');
+        if (c == std::string::npos) return -1;
+        port = atoi(address.c_str() + c + 1);
+    }
+    if (port <= 0) return -1;
+    if (port >= 16384) {
+        int k = (port - 16384) / 4;
+        return ((k & 7) << 5) | (k >> 3);
+    }
+    if (port == 7555) return 0;
+    if (port >= 5555 && (port - 5555) % 2 == 0) return (port - 5555) / 2;
+    return -1;
+}
+
+// MuMuManager.exe 自动发现（对齐 MAA FindMuMuManagerPath）：
+// 1) 从运行中的 MuMuNxDevice / MuMuPlayer 进程映像推导安装目录；
+// 2) 回退常见安装目录。
+inline std::string find_mumu_manager_path() {
+    for (const wchar_t* name : { L"MuMuNxDevice.exe", L"MuMuPlayer.exe" }) {
+        std::string img = proc_image_path(name);
+        if (img.empty()) continue;
+        std::string dir = parent_dir(img);
+        // 新版 nx_device\12.0\shell\MuMuNxDevice.exe → 上三级 = 安装目录
+        if (_wcsicmp(name, L"MuMuNxDevice.exe") == 0)
+            dir = parent_dir(parent_dir(parent_dir(dir)));
+        for (const char* rel : { "\\nx_main\\MuMuManager.exe", "\\shell\\MuMuManager.exe" }) {
+            if (file_exists(dir + rel)) return dir + rel;
+        }
+    }
+    static const char* kDirs[] = {
+        "C:\\Program Files\\Netease\\MuMuPlayer",
+        "C:\\Program Files\\Netease\\MuMuPlayer-12.0",
+        "D:\\Program Files\\Netease\\MuMuPlayer",
+        "D:\\Program Files\\Netease\\MuMuPlayer-12.0",
+    };
+    for (const char* d : kDirs) {
+        for (const char* rel : { "\\nx_main\\MuMuManager.exe", "\\shell\\MuMuManager.exe" }) {
+            if (file_exists(std::string(d) + rel)) return std::string(d) + rel;
+        }
+    }
+    return {};
+}
+
+// 脱离 hub 进程树启动模拟器：不挂 job（模拟器要活过 hub 重启）、不开管道（无背压死锁）
+inline bool spawn_emulator(const std::string& exe, const std::string& args, std::string& err) {
+    std::wstring cmd = L"\"" + utf8_to_wide(exe) + L"\"";
+    if (!args.empty()) cmd += L" " + utf8_to_wide(args);
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(L'\0');
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    std::wstring wdir = utf8_to_wide(parent_dir(exe));
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, wdir.empty() ? nullptr : wdir.c_str(), &si, &pi)) {
+        err = "CreateProcess failed err=" + std::to_string(GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
 }
 
 inline bool read_file(const std::string& path, std::string& out) {

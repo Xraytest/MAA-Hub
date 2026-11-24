@@ -274,6 +274,16 @@ inline bool panel_startup(PanelCtx& c) {
     pc_text(c, "adb_path", L"ADB \u8def\u5f84", L"\u7559\u7a7a\u4f7f\u7528\u9ed8\u8ba4");
     pc_text(c, "connect_address", L"\u8fde\u63a5\u5730\u5740",
             L"\u5982 127.0.0.1:16384\uff1b\u7559\u7a7a\u4e3a\u81ea\u52a8");
+    pc_check(c, "auto_launch_emulator", L"\u81ea\u52a8\u62c9\u8d77\u6a21\u62df\u5668",
+             L"\u8bbe\u5907\u672a\u5c31\u7eea\u65f6\u5148\u542f\u52a8\u6a21\u62df\u5668\u518d\u8fde"
+             L"\uff08\u5bf9\u9f50 MAA\u300c\u542f\u52a8\u8bbe\u7f6e\u300d\uff09");
+    if (c.get_bool("auto_launch_emulator")) {
+        pc_text(c, "emulator_path", L"\u6a21\u62df\u5668\u8def\u5f84",
+                L"\u7559\u7a7a\u81ea\u52a8\u68c0\u6d4b\uff08MuMuManager\uff09");
+        pc_text(c, "emulator_args", L"\u542f\u52a8\u547d\u4ee4",
+                L"\u7559\u7a7a\u6309\u5730\u5740\u63a8\u5bfc\uff08MuMu\uff09");
+        pc_number(c, "emulator_wait_sec", L"\u542f\u52a8\u7b49\u5f85\u79d2", 90, 10, 10, 300);
+    }
     c.y += 4;
     c.g.group_title(c.x, c.y, L"\u6a21\u62df\u5668\u589e\u5f3a");
     c.y += 16;

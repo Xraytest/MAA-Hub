@@ -4841,6 +4841,20 @@ void MaaHubWindow::apply_startup_connect(const std::string& id) {
         patch.set("mode", "adb");
         patch.set("address", addr);
     }
+    // 模拟器启动参数（对齐 MAA「启动设置」：路径/命令/等待秒数，留空自动）
+    if (auto* b = su.find("auto_launch_emulator"); b && b->is_bool()) {
+        if (b->as_bool() != e.connect.get_bool("emulator_launch", false))
+            patch.set("emulator_launch", *b);
+    }
+    for (const char* k : { "emulator_path", "emulator_args" }) {
+        auto* s = su.find(k);
+        if (!s || !s->is_string()) continue;
+        if (s->as_string() != e.connect.get_str(k, "")) patch.set(k, *s);
+    }
+    if (auto* w = su.find("emulator_wait_sec"); w && (w->is_int() || w->is_number())) {
+        if (w->as_int(0) != e.connect.get_int("emulator_wait_sec", 90))
+            patch.set("emulator_wait_sec", *w);
+    }
     if (!patch.members().empty()) hub_->update_executor_connect(id, patch);
 }
 
