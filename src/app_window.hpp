@@ -307,6 +307,9 @@ private:
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     // 「添加新任务」浮层（官方左列底部 TaskQueue.AddTask）
     bool show_add_task_ = false;
+    // r32：帧初「有浮层开着」快照。用来区分「本帧刚按下打开浮层」的那次按键，
+    // 否则浮层的「点外部关闭」会在同一帧把它自己关掉。
+    bool modal_open_prev_ = false;
     std::string add_task_filter_;
     // exec_id -> 左列显示的任务集（空 = 显示全部）
     std::map<std::string, std::set<std::string>> task_list_;

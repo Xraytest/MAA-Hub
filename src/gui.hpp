@@ -703,12 +703,22 @@ public:
         const int spin = 16;
         bool narrow = (r.right - r.left) < 60;
         RECT box{ r.left + lw, r.top, r.right, r.bottom };
-        std::string edit = std::to_string(value);
+        // r32：数字框保留「用户正在编辑的原始文本」。原来每帧都从 value 重新生成
+        // 字符串，于是 "999" 想改成 "1" 只能往后追加（9991→夹到上限）；退格删空时
+        // stoi 抛异常又把旧 value 保留回去——数值输入框实际上改不动。
+        std::string& edit = num_edit_[id];
+        if (focus_ != id) edit = std::to_string(value);   // 未聚焦 = 始终以真实值为准
         text_input(id, box, edit, nullptr, lw == 0 ? 1 : 0);
-        int nv = value;
-        try { nv = std::stoi(edit); } catch (...) {}
+        int raw = value;
+        bool parsed = false;
+        if (!edit.empty()) {
+            try { raw = std::stoi(edit); parsed = true; } catch (...) {}
+        }
+        int nv = raw;
         if (nv < min_v) nv = min_v;
         if (nv > max_v) nv = max_v;
+        // 超范围夹取后立刻回填显示，避免"显示的数和生效的数"脱节
+        if (parsed && nv != raw) edit = std::to_string(nv);
         value = nv;
         if (narrow) return;
         int mid = (r.top + r.bottom) / 2;
@@ -718,8 +728,14 @@ public:
         // 官方样式：右端只有一个菱形（上下箭头共用轮廓），无分隔线、无 hover 底色
         icon_diamond({ r.right - spin, r.top, r.right - 2, r.bottom },
                      (hup || hdn) ? theme.primary : theme.dim);
-        if (hup && in_.pressed) value = (value + step > max_v) ? max_v : value + step;
-        if (hdn && in_.pressed) value = (value - step < min_v) ? min_v : value - step;
+        if (hup && in_.pressed) {
+            value = (value + step > max_v) ? max_v : value + step;
+            edit = std::to_string(value);   // 箭头改的是真实值，编辑缓冲同步刷新
+        }
+        if (hdn && in_.pressed) {
+            value = (value - step < min_v) ? min_v : value - step;
+            edit = std::to_string(value);
+        }
     }
 
     // 提示行（对应 MAA 的 Tip 文本，三级文字色）
@@ -729,8 +745,10 @@ public:
 
     // 三态复选框（对应 MAA 官方语义）：
     //   左键 = 开/关切换；右键 = 切换「仅生效一次」（该次运行有效，不写入配置）
+    // wrap：窄矩形下是否折行。任务列表行 hover 时右侧要让出工具按钮，
+    //       此时传 false 走「单行 + 省略号」，避免折行溢出到下一行。
     bool checkbox3(const char* id, RECT r, const std::wstring& label, CheckState& st,
-                   int* label_lines = nullptr) {
+                   int* label_lines = nullptr, bool wrap = true) {
         bool hov = hovered(r);
         if (hov && in_.pressed) active_ = id;
         bool changed = false;
@@ -773,6 +791,9 @@ public:
         int lines = 1;
         if (full.cx <= avail) {
             text(tx, r.top + tpad, label, label_c, font);
+        } else if (!wrap) {
+            // 单行 + 省略号（任务列表 hover 出工具按钮时用，绝不折行）
+            text(tx, r.top + tpad, ellipsize(label, avail, font), label_c, font);
         } else {
             // 按可用宽度逐字换行（最多两行）
             std::wstring line1, line2;
@@ -1039,6 +1060,9 @@ private:
     std::string r_active_;   // 右键活动控件
     std::string active_;
     std::string focus_;
+    // r32：数字输入框（number_input）的编辑缓冲，按控件 id 键控。
+    // 聚焦期间以缓冲为权威（可清空/可插改），未聚焦时由真实值回填。
+    std::map<std::string, std::string> num_edit_;
     // 下拉框：展开中的控件、待登记的弹出层、帧末回收的点击
     struct ComboPop {
         std::string key;

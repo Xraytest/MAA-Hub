@@ -437,7 +437,12 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CAPTURECHANGED:
-        if ((HWND)lp != hwnd) {
+        // r32 P0：只有「按住期间被别的窗口夺走 capture」才算失捕。
+        // 自家 WM_LBUTTONUP 里的 ReleaseCapture() 会同步投递本消息（lParam=NULL），
+        // 而那一刻 input_.down 已置 false、released 还没被本帧消化；若在这里
+        // cancel_active()，所有「按下记 active_、松开比对 active_」的控件
+        // （button / checkbox3 / option_strip / button_group / combo）就永远收不到点击。
+        if ((HWND)lp != hwnd && input_.down) {
             input_.down = false;
             drag_pending_task_.clear();
             drag_task_.clear();
@@ -699,6 +704,9 @@ void MaaHubWindow::on_paint(HDC dc, RECT client) {
         power_active = !pending_power_action_.empty();
     }
     bool global_modal = show_new_exec_ || show_edit_exec_ || exec_ctx_open_ || show_edit_sched_ || power_active;
+    // r32：帧初快照，供浮层「点外部关闭」区分本帧刚打开它的那次按键
+    modal_open_prev_ = show_add_task_ || show_post_action_ || ctx_menu_open_
+                    || !renaming_task_.empty() || task_split_open_;
     gui_.begin(global_modal ? gui::Input{} : input_);
     gui_.fill(client, gui_.theme.bg);
     sync_window_title();
@@ -1365,6 +1373,11 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
         show_add_task_ = false;
         return;
     }
+    // r32：点卡片外区域即关闭——关闭按钮失灵时这是唯一出口（否则整页输入被锁死）
+    if (modal_open_prev_ && gui_.input().pressed && !gui_.hovered(card)) {
+        show_add_task_ = false;
+        return;
+    }
 
     // 搜索框
     RECT search{ card.left + 16, card.top + 62, card.right - 16, card.top + 88 };
@@ -1467,6 +1480,12 @@ void MaaHubWindow::draw_post_action(RECT area, const std::string& id) {
               gui_.theme.dim, gui_.font_small);
     RECT close_btn{ card.right - 76, card.top + 12, card.right - 16, card.top + 36 };
     if (gui_.button("postaction-close", close_btn, L"\u5173\u95ed", 0)) {
+        show_post_action_ = false;
+        return;
+    }
+    // r32：点卡片外区域即关闭（与右键菜单一致）。按钮失灵时这是唯一可用出口。
+    // modal_open_prev_ 挡住「本帧刚用齿轮打开」的那次按下，避免开了立刻又关。
+    if (modal_open_prev_ && gui_.input().pressed && !gui_.hovered(card)) {
         show_post_action_ = false;
         return;
     }
@@ -1780,11 +1799,17 @@ void MaaHubWindow::draw_rename_box(RECT area, const std::string& id) {
     gui_.text(box.left + 12, box.top + 13, L"\u65b0\u540d\u79f0", gui_.theme.dim, gui_.font_small);
     RECT ir{ box.left + 64, box.top + 7, box.right - 144, box.bottom - 7 };
     gui_.text_input("rename-input", ir, rename_buf_, nullptr);
-    RECT ok_b{ box.right - 138, box.top + 7, box.right - 76, box.bottom - 7 };
-    if (gui_.button("rename-ok", ok_b, L"\u786e\u5b9a", 1)) {
+    // r32：回车即提交（纯键盘也能收尾），避免只能靠「确定」按钮
+    auto commit = [this] {
         task_alias_[rename_exec_ + "|" + renaming_task_] = rename_buf_;
         save_task_alias();
         renaming_task_.clear();
+    };
+    RECT ok_b{ box.right - 138, box.top + 7, box.right - 76, box.bottom - 7 };
+    if (gui_.button("rename-ok", ok_b, L"\u786e\u5b9a", 1)) {
+        commit();
+    } else if (gui_.input().vk == VK_RETURN) {
+        commit();
     }
     RECT cancel_b{ box.right - 70, box.top + 7, box.right - 8, box.bottom - 7 };
     if (gui_.button("rename-cancel", cancel_b, L"\u53d6\u6d88", 0)) {
@@ -2150,6 +2175,18 @@ void MaaHubWindow::page_executor(RECT content) {
     gui::Input saved_in = gui_.input();
     bool local_modal = show_add_task_ || show_post_action_ || ctx_menu_open_
                     || !renaming_task_.empty() || task_split_open_;
+    // r32：浮层的关闭按钮本身是 button()（按下记 active_ / 松开比对），
+    // 一旦点击链失灵，浮层就永远关不掉，而 local_modal 会清空整页输入
+    // （复选框、输入框全体失效，左栏/顶栏仍可用）——除重启无法自愈。
+    // 这里给一条不依赖鼠标的退出路径。
+    if (local_modal && input_.vk == VK_ESCAPE) {
+        show_add_task_ = false;
+        show_post_action_ = false;
+        ctx_menu_open_ = false;
+        task_split_open_ = false;
+        renaming_task_.clear();
+        local_modal = false;
+    }
     if (local_modal) gui_.begin(gui::Input{});
     const int COL_W = (frame.right - frame.left) / 3;
     RECT col0{ frame.left, frame.top, frame.left + COL_W, frame.bottom };
@@ -2372,81 +2409,76 @@ void MaaHubWindow::page_executor(RECT content) {
         if (al != task_alias_.end() && !al->second.empty()) {
             label = gui::widen(al->second);
         }
+        // 官方任务项右侧：常态是 16px 齿轮（配置入口标识，点击效果等同点行选中）；
+        // hover 时让位给 复制/重命名/删除 三个 22x22 图标按钮（官方 TaskActionButtonStyle）。
+        // r32：原来齿轮与操作键画在同一处右端 16px —— 删除图标直接压在齿轮上；
+        // 而且复选框命中区一直铺到 164px，点「重命名/复制」会顺带切一次勾选。
+        // 现在：hover 时任务名矩形收窄到操作键左侧（单行 + 省略号），
+        // 图标与文字、齿轮与删除键两两互不重叠。
+        const int ACT_W = 66;                    // 3 × 22
+        const int gear_left = item.right - 22;   // 16px 图标 + 6px 右边距
+        const int act_left = gear_left - 4 - ACT_W;
+        RECT lr = cbr;
+        if (hov && act_left - 2 > lr.left + 40) lr.right = act_left - 2;
         CheckState st = ui.once ? CheckState::Once
                                 : (ui.checked ? CheckState::On : CheckState::Off);
-        gui_.checkbox3(("cb-" + id + "-" + name).c_str(), cbr, label, st);
+        gui_.checkbox3(("cb-" + id + "-" + name).c_str(), lr, label, st, nullptr, !hov);
         bool prev_checked = ui.checked;
         ui.checked = (st == CheckState::On);
         ui.once = (st == CheckState::Once);
         if (ui.checked != prev_checked) sync_task_checks(id, tasks);
-        // 官方任务项右侧：ConfigGeometry 齿轮图标（常态 SecondaryText 色，
-        // 选中/hover 时 Primary 色）；hover 时再显示 复制/重命名/删除 三个
-        // 22x22 图标按钮（官方 TaskActionButtonStyle）
         bool act_hit = false;
-        {
-            int isz = 16;
-            int ix = item.right - isz - 6;
-            int iy = item.top + ((item.bottom - item.top) - isz) / 2;
-            RECT gear_r{ ix, iy, ix + isz, iy + isz };
-            COLORREF gear_c = (name == sel_task) ? gui_.theme.primary : gui_.theme.dim;
-            gui_.icon_gear(gear_r, gear_c);
-            if (hov) {
-                // hover 操作按钮（从右往左：删除、重命名、复制）
-                int bx = item.right - 22;
-                int by = item.top + ((item.bottom - item.top) - 22) / 2;
-                struct Act { const char* id; const wchar_t* tip; int kind; };
-                const Act acts[] = {
-                    { "del",  L"\u5220\u9664", 2 },
-                    { "ren",  L"\u91cd\u547d\u540d", 1 },
-                    { "cpy",  L"\u590d\u5236", 0 },
-                };
-                for (auto& a : acts) {
-                    RECT br{ bx, by, bx + 22, by + 22 };
-                    bool bh = gui_.input().mouse.x >= br.left
-                           && gui_.input().mouse.x < br.right
-                           && gui_.input().mouse.y >= br.top
-                           && gui_.input().mouse.y < br.bottom;
-                    if (bh) gui_.round_rect(br, gui_.theme.hover, gui_.theme.hover, 3);
-                    RECT ir{ br.left + 4, br.top + 4, br.right - 4, br.bottom - 4 };
-                    if (a.kind == 0) gui_.icon_copy_task(ir, gui_.theme.dim);
-                    else if (a.kind == 1) gui_.icon_rename_task(ir, gui_.theme.dim);
-                    else gui_.icon_delete_task(ir, gui_.theme.err);
-                    if (bh && gui_.input().pressed) {
-                        act_hit = true;
-                        if (a.kind == 1) {
-                            renaming_task_ = name;
-                            rename_exec_ = id;
-                            auto alr = task_alias_.find(id + "|" + name);
-                            rename_buf_ = alr == task_alias_.end() ? "" : alr->second;
-                        } else if (a.kind == 0) {
-                            auto alc = task_alias_.find(id + "|" + name);
-                            std::string base = alc == task_alias_.end() ? name : alc->second;
-                            task_alias_[id + "|" + name] = base + " (\u526f\u672c)";
-                            save_task_alias();
-                        } else {
-                            // 删除 = 移出左列列表
-                            if (task_list_.find(id) == task_list_.end()) {
-                                for (auto& tt : tasks) task_list_[id].insert(tt.get_str("name", ""));
-                            }
-                            task_list_[id].erase(name);
-                            save_task_list();
-                            set_notice("\u5df2\u5c06\u4efb\u52a1\u79fb\u51fa\u5217\u8868");
+        if (hov) {
+            // hover 操作按钮（从左往右：删除、重命名、复制）
+            int bx = act_left;
+            int by = item.top + ((item.bottom - item.top) - 22) / 2;
+            struct Act { const char* id; const wchar_t* tip; int kind; };
+            const Act acts[] = {
+                { "del",  L"\u5220\u9664", 2 },
+                { "ren",  L"\u91cd\u547d\u540d", 1 },
+                { "cpy",  L"\u590d\u5236", 0 },
+            };
+            for (auto& a : acts) {
+                RECT br{ bx, by, bx + 22, by + 22 };
+                bool bh = gui_.input().mouse.x >= br.left
+                       && gui_.input().mouse.x < br.right
+                       && gui_.input().mouse.y >= br.top
+                       && gui_.input().mouse.y < br.bottom;
+                if (bh) gui_.round_rect(br, gui_.theme.hover, gui_.theme.hover, 3);
+                RECT ir{ br.left + 4, br.top + 4, br.right - 4, br.bottom - 4 };
+                if (a.kind == 0) gui_.icon_copy_task(ir, gui_.theme.dim);
+                else if (a.kind == 1) gui_.icon_rename_task(ir, gui_.theme.dim);
+                else gui_.icon_delete_task(ir, gui_.theme.err);
+                if (bh && gui_.input().pressed) {
+                    act_hit = true;
+                    if (a.kind == 1) {
+                        renaming_task_ = name;
+                        rename_exec_ = id;
+                        auto alr = task_alias_.find(id + "|" + name);
+                        rename_buf_ = alr == task_alias_.end() ? "" : alr->second;
+                    } else if (a.kind == 0) {
+                        auto alc = task_alias_.find(id + "|" + name);
+                        std::string base = alc == task_alias_.end() ? name : alc->second;
+                        task_alias_[id + "|" + name] = base + " (\u526f\u672c)";
+                        save_task_alias();
+                    } else {
+                        // 删除 = 移出左列列表
+                        if (task_list_.find(id) == task_list_.end()) {
+                            for (auto& tt : tasks) task_list_[id].insert(tt.get_str("name", ""));
                         }
+                        task_list_[id].erase(name);
+                        save_task_list();
+                        set_notice("\u5df2\u5c06\u4efb\u52a1\u79fb\u51fa\u5217\u8868");
                     }
-                    bx -= 22;
                 }
-                // hover 时齿轮让位给操作按钮
-            } else {
-                // 非 hover：齿轮可点击打开设置
-                bool gh = gui_.input().mouse.x >= gear_r.left
-                       && gui_.input().mouse.x < gear_r.right
-                       && gui_.input().mouse.y >= gear_r.top
-                       && gui_.input().mouse.y < gear_r.bottom;
-                if (gh && gui_.input().pressed) {
-                    for (auto& kv : task_ui_[id]) kv.second.selected = false;
-                    ui.selected = true;
-                }
+                bx += 22;
             }
+        } else {
+            // 非 hover：齿轮（配置入口标识）。点它等同于点行——行级选中在下方统一处理。
+            int isz = 16;
+            int iy = item.top + ((item.bottom - item.top) - isz) / 2;
+            gui_.icon_gear({ gear_left, iy, gear_left + isz, iy + isz },
+                           (name == sel_task) ? gui_.theme.primary : gui_.theme.dim);
         }
         if (hov && !act_hit && gui_.input().pressed) {
             for (auto& kv : task_ui_[id]) kv.second.selected = false;
