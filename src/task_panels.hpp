@@ -8,6 +8,7 @@
 
 #include "gui.hpp"
 #include "json.hpp"
+#include "stage_catalog.hpp"
 
 namespace hub {
 
@@ -25,6 +26,7 @@ struct PanelCtx {
     bool advanced = false;   // 官方「常规设置 / 高级设置」两页：同一面板只画其中一页
     std::function<std::string(const wchar_t*, const wchar_t*)> pick_file = nullptr;
     std::function<void(const std::string&, const wchar_t*, const wchar_t*)> pick_file_async = nullptr;
+    std::function<const stage_catalog::StageCatalog*()> stage_catalog = nullptr;
     // r24：dirty 感知写入。控件没被操作时不再回写 params，避免用帧初值覆盖
     // 外部（backend 导入线程）刚写入 Hub 的参数；未改动帧由调用方对比
     // before/params 决定零持久化写回。
@@ -169,12 +171,11 @@ inline void pc_file(PanelCtx& c, const std::string& key, const std::wstring& lab
     c.y += 36;
 }
 
-// 横向单选（选项条）
 inline void pc_radio(PanelCtx& c, const std::string& key,
                      const std::vector<std::wstring>& opts, int def = 0) {
     int cur = c.get_int(key, def);
-    RECT r{ c.x, c.y, c.right, c.y + 24 };
-    int hit = c.g.option_strip((c.exec_id + ":" + c.task + ":" + key).c_str(), r, opts, cur);
+    RECT r{ c.x, c.y, c.right, c.y + 30 };
+    int hit = c.g.combo((c.exec_id + ":" + c.task + ":" + key).c_str(), r, opts, cur);
     if (hit >= 0) cur = hit;
     c.set_int(key, cur, cur != c.get_int(key, def));
     c.y += 36;
@@ -217,23 +218,15 @@ inline int lookup_client_idx(const PanelCtx& c) {
 }
 
 inline bool task_has_advanced(const std::string& task) {
-    return task == "Fight";
+    return task == "Fight" || task == "Depot" || task == "DepotMaintain";
 }
 
-// 选项多到一格只剩两三个字时，按官方退化成 ComboBox；否则 MaaEnd 那些两三十字符的 case 名会被压成「A… U… 」。
-// 返回当前下标，params[key] 随后被写回 cases 的字符串值
 inline int pc_select(PanelCtx& c, const std::string& key,
-                   const std::vector<std::wstring>& opts, int def = 0) {
+                     const std::vector<std::wstring>& opts, int def = 0) {
     int cur = c.get_int(key, def);
-    RECT r{ c.x, c.y, c.right, c.y + 24 };
+    RECT r{ c.x, c.y, c.right, c.y + 30 };
     std::string id = c.exec_id + ":" + c.task + ":" + key;
-    int cell = (r.right - r.left) / (int)opts.size();
-    bool tight = false;
-    for (auto& o : opts) {
-        if (c.g.text_size(o, c.g.font_small).cx + 10 > cell) tight = true;
-    }
-    int hit = tight ? c.g.combo(id.c_str(), r, opts, cur)
-                    : c.g.option_strip(id.c_str(), r, opts, cur);
+    int hit = c.g.combo(id.c_str(), r, opts, cur);
     if (hit >= 0) cur = hit;
     c.set_int(key, cur, cur != c.get_int(key, def));
     c.y += 36;
@@ -321,7 +314,7 @@ inline bool panel_fight(PanelCtx& c) {
     };
     // 官方 hc:NumericUpDown：Width=70、Margin=6、HorizontalAlignment=Left —— 不撑满右列
     auto num_box = [&](const std::string& key, int& v, int lo, int hi, int top) {
-        c.g.number_input((c.exec_id + ":Fight:" + key).c_str(),
+        c.g.number_input((c.exec_id + ":" + c.task + ":" + key).c_str(),
                          { c.x + LC + M, top, c.x + LC + M + 70, top + 30 }, L"", v, 1, lo, hi);
     };
     auto cb_num = [&](const std::string& key, const std::wstring& label,
@@ -329,7 +322,7 @@ inline bool panel_fight(PanelCtx& c) {
         CheckState st = c.get_once(key) ? CheckState::Once
                         : (c.get_bool(key) ? CheckState::On : CheckState::Off);
         int lines = 1;
-        bool chg = c.g.checkbox3((c.exec_id + ":Fight:" + key).c_str(), cell_l(), label, st, &lines);
+        bool chg = c.g.checkbox3((c.exec_id + ":" + c.task + ":" + key).c_str(), cell_l(), label, st, &lines);
         c.set_bool(key, st == CheckState::On, chg);
         c.set_once(key, st == CheckState::Once, chg);
         int before = c.get_int(nkey, def);
@@ -354,7 +347,7 @@ inline bool panel_fight(PanelCtx& c) {
         CheckState mat_st = c.get_once("assigned_material") ? CheckState::Once
                             : (c.get_bool("assigned_material") ? CheckState::On : CheckState::Off);
         {
-            bool mat_chg = c.g.checkbox3((c.exec_id + ":Fight:assigned_material").c_str(), cell_l(),
+            bool mat_chg = c.g.checkbox3((c.exec_id + ":" + c.task + ":assigned_material").c_str(), cell_l(),
                                          L"指定材料", mat_st);
             c.set_bool("assigned_material", mat_st == CheckState::On, mat_chg);
             c.set_once("assigned_material", mat_st == CheckState::Once, mat_chg);
@@ -372,8 +365,8 @@ inline bool panel_fight(PanelCtx& c) {
             int cur = mat.empty() ? 0 : -1;
             for (int i = 1; i < (int)mats.size(); ++i)
                 if (mats[i] == gui::widen(mat)) { cur = i; break; }
-            int pick = c.g.combo((c.exec_id + ":Fight:drop_item").c_str(), cell_r(), mats, cur,
-                                 L"选择材料", true);
+            int pick = c.g.combo((c.exec_id + ":" + c.task + ":drop_item").c_str(), cell_r(), mats, cur,
+                                 L"选择材料", true, true);
             if (pick >= 0) c.set_str("drop_item", pick == 0 ? std::string() : kMats[pick - 1]);
             c.y += RH;
         }
@@ -382,7 +375,7 @@ inline bool panel_fight(PanelCtx& c) {
         if (mat_st == CheckState::On || mat_st == CheckState::Once) {
             const int GH = 60, SUB = GH + 2 * M;
             int cur = c.get_int("drop_mode", 0);
-            int hit = c.g.option_strip((c.exec_id + ":Fight:drop_mode").c_str(),
+            int hit = c.g.option_strip((c.exec_id + ":" + c.task + ":drop_mode").c_str(),
                                        { c.x + M, c.y + M, c.x + M + 88, c.y + M + GH },
                                        { L"刷取数量", L"目标库存" }, cur, true, true);
             if (hit >= 0 && hit != cur) c.set_int("drop_mode", hit);
@@ -401,7 +394,7 @@ inline bool panel_fight(PanelCtx& c) {
                                                L"×4", L"×5", L"×6" };
             int sv = c.get_int("series", -1);
             int cur = (sv < 0 || sv > 6) ? 0 : sv;
-            int got = c.g.combo((c.exec_id + ":Fight:series").c_str(), cell_r(), opts, cur);
+            int got = c.g.combo((c.exec_id + ":" + c.task + ":series").c_str(), cell_r(), opts, cur);
             if (got >= 0) c.set_int("series", got == 0 ? -1 : got);
             c.y += RH;
         }
@@ -410,6 +403,15 @@ inline bool panel_fight(PanelCtx& c) {
         // 「添加候选」只有开启备选时才出现、且贴左列底部；右列是一个可增删行的列表框
         // （关闭备选时 BorderThickness=0、只有一行）。
         bool alt = c.get_bool("use_alternate_stage");
+        bool custom_stage = c.get_bool("use_custom_stage");
+        bool hide_unavailable = c.get_bool("hide_unavailable_stage");
+        const stage_catalog::StageCatalog fallback_catalog = [&] {
+            stage_catalog::StageCatalog fallback;
+            fallback.stages = stage_catalog::default_stages();
+            return fallback;
+        }();
+        const stage_catalog::StageCatalog* catalog = c.stage_catalog ? c.stage_catalog() : nullptr;
+        if (!catalog || catalog->stages.empty()) catalog = &fallback_catalog;
         std::vector<std::string> cands;
         {
             std::string csv = c.get_str("candidate_stages");
@@ -437,10 +439,26 @@ inline bool panel_fight(PanelCtx& c) {
             RECT ir = alt ? RECT{ lb.left + 2, lb.top + 2 + i * ROWH, lb.right - 2,
                                   lb.top + 2 + i * ROWH + 30 }
                           : RECT{ lb.left, lb.top, lb.right, lb.top + 30 };
-            c.g.text_input((c.exec_id + ":Fight:stage" + std::to_string(i)).c_str(), ir, plan[i],
-                           i == 0 ? L"如 1-7" : nullptr);
+            if (alt && i > 0) ir.right -= 24;
+            std::string widget_id = c.exec_id + ":" + c.task + ":stage" + std::to_string(i);
+            if (custom_stage) {
+                c.g.text_input(widget_id.c_str(), ir, plan[i],
+                               i == 0 ? L"如 1-7" : nullptr);
+            } else {
+                auto choices = stage_catalog::choices_for(*catalog, plan[i], hide_unavailable);
+                std::vector<std::wstring> labels;
+                labels.reserve(choices.size());
+                int selected = -1;
+                for (size_t k = 0; k < choices.size(); ++k) {
+                    labels.push_back(gui::widen(choices[k].display));
+                    if (choices[k].value == plan[i]) selected = (int)k;
+                }
+                int picked = c.g.combo(widget_id.c_str(), ir, labels, selected,
+                                      L"请选择关卡", false, true);
+                if (picked >= 0 && picked < (int)choices.size()) plan[i] = choices[(size_t)picked].value;
+            }
             if (alt && i > 0) {
-                RECT xr{ ir.right - 20, ir.top + 8, ir.right - 6, ir.bottom - 8 };
+                RECT xr{ ir.right + 4, ir.top + 8, ir.right + 18, ir.bottom - 8 };
                 if (c.g.hovered(xr)) {
                     c.g.text(xr.left + 1, ir.top + 6, L"×", c.g.theme.dim, c.g.font);
                     if (c.g.click_in(xr)) del = i;
@@ -451,7 +469,7 @@ inline bool panel_fight(PanelCtx& c) {
         if (del > 0 && del - 1 < (int)cands.size()) cands.erase(cands.begin() + (del - 1));
         if (alt) {
             RECT bb{ c.x + M, c.y + total - RH + M, c.x + LC - M, c.y + total - M };
-            if (c.g.button((c.exec_id + ":Fight:add_candidate").c_str(), bb, L"添加候选", 0)
+            if (c.g.button((c.exec_id + ":" + c.task + ":add_candidate").c_str(), bb, L"添加候选", 0)
                 && !plan[0].empty())
                 cands.push_back(plan[0]);
         }
@@ -474,7 +492,7 @@ inline bool panel_fight(PanelCtx& c) {
         // 官方：子项以 └ 缩进，后面跟一个 Width=60 的 NumericUpDown
         c.g.text(c.x + 24, c.y + 4, L"\u2514", c.g.theme.text, c.g.font);
         int d = c.get_int("medicine_expire_days", 7);
-        c.g.number_input((c.exec_id + ":Fight:medicine_expire_days").c_str(),
+        c.g.number_input((c.exec_id + ":" + c.task + ":medicine_expire_days").c_str(),
                          { c.x + 40, c.y, c.x + 114, c.y + 24 }, L"", d, 1, 1, 30);
         c.set_int("medicine_expire_days", d);
         c.y += 30;
@@ -491,7 +509,7 @@ inline bool panel_fight(PanelCtx& c) {
                  c.g.theme.dim, c.g.font_small);
         c.y += 20;
         int pick = c.g.combo(
-            (c.exec_id + ":Fight:stage_reset_mode").c_str(),
+            (c.exec_id + ":" + c.task + ":stage_reset_mode").c_str(),
             { c.x, c.y, c.right, c.y + 30 },
             { L"\u4e0d\u91cd\u7f6e", L"\u5f53\u524d/\u4e0a\u6b21", L"\u6307\u5b9a\u5173\u5361" },
             c.get_int("stage_reset_mode", 0));
@@ -501,9 +519,24 @@ inline bool panel_fight(PanelCtx& c) {
         // stage_reset_target（exec_worker 关卡链的末位）
         if (c.get_int("stage_reset_mode", 0) == 2) {
             std::string tgt = c.get_str("stage_reset_target", "");
-            c.g.text_input((c.exec_id + ":Fight:stage_reset_target").c_str(),
-                           { c.x, c.y, c.right, c.y + 30 }, tgt,
-                           L"\u91cd\u7f6e\u540e\u7684\u5173\u5361\uff0c\u5982 1-7");
+            const stage_catalog::StageCatalog fallback_catalog = [&] {
+                stage_catalog::StageCatalog fallback;
+                fallback.stages = stage_catalog::default_stages();
+                return fallback;
+            }();
+            const stage_catalog::StageCatalog* catalog = c.stage_catalog ? c.stage_catalog() : nullptr;
+            if (!catalog || catalog->stages.empty()) catalog = &fallback_catalog;
+            auto choices = stage_catalog::choices_for(*catalog, tgt, false);
+            std::vector<std::wstring> labels;
+            int selected = -1;
+            for (size_t i = 0; i < choices.size(); ++i) {
+                labels.push_back(gui::widen(choices[i].display));
+                if (choices[i].value == tgt) selected = (int)i;
+            }
+            int picked = c.g.combo((c.exec_id + ":" + c.task + ":stage_reset_target").c_str(),
+                                   { c.x, c.y, c.right, c.y + 30 }, labels, selected,
+                                   L"\u91cd\u7f6e\u540e\u7684\u5173\u5361", false, true);
+            if (picked >= 0 && picked < (int)choices.size()) tgt = choices[(size_t)picked].value;
             c.set_str("stage_reset_target", tgt);
             c.y += 36;
         }
@@ -789,11 +822,11 @@ inline bool panel_roguelike(PanelCtx& c) {
                 for (int i = 0; i < 4; ++i) if (it->second.as_string() == kSq[i]) { sq_cur = i; break; }
             }
         }
-        int sq_hit = c.g.option_strip((c.exec_id + ":Roguelike:squad").c_str(),
-                                      { c.x, c.y, c.right, c.y + 24 },
-                                      { L"\u6307\u6325\u5206\u961f", L"\u96c6\u7fa4\u5206\u961f",
-                                        L"\u540e\u52e4\u5206\u961f", L"\u77db\u5934\u5206\u961f" },
-                                      sq_cur);
+        int sq_hit = c.g.combo((c.exec_id + ":Roguelike:squad").c_str(),
+                               { c.x, c.y, c.right, c.y + 30 },
+                               { L"\u6307\u6325\u5206\u961f", L"\u96c6\u7fa4\u5206\u961f",
+                                 L"\u540e\u52e4\u5206\u961f", L"\u77db\u5934\u5206\u961f" },
+                               sq_cur);
         if (sq_hit >= 0 && sq_hit != sq_cur) c.set_int("squad", sq_hit);
         c.y += 36;
     }
@@ -928,7 +961,48 @@ inline bool panel_end_friends(PanelCtx& c) {
 }
 
 // ---- Depot：仓库识别（库存保持）----
+inline bool panel_oper_progress(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u5e72\u5458\u517b\u6210\u8ba1\u5212");
+    c.y += 16;
+    c.g.tip_line(c.x, c.y, c.right,
+                 L"\u53ef\u5728\u65b9\u6210\u5728\u7ebf\u7f16\u8f91\u5668\u4e2d\u7ef4\u62a4\u8ba1\u5212\uff0c\u518d\u5c06\u5176\u4e2d\u7684\u5e72\u5458\u9879\u76ee\u586b\u5165\u4e0b\u65b9\u3002");
+    c.y += 34;
+    pc_text(c, "operators", L"\u5e72\u5458\u9879\u76ee",
+            L"\u591a\u4e2a\u5e72\u5458\u7528\u5206\u53f7\u5206\u9694\uff1b\u7cbe\u786e\u76ee\u6807\u53ef\u5865 JSON");
+    return true;
+}
+
+inline bool panel_user_data_update(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u66f4\u65b0\u6570\u636e");
+    c.y += 16;
+    pc_check(c, "update_oper_box", L"\u66f4\u65b0\u5e72\u5458\u8bc6\u522b\u6570\u636e");
+    pc_check(c, "update_depot", L"\u66f4\u65b0\u4ed3\u5e93\u6570\u636e");
+    pc_number(c, "trigger_interval", L"\u89e6\u53d1\u95f4\u9694\uff08\u5206\u949f\uff09", 0, 1, 0, 1440);
+    return true;
+}
+
+inline bool panel_switch_theme(PanelCtx& c) {
+    c.g.group_title(c.x, c.y, L"\u4e3b\u9898\u5217\u8868");
+    c.y += 16;
+    pc_text(c, "themes", L"\u4e3b\u9898\u540d\u79f0",
+            L"\u591a\u4e2a\u4e3b\u9898\u7528\u5206\u53f7\u6216\u6362\u884c\u5206\u9694");
+    return true;
+}
+
 inline bool panel_depot(PanelCtx& c) {
+    if (c.advanced) {
+        c.g.group_title(c.x, c.y, L"\u4efb\u52a1\u884c\u4e3a");
+        c.y += 16;
+        pc_check(c, "update_before_start", L"\u4efb\u52a1\u5f00\u59cb\u524d\u66f4\u65b0\u5e93\u5b58\u6570\u636e");
+        pc_check(c, "skip_during_activity", L"\u6d3b\u52a8\u6719\u95f4\u8df3\u8fc7");
+        pc_check(c, "skip_during_resource_collection",
+                 L"\u8d44\u6e90\u91c7\u96c6\u9650\u65f6\u5168\u5929\u5f00\u653e\u6719\u95f4\u8df3\u8fc7");
+        pc_check(c, "only_first_insufficient_plan", L"\u4ec5\u6265\u884c\u7b2c\u4e00\u4e2a\u5e93\u5b58\u4e0d\u8db3\u7684\u8ba1\u5212");
+        pc_check(c, "sort_by_progress", L"\u6309\u5e93\u5b58\u8fbe\u6210\u7387\u6392\u5e8f\u6265\u884c");
+        pc_check(c, "count_dual_chip_as_chip_pack", L"\u82af\u7247\u7ec4\u8ba1\u5165\u53cc\u82af\u7247\u6298\u7b97");
+        pc_check(c, "use_48h_expire_medicine", L"\u4f7f\u7528 48 \u5c0f\u65f6\u5185\u8fc7\u671f\u7684\u7406\u667a\u8362");
+        return true;
+    }
     // 官方 DepotMaintainTaskUserControl：14 个控件
     c.g.group_title(c.x, c.y, L"\u4efb\u52a1\u884c\u4e3a");
     c.y += 16;
@@ -990,10 +1064,10 @@ inline bool panel_reclamation(PanelCtx& c) {
             if (it->second.is_number()) cur = (int)it->second.as_int(0);
             else if (it->second.is_string() && it->second.as_string() == "Fire") cur = 1;
         }
-        int hit = c.g.option_strip((c.exec_id + ":Reclamation:theme").c_str(),
-                                   { c.x, c.y, c.right, c.y + 24 },
-                                   { L"\u6c99\u6d32\u9057\u95fb (Tales)", L"\u6c99\u4e2d\u4e4b\u706b (Fire)" },
-                                   cur);
+        int hit = c.g.combo((c.exec_id + ":Reclamation:theme").c_str(),
+                            { c.x, c.y, c.right, c.y + 30 },
+                            { L"\u6c99\u6d32\u9057\u95fb (Tales)", L"\u6c99\u4e2d\u4e4b\u706b (Fire)" },
+                            cur);
         if (hit >= 0 && hit != cur) c.set_int("theme", hit);
         c.y += 36;
     }
@@ -1177,7 +1251,10 @@ inline bool draw_task_panel(PanelCtx& c, const std::vector<mj::Value>* specs = n
     if (c.task == "Award") return panel_award(c);
     if (c.task == "Roguelike") return panel_roguelike(c);
     if (c.task == "AccountSwitch") return panel_account_switch(c);
-    if (c.task == "Depot") return panel_depot(c);
+    if (c.task == "Depot" || c.task == "DepotMaintain") return panel_depot(c);
+    if (c.task == "OperProgress") return panel_oper_progress(c);
+    if (c.task == "UserDataUpdate") return panel_user_data_update(c);
+    if (c.task == "SwitchTheme") return panel_switch_theme(c);
     if (c.task == "OperBox") return panel_operbox(c);
     if (c.task == "Reclamation") return panel_reclamation(c);
     if (c.task == "Copilot") return panel_copilot(c);

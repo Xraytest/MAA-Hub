@@ -2,10 +2,12 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <windows.h>
 #include <crtdbg.h>
 #include "../src/hub.hpp"
+#include "../src/stage_catalog.hpp"
 #include "../src/task_panels.hpp"
 
 // 测试辅助：构造指定时刻的 SYSTEMTIME（2026-11-18 是周三，dow 由参数覆盖以测星期过滤）
@@ -366,6 +368,394 @@ int main() {
         assert(l.update_auto_maa == false);
         assert(l.update_auto_maaend == false);
         assert(l.update_check_on_start == true);
+    }
+
+    // 12. 任务副本键：UI/持久化使用实例键，核心排序与执行使用基础类型。
+    {
+        assert(hub::Hub::task_base_name("Fight") == "Fight");
+        assert(hub::Hub::task_base_name("Fight#12") == "Fight");
+        auto ordered = hub::Hub::canonical_task_order("maa",
+            { "Fight#2", "CloseDown", "StartUp", "Fight" });
+        assert(ordered.size() == 4);
+        assert(ordered[0] == "StartUp");
+        assert(ordered[1] == "Fight#2" && ordered[2] == "Fight");
+        assert(ordered[3] == "CloseDown");
+
+        mj::Value themes = mj::Value::object();
+        themes.set("themes", mj::Value("默认;暗色\n明亮"));
+        mj::Value theme_out = hub::Hub::normalize_task_params("maa", "SwitchTheme", themes);
+        assert(theme_out["themes"].is_array() && theme_out["themes"].items().size() == 3);
+        assert(theme_out["themes"].items()[1].as_string() == "暗色");
+
+        mj::Value ops = mj::Value::object();
+        ops.set("operators", mj::Value("艾雅法拉;令\n维娜"));
+        mj::Value ops_out = hub::Hub::normalize_task_params("maa", "OperProgress", ops);
+        assert(ops_out["operators"].is_array() && ops_out["operators"].items().size() == 3);
+    }
+
+    // 13. 关卡目录：活动时区、过期过滤、今日提示与自定义值保留
+    {
+        using namespace hub::stage_catalog;
+        double utc_start = parse_activity_time("2026/11/22 04:00:00", 8);
+        double utc_same = parse_activity_time("2026/11/21 20:00:00", 0);
+        assert(utc_start == utc_same);
+        assert(parse_activity_time("2026/11/25 04:00:00", -7)
+               == parse_activity_time("2026/11/25 11:00:00", 0));
+        assert(game_day_of_week(parse_activity_time("2026/11/24 19:59:00", 0), "Official") == 2);
+        assert(game_day_of_week(parse_activity_time("2026/11/24 20:00:00", 0), "Official") == 3);
+        assert(normalize_server("Bilibili") == "Official");
+
+        mj::Value stages = mj::Value::array();
+        for (const char* code : { "1-7", "OS-9", "TL-9", "CE-6" }) {
+            mj::Value stage = mj::Value::object();
+            stage.set("code", mj::Value(code));
+            stages.push(std::move(stage));
+        }
+        const char* activity_json = R"JSON({
+          "Official": {
+            "sideStoryStage": {
+              "OS": {
+                "Activity": {
+                  "Tip": "雪山降临1101复刻",
+                  "StageName": "雪山降临1101",
+                  "UtcStartTime": "2026/11/22 04:00:00",
+                  "UtcExpireTime": "2026/12/02 03:59:59",
+                  "TimeZone": 8
+                },
+                "Stages": [
+                  { "Display": "OS-9", "Value": "OS-9", "Drop": "31053" },
+                  { "Display": "OS-8", "Value": "OS-8", "Drop": "31083" }
+                ]
+              },
+              "TL": {
+                "Activity": {
+                  "Tip": "时间啊，向前！",
+                  "UtcStartTime": "2026/11/01 12:00:00",
+                  "UtcExpireTime": "2026/11/22 03:59:59",
+                  "TimeZone": 8
+                },
+                "Stages": [
+                  { "Display": "TL-9", "Value": "TL-9", "Drop": "31113" }
+                ]
+              }
+            },
+            "miniGame": [
+              {
+                "Activity": "雪山降临1101",
+                "Display": "OS-喀兰贸易技术研发部",
+                "Value": "MiniGame@OS@Begin",
+                "UtcStartTime": "2026/11/22 04:00:00",
+                "UtcExpireTime": "2026/12/02 03:59:59",
+                "TimeZone": 8
+              },
+              {
+                "Activity": "时间啊，向前！",
+                "Display": "TL-过期小游戏",
+                "Value": "MiniGame@TL@Begin",
+                "UtcStartTime": "2026/11/01 12:00:00",
+                "UtcExpireTime": "2026/11/22 03:59:59",
+                "TimeZone": 8
+              },
+              {
+                "Display": "常驻小游戏",
+                "Value": "MiniGame@Permanent@Begin",
+                "UtcStartTime": "2026/01/01 00:00:00",
+                "UtcExpireTime": "2099/01/01 00:00:00",
+                "TimeZone": 8
+              }
+            ]
+          }
+        })JSON";
+        mj::Value activities = mj::Parser(activity_json).parse();
+        double now = parse_activity_time("2026/11/25 12:00:00", 0);
+        StageCatalog catalog = build(stages, activities, "Official", now);
+        bool found_os = false, found_tl = false;
+        for (const auto& stage : catalog.stages) {
+            if (stage.value == "OS-9") {
+                found_os = true;
+                assert(stage.activity && stage.open && !stage.outdated);
+                assert(stage.display == "OS-9" && stage.drop == "31053");
+            }
+            if (stage.value == "TL-9") {
+                found_tl = true;
+                assert(stage.activity && !stage.open && stage.outdated);
+            }
+        }
+        assert(found_os && found_tl);
+        auto tips = today_activity_tips(catalog, now);
+        bool tip_os = false, tip_tl = false, tip_os_mini = false;
+        bool tip_tl_mini = false, tip_permanent_mini = false;
+        for (const auto& tip : tips) {
+            if (tip.find("雪山降临1101复刻") != std::string::npos) tip_os = true;
+            if (tip.find("OS-9") != std::string::npos) tip_os = true;
+            if (tip.find("OS-喀兰贸易技术研发部") != std::string::npos) tip_os_mini = true;
+            if (tip.find("TL-9") != std::string::npos) tip_tl = true;
+            if (tip.find("TL-过期小游戏") != std::string::npos) tip_tl_mini = true;
+            if (tip.find("常驻小游戏") != std::string::npos) tip_permanent_mini = true;
+        }
+        assert(tip_os && tip_os_mini && !tip_tl && !tip_tl_mini && !tip_permanent_mini);
+        assert(!activity_open(catalog.activities[0], catalog.activities[0].start));
+        assert(!activity_open(catalog.activities[0], catalog.activities[0].expire));
+
+        auto visible = choices_for(catalog, "TL-9", true);
+        bool kept_closed_current = false, kept_os = false;
+        for (const auto& stage : visible) {
+            if (stage.value == "TL-9") kept_closed_current = true;
+            if (stage.value == "OS-9") kept_os = true;
+        }
+        assert(kept_closed_current && kept_os);
+        auto custom = choices_for(catalog, "CUSTOM-99", true);
+        assert(!custom.empty() && custom.back().value == "CUSTOM-99");
+    }
+
+    // 14. 关卡控件交互：光标编辑、选区替换、下拉选择与候选关卡
+    {
+        using namespace hub::stage_catalog;
+        Gdiplus::GdiplusStartupInput gdip_input;
+        ULONG_PTR gdip = 0;
+        assert(Gdiplus::GdiplusStartup(&gdip, &gdip_input, nullptr) == Gdiplus::Ok);
+        {
+            gui::Gui g;
+            g.init_fonts();
+            HDC screen = GetDC(nullptr);
+            HDC mem = CreateCompatibleDC(screen);
+            HBITMAP bitmap = CreateCompatibleBitmap(screen, 800, 600);
+            ReleaseDC(nullptr, screen);
+            HBITMAP old_bitmap = (HBITMAP)SelectObject(mem, bitmap);
+            RECT surface{ 0, 0, 800, 600 };
+            g.set_dc(mem, surface);
+            auto frame = [&](const gui::Input& in, const std::function<void()>& draw) {
+                PatBlt(mem, 0, 0, 800, 600, WHITENESS);
+                g.begin(in);
+                draw();
+                g.flush_combo_popup();
+                g.end();
+            };
+            gui::Input idle;
+
+            std::string text = "1-7";
+            RECT text_rect{ 20, 20, 220, 50 };
+            auto draw_text = [&] { g.text_input("test:Fight:stage0", text_rect, text); };
+            gui::Input click;
+            click.mouse = { text_rect.left + 2, 35 };
+            click.down = click.pressed = true;
+            frame(click, draw_text);
+            assert(g.focused_with_prefix("test:Fight:"));
+            gui::Input typed;
+            typed.char_inputs = L"X";
+            frame(typed, draw_text);
+            assert(text == "X1-7");
+
+            gui::Input home;
+            home.vk = VK_HOME;
+            frame(home, draw_text);
+            gui::Input del;
+            del.vk = VK_DELETE;
+            frame(del, draw_text);
+            assert(text == "1-7");
+            gui::Input end;
+            end.vk = VK_END;
+            frame(end, draw_text);
+            gui::Input back;
+            back.vk = VK_BACK;
+            frame(back, draw_text);
+            assert(text == "1-");
+
+            click.mouse = { text_rect.left + 2, 35 };
+            frame(click, draw_text);
+            gui::Input drag = click;
+            drag.pressed = false;
+            drag.mouse.x = text_rect.right - 2;
+            frame(drag, draw_text);
+            typed.char_inputs = L"OS-9";
+            frame(typed, draw_text);
+            assert(text == "OS-9");
+            click.mouse = { 500, 500 };
+            frame(click, draw_text);
+            typed.char_inputs = L"Z";
+            frame(typed, draw_text);
+            assert(text == "OS-9");
+
+            RECT combo_rect{ 20, 100, 220, 130 };
+            std::vector<std::wstring> combo_items{ L"OS-9", L"OS-8" };
+            int combo_cur = 0;
+            auto draw_combo = [&] {
+                int hit = g.combo("test:combo", combo_rect, combo_items, combo_cur);
+                if (hit >= 0) combo_cur = hit;
+            };
+            click.mouse = { 120, 115 };
+            frame(click, draw_combo);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_combo);
+            click.pressed = true;
+            click.released = false;
+            click.mouse.y = combo_rect.bottom + 2 + 26 + 13;
+            frame(click, draw_combo);
+            frame(idle, draw_combo);
+            assert(combo_cur == 1);
+
+            RECT key_combo_rect{ 20, 160, 220, 190 };
+            std::vector<std::wstring> key_items{ L"Alpha", L"Bravo", L"Charlie" };
+            int key_cur = 0;
+            auto draw_key_combo = [&] {
+                int hit = g.combo("test:key-combo", key_combo_rect, key_items, key_cur);
+                if (hit >= 0) key_cur = hit;
+            };
+            click.mouse = { 120, 175 };
+            click.down = click.pressed = true;
+            frame(click, draw_key_combo);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_key_combo);
+            gui::Input hover;
+            hover.mouse = { 120, key_combo_rect.bottom + 2 + 13 };
+            frame(hover, draw_key_combo);
+            gui::Input down;
+            down.vk = VK_DOWN;
+            down.mouse = hover.mouse;
+            frame(down, draw_key_combo);
+            gui::Input enter;
+            enter.vk = VK_RETURN;
+            frame(enter, draw_key_combo);
+            frame(idle, draw_key_combo);
+            assert(key_cur == 1);
+            click.mouse = { 120, 175 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_key_combo);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_key_combo);
+            down.vk = VK_DOWN;
+            frame(down, draw_key_combo);
+            gui::Input escape;
+            escape.vk = VK_ESCAPE;
+            frame(escape, draw_key_combo);
+            frame(idle, draw_key_combo);
+            assert(key_cur == 1);
+            click.mouse = { 120, 175 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_key_combo);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_key_combo);
+            typed.char_inputs = L"c";
+            frame(typed, draw_key_combo);
+            frame(enter, draw_key_combo);
+            frame(idle, draw_key_combo);
+            assert(key_cur == 2);
+
+            RECT search_combo_rect{ 20, 220, 220, 250 };
+            std::vector<std::wstring> search_items{ L"OS-9", L"OS-8", L"1-7" };
+            int search_cur = 0;
+            auto draw_search_combo = [&] {
+                int hit = g.combo("test:search-combo", search_combo_rect, search_items,
+                                  search_cur, L"", false, true);
+                if (hit >= 0) search_cur = hit;
+            };
+            click.mouse = { 120, 235 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_search_combo);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_search_combo);
+            typed.char_inputs = L"OS-8";
+            frame(typed, draw_search_combo);
+            frame(enter, draw_search_combo);
+            frame(idle, draw_search_combo);
+            assert(search_cur == 1);
+
+            StageCatalog catalog;
+            catalog.stages = {
+                StageChoice{ "OS-9", "OS-9", "31053", true, false, true },
+                StageChoice{ "OS-8", "OS-8", "30103", true, false, true },
+                StageChoice{ "1-7", "1-7", "", true }
+            };
+            std::string exec = "exec";
+            std::string task = "Fight";
+            hub::ParamMap params;
+            params["stage"] = mj::Value("OS-9");
+            hub::PanelCtx pctx{ g, 20, 0, 400, params, exec, task, false };
+            pctx.stage_catalog = [&] { return &catalog; };
+            auto draw_fight = [&] {
+                pctx.y = 0;
+                hub::panel_fight(pctx);
+            };
+            RECT fight_stage{ 126, 216, 394, 246 };
+            frame(idle, draw_fight);
+            click.mouse = { 260, 231 };
+            click.down = click.pressed = true;
+            frame(click, draw_fight);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_fight);
+            click.pressed = true;
+            click.released = false;
+            click.mouse.y = fight_stage.bottom + 2 + 26 + 13;
+            frame(click, draw_fight);
+            frame(idle, draw_fight);
+            assert(params["stage"].as_string() == "OS-8");
+
+            params["use_custom_stage"] = mj::Value(true);
+            frame(idle, draw_fight);
+            click.mouse = { fight_stage.left + 2, 231 };
+            click.released = false;
+            frame(click, draw_fight);
+            typed.char_inputs = L"X";
+            frame(typed, draw_fight);
+            assert(params["stage"].as_string() == "XOS-8");
+
+            params["use_custom_stage"] = mj::Value(false);
+            params["use_alternate_stage"] = mj::Value(true);
+            params["stage"] = mj::Value("OS-9");
+            params["candidate_stages"] = mj::Value("1-7");
+            frame(idle, draw_fight);
+            RECT candidate_stage{ 128, 250, 368, 280 };
+            click.mouse = { 250, 265 };
+            frame(click, draw_fight);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_fight);
+            click.pressed = true;
+            click.released = false;
+            click.mouse.y = candidate_stage.bottom + 2 + 26 + 13;
+            frame(click, draw_fight);
+            frame(idle, draw_fight);
+            assert(params["candidate_stages"].as_string() == "OS-8");
+
+            hub::ParamMap infra_params;
+            infra_params["mode"] = mj::Value((int64_t)0);
+            std::string infra_exec = "exec";
+            std::string infra_task = "Infrast";
+            hub::PanelCtx infra_ctx{ g, 20, 0, 400, infra_params,
+                                     infra_exec, infra_task, false };
+            auto draw_infrast = [&] {
+                infra_ctx.y = 0;
+                hub::panel_infrast(infra_ctx);
+            };
+            frame(idle, draw_infrast);
+            click.mouse = { 200, 31 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_infrast);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_infrast);
+            click.pressed = true;
+            click.released = false;
+            click.mouse.y = 16 + 30 + 2 + 26 + 13;
+            frame(click, draw_infrast);
+            frame(idle, draw_infrast);
+            assert(infra_params["mode"].as_int() == 1);
+
+            SelectObject(mem, old_bitmap);
+            DeleteObject(bitmap);
+            DeleteDC(mem);
+        }
+        Gdiplus::GdiplusShutdown(gdip);
     }
 
     printf("UI_RUNNER_TEST PASS\n");

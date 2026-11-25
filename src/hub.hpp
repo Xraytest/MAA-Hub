@@ -478,6 +478,11 @@ public:
         return r;
     }
 
+    static std::string task_base_name(const std::string& key) {
+        size_t pos = key.find('#');
+        return pos == std::string::npos ? key : key.substr(0, pos);
+    }
+
     static mj::Value resolve_once_params(const mj::Value& in) {
         if (!in.is_object()) return in;
         mj::Value out = mj::Value::object();
@@ -571,6 +576,16 @@ public:
             }
             return arr;
         };
+        if (task == "OperProgress") {
+            if (auto* ops = in.find("operators"); ops && ops->is_string()) {
+                out.set("operators", split_tokens(ops->as_string(), ";\n"));
+            }
+        }
+        if (task == "SwitchTheme") {
+            if (auto* themes = in.find("themes"); themes && themes->is_string()) {
+                out.set("themes", split_tokens(themes->as_string(), ";\n"));
+            }
+        }
         if (task == "Infrast") {
             // mode: 0默认 / 10000自定义 / 20000轮换
             int m = (int)num("mode", 0);
@@ -1056,9 +1071,10 @@ public:
             static const char* kMaa[] = { "StartUp", "Recruit", "Infrast", "Fight",
                                           "Mall", "Award" };
             auto rank_of = [&](const std::string& t) -> int {
-                if (t == "CloseDown") return 100;
+                std::string base = task_base_name(t);
+                if (base == "CloseDown") return 100;
                 for (int i = 0; i < 6; ++i)
-                    if (t == kMaa[i]) return i;
+                    if (base == kMaa[i]) return i;
                 return 50;   // 未知任务：中段之后、CloseDown 之前
             };
             std::stable_sort(tasks.begin(), tasks.end(),
@@ -1069,10 +1085,13 @@ public:
         }
         if (kind == "maaend") {
             const std::string last = "CloseGamePC";
-            auto it = std::find(tasks.begin(), tasks.end(), last);
+            auto it = std::find_if(tasks.begin(), tasks.end(), [&](const std::string& t) {
+                return task_base_name(t) == last;
+            });
             if (it != tasks.end() && it != tasks.end() - 1) {  // 存在且不在末位 -> 移到末尾
+                std::string moved = *it;
                 tasks.erase(it);
-                tasks.push_back(last);
+                tasks.push_back(std::move(moved));
             }
         }
         return tasks;
@@ -1109,7 +1128,7 @@ public:
             s.exec_id = exec_id;
             s.kind = e.kind;
             s.exec_label = e.label;
-            s.task = t;
+            s.task = task_base_name(t);
             s.params = task_params(exec_id, t);
             plan.steps.push_back(std::move(s));
         }
@@ -1390,7 +1409,9 @@ public:
         if (tasks.empty()) return false;
         if (entry.get_bool("close_game_after", false)) {
             std::string close_t = (e.kind == "maa") ? "CloseDown" : "CloseGamePC";
-            if (std::find(tasks.begin(), tasks.end(), close_t) == tasks.end()) tasks.push_back(close_t);
+            if (std::none_of(tasks.begin(), tasks.end(), [&](const std::string& t) {
+                    return task_base_name(t) == close_t;
+                })) tasks.push_back(close_t);
         }
         bool force = entry.get_bool("force_start", false);
         bool busy = !running_task_of(exec_id).empty() || is_seq_running(exec_id);
@@ -1548,7 +1569,9 @@ public:
             if (!get_executor(exec_id, e) || !e.enabled) continue;
             if (entry.get_bool("close_game_after", false)) {
                 std::string close_t = (e.kind == "maa") ? "CloseDown" : "CloseGamePC";
-                if (std::find(tasks.begin(), tasks.end(), close_t) == tasks.end()) {
+                if (std::none_of(tasks.begin(), tasks.end(), [&](const std::string& t) {
+                        return task_base_name(t) == close_t;
+                    })) {
                     tasks.push_back(close_t);
                 }
             }

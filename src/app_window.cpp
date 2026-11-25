@@ -14,6 +14,29 @@ namespace hub {
 using gui::Input;
 using gui::CheckState;
 
+static std::vector<mj::Value> add_builtin_maa_tasks(const std::string& kind,
+                                                    std::vector<mj::Value> items) {
+    if (kind != "maa") return items;
+    struct Builtin { const char* name; const char* description; };
+    static const Builtin extra[] = {
+        { "OperProgress", "干员培养" },
+        { "UserDataUpdate", "更新数据" },
+        { "DepotMaintain", "库存保持" },
+        { "SwitchTheme", "更换主题" },
+    };
+    for (auto& b : extra) {
+        bool found = false;
+        for (auto& t : items) if (t.get_str("name", "") == b.name) { found = true; break; }
+        if (found) continue;
+        mj::Value t = mj::Value::object();
+        t.set("name", mj::Value(b.name));
+        t.set("description", mj::Value(b.description));
+        t.set("params", mj::Value::array());
+        items.push_back(std::move(t));
+    }
+    return items;
+}
+
 static void sync_auto_start_registry(bool enable) {
     HKEY hk = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER,
@@ -1263,8 +1286,14 @@ const std::map<std::string, std::wstring>& MaaHubWindow::end_labels() {
     return end_label_;
 }
 
+std::string MaaHubWindow::task_type_name(const std::string& key) {
+    size_t pos = key.find('#');
+    return pos == std::string::npos ? key : key.substr(0, pos);
+}
+
 // MAA 官方任务显示名（取自 MaaWpfGui/Res/Localizations/zh-cn.xaml 的 TaskQueue.Task.*）
-std::wstring MaaHubWindow::display_name(const std::string& kind, const std::string& task) {
+std::wstring MaaHubWindow::display_name(const std::string& kind, std::string task) {
+    task = task_type_name(task);
     if (kind == "maa") {
         if (task == "StartUp") return L"\u5f00\u59cb\u5524\u9192";
         if (task == "CloseDown") return L"\u5173\u95ed\u6e38\u620f";
@@ -1279,6 +1308,10 @@ std::wstring MaaHubWindow::display_name(const std::string& kind, const std::stri
         if (task == "OperBox") return L"\u5e72\u5458\u8bc6\u522b";
         if (task == "Reclamation") return L"\u751f\u606f\u6f14\u7b97";
         if (task == "Custom") return L"\u81ea\u5b9a\u4efb\u52a1";
+        if (task == "OperProgress") return L"\u5e72\u5458\u517b\u6210";
+        if (task == "UserDataUpdate") return L"\u66f4\u65b0\u6570\u636e";
+        if (task == "DepotMaintain") return L"\u5e93\u5b58\u4fdd\u6301";
+        if (task == "SwitchTheme") return L"\u66f4\u6362\u4e3b\u9898";
     } else {
         auto& lm = end_labels();
         auto li = lm.find(task);
@@ -1355,7 +1388,7 @@ std::wstring MaaHubWindow::display_name(const std::string& kind, const std::stri
 
 // 「添加新任务」浮层：勾选要显示在左列的任务（官方左列仅显示用户添加的任务）
 void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
-                                         const std::string& kind) {
+                                         const std::string& kind, bool busy) {
     // 半透明遮罩（用深色矩形模拟；立即模式 GUI 不支持真 Alpha，用暗色实底）
     RECT mask{ area.left, area.top, area.right, area.bottom };
     gui_.fill(mask, RGB(0x10, 0x10, 0x10));
@@ -1404,30 +1437,26 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
         }
         if (y + row_h < list_r.top) { y += row_h; continue; }
         if (y > list_r.bottom) break;
-        // 已显示 = 在 task_list_ 中，或未设置过滤（默认全部）
-        bool shown = task_list_.find(id) == task_list_.end()
-                     || task_list_[id].count(nm) > 0;
+        bool shown = task_list_.find(id) == task_list_.end();
+        if (!shown) {
+            for (const auto& key : task_list_[id]) {
+                if (task_type_name(key) == nm) { shown = true; break; }
+            }
+        }
         CheckState st = shown ? CheckState::On : CheckState::Off;
         RECT row{ list_r.left, y, list_r.right, y + row_h - 4 };
         if (gui_.checkbox3(("atc-" + id + "-" + nm).c_str(), row,
-                           display_name(kind, nm), st)) {
+                           display_name(kind, nm), st, nullptr, true, !busy)) {
+            if (task_list_.find(id) == task_list_.end()) {
+                for (auto& t : all) task_list_[id].insert(t.get_str("name", ""));
+            }
             if (st == CheckState::On) {
-                // 第一次操作时，用当前可见集合作为初始值
-                if (task_list_.find(id) == task_list_.end()) {
-                    for (auto& t : all) {
-                        std::string s = t.get_str("name", "");
-                        task_list_[id].insert(s);
-                    }
-                }
                 task_list_[id].insert(nm);
             } else {
-                if (task_list_.find(id) == task_list_.end()) {
-                    for (auto& t : all) {
-                        std::string s = t.get_str("name", "");
-                        task_list_[id].insert(s);
-                    }
+                for (auto it = task_list_[id].begin(); it != task_list_[id].end(); ) {
+                    if (task_type_name(*it) == nm) it = task_list_[id].erase(it);
+                    else ++it;
                 }
-                task_list_[id].erase(nm);
             }
             save_task_list();
         }
@@ -1439,7 +1468,7 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
     int half2 = (card.right - card.left - 32) / 2;
     RECT sel_all{ card.left + 16, card.bottom - 44, card.left + 16 + half2, card.bottom - 16 };
     RECT sel_inv{ card.left + 16 + half2 + 4, card.bottom - 44, card.right - 16, card.bottom - 16 };
-    if (gui_.button("addtask-all", sel_all, L"\u5168\u9009", 0)) {
+    if (gui_.button("addtask-all", sel_all, L"\u5168\u9009", 0, !busy)) {
         task_list_[id].clear();
         for (auto& t : all) {
             std::string s = t.get_str("name", "");
@@ -1447,18 +1476,25 @@ void MaaHubWindow::draw_add_task_overlay(RECT area, const std::string& id,
         }
         save_task_list();
     }
-    if (gui_.button("addtask-inverse", sel_inv, L"\u53cd\u9009", 0)) {
-        // 确保有初始集合，再逐个取反
+    if (gui_.button("addtask-inverse", sel_inv, L"\u53cd\u9009", 0, !busy)) {
+        // 确保有初始集合，再逐个任务类型取反；同类型的多个副本一起显示或隐藏。
         if (task_list_.find(id) == task_list_.end()) {
-            for (auto& t : all) {
-                std::string s = t.get_str("name", "");
-                task_list_[id].insert(s);
-            }
+            for (auto& t : all) task_list_[id].insert(t.get_str("name", ""));
         }
         for (auto& t : all) {
-            std::string s = t.get_str("name", "");
-            if (task_list_[id].count(s)) task_list_[id].erase(s);
-            else task_list_[id].insert(s);
+            std::string type = t.get_str("name", "");
+            bool shown = false;
+            for (const auto& key : task_list_[id]) {
+                if (task_type_name(key) == type) { shown = true; break; }
+            }
+            if (shown) {
+                for (auto it = task_list_[id].begin(); it != task_list_[id].end(); ) {
+                    if (task_type_name(*it) == type) it = task_list_[id].erase(it);
+                    else ++it;
+                }
+            } else {
+                task_list_[id].insert(type);
+            }
         }
         save_task_list();
     }
@@ -1523,8 +1559,17 @@ void MaaHubWindow::draw_post_action(RECT area, const std::string& id) {
           L"\u9700\u5728 Windows \u7535\u6e90\u9009\u9879\u4e2d\u542f\u7528\u4f11\u7720\u529f\u80fd\uff0c\u5426\u5219\u8be5\u529f\u80fd\u65e0\u6548\u3002",
           false },
         { "shutdown",             L"\u5173\u673a", nullptr, false },
+        { "once",                 L"\u4ec5\u6267\u884c\u4e00\u6b21", L"\u6267\u884c\u540e\u81ea\u52a8\u6e05\u7a7a\u5f53\u524d\u5b8c\u6210\u540e\u52a8\u4f5c", false },
+        { "if_no_other_maa",       L"\u4ec5\u5f53\u6ca1\u6709\u5176\u4ed6 MAA \u8fd0\u884c\u65f6",
+          L"\u950e\u5c4f\u3001\u7761\u7720\u3001\u4f11\u7721\u548c\u5173\u673a\u7b49\u5173\u6739\u52a8\u4f5c\u5c06\u7b49\u5f85\u5176\u4ed6\u5b9e\u4f8b\u7ed3\u675f", false },
+        { "skip_on_error",         L"\u4efb\u52a1\u5931\u8d25\u65f6\u8df3\u8fc7",
+          L"\u5931\u8d25\u6216\u90e8\u5206\u5b8c\u6210\u65f6\u4e0d\u6267\u884c\u8fd9\u4e9b\u6536\u5c3e\u52a8\u4f5c", false },
     };
     bool pa_dirty = false;
+    RECT pa_list{ card.left + 16, y, card.right - 16, card.bottom - 52 };
+    if (pa_list.bottom < pa_list.top + 40) pa_list.bottom = pa_list.top + 40;
+    gui_.begin_scroll(pa_list, 430, scroll_["post-action"]);
+    y = pa_list.top - (int)scroll_["post-action"];
     for (auto& it : items) {
         if (is_end && it.maa_only) continue;
         CheckState st = getb(it.key) ? CheckState::On : CheckState::Off;
@@ -1540,6 +1585,12 @@ void MaaHubWindow::draw_post_action(RECT area, const std::string& id) {
             gui_.tip_line(card.left + 44, y - 6, card.right - 20, it.tip);
             y += 16;
         }
+    }
+    gui_.end_scroll();
+    RECT clear_b{ card.right - 96, card.bottom - 40, card.right - 20, card.bottom - 14 };
+    if (gui_.button("postaction-clear", clear_b, L"\u6e05\u7a7a\u5168\u90e8", 2)) {
+        p = mj::Value::object();
+        pa_dirty = true;
     }
     if (pa_dirty) {
         {
@@ -1578,6 +1629,9 @@ std::wstring MaaHubWindow::post_action_desc(const std::string& id) {
     if (on("hibernate")) add(L"\u4f11\u7720");
     if (on("shutdown")) add(L"\u5173\u673a");
     if (out.empty()) return L"\u5b8c\u6210\u540e\u65e0\u52a8\u4f5c";
+    if (on("once")) add(L"\u4ec5\u4e00\u6b21");
+    if (on("skip_on_error")) add(L"\u5931\u8d25\u8df3\u8fc7");
+    if (on("if_no_other_maa")) add(L"\u4ed6\u4eba\u8fd0\u884c\u65f6\u4e0d\u6267\u884c\u5173\u952e\u52a8\u4f5c");
     return L"\u5b8c\u6210\u540e\uff1a" + out;
 }
 
@@ -1616,11 +1670,9 @@ void MaaHubWindow::save_task_list() {
         // 按 catalog 目录序落盘（StartUp 恒第一），不让 std::set 字典序进文件：
         // 调度器/CLI 按文件数组原序执行，字母序会把 StartUp 排最后导致 02:00 链失败。
         mj::Value arr = mj::Value::array();
-        std::vector<mj::Value> cat = catalog_of(kind_of(kv.first));
-        for (auto& t : cat) {
-            std::string nm = t.get_str("name", "");
-            if (!nm.empty() && kv.second.count(nm)) arr.push(nm);
-        }
+        auto entries = ordered_task_entries(kv.first,
+            add_builtin_maa_tasks(kind_of(kv.first), catalog_of(kind_of(kv.first))));
+        for (auto& entry : entries) arr.push(entry.first);
         if (arr.items().empty()) {          // 目录不可用（快照未就绪）兜底原序
             for (auto& nm : kv.second) arr.push(nm);
         }
@@ -1657,15 +1709,15 @@ void MaaHubWindow::save_task_checks() {
 
 // 依据当前可见任务重建勾选记录并落盘
 void MaaHubWindow::sync_task_checks(const std::string& id,
-                                    const std::vector<mj::Value>& tasks) {
+                                    const std::vector<std::pair<std::string, mj::Value>>& tasks) {
     auto& cs = task_checks_[id];
     cs.clear();
     auto it = task_ui_.find(id);
     if (it == task_ui_.end()) { save_task_checks(); return; }
-    for (auto& t : tasks) {
-        std::string nm = t.get_str("name", "");
-        auto jt = it->second.find(nm);
-        if (jt != it->second.end() && jt->second.checked) cs.insert(nm);
+    for (auto& entry : tasks) {
+        const std::string& key = entry.first;
+        auto jt = it->second.find(key);
+        if (jt != it->second.end() && jt->second.checked) cs.insert(key);
     }
     save_task_checks();
 }
@@ -1686,13 +1738,18 @@ void MaaHubWindow::load_task_checks() {
 // 任务项右键菜单（官方 ContextMenu：单次运行 / 从此处运行 / 重命名 / 复制 / 移出列表）
 void MaaHubWindow::draw_task_ctx_menu() {
     if (!ctx_menu_open_) return;
+    mj::Value ex;
+    std::string erun = find_executor(ctx_menu_exec_, ex) ? ex.get_str("run", "") : "";
+    bool busy = hub_->is_seq_running(ctx_menu_exec_)
+             || !hub_->running_task_of(ctx_menu_exec_).empty()
+             || ex.get_bool("busy", false) || erun == "running" || erun == "stopping";
     const int w = 168, row_h = 30;
     struct Item { const wchar_t* label; const char* cmd; };
     const Item items[] = {
         { L"\u5355\u6b21\u8fd0\u884c",     "run_once" },
         { L"\u4ece\u6b64\u5904\u8fd0\u884c", "run_from" },
-        { L"\u91cd\u547d\u540d",           "rename" },
         { L"\u590d\u5236",                 "copy" },
+        { L"\u91cd\u547d\u540d",           "rename" },
         { L"\u79fb\u51fa\u5217\u8868",     "remove" },
     };
     int h = (int)(sizeof(items) / sizeof(items[0])) * row_h + 8;
@@ -1716,17 +1773,18 @@ void MaaHubWindow::draw_task_ctx_menu() {
     int y = menu.top + 4;
     for (auto& it : items) {
         RECT row{ menu.left + 4, y, menu.right - 4, y + row_h - 4 };
-        bool hov = gui_.input().mouse.x >= row.left && gui_.input().mouse.x < row.right
+        bool hov = !busy && gui_.input().mouse.x >= row.left && gui_.input().mouse.x < row.right
                 && gui_.input().mouse.y >= row.top && gui_.input().mouse.y < row.bottom;
         if (hov) gui_.round_rect(row, gui_.theme.hover, gui_.theme.hover, 3);
-        gui_.text(row.left + 10, row.top + 6, it.label, gui_.theme.text, gui_.font);
+        gui_.text(row.left + 10, row.top + 6, it.label,
+                  busy ? gui_.theme.disabled_text : gui_.theme.text, gui_.font);
         if (hov && gui_.input().pressed) {
             std::string cmd = it.cmd;
             std::string id = ctx_menu_exec_;
             std::string task = ctx_menu_task_;
             ctx_menu_open_ = false;
             if (cmd == "run_once") {
-                mj::Value params = mj::Value::object();
+                mj::Value params = hub_->task_params(id, task);
                 auto it2 = task_ui_.find(id);
                 if (it2 != task_ui_.end()) {
                     auto t2 = it2->second.find(task);
@@ -1741,7 +1799,7 @@ void MaaHubWindow::draw_task_ctx_menu() {
                 }
                 post_action([this, id, task, params] {
                     apply_startup_connect(id);
-                    action_run(id, task, params);
+                    action_run(id, task_type_name(task), params);
                 }, "\u5355\u6b21\u8fd0\u884c");
             } else if (cmd == "run_from") {
                 auto steps = collect_checked_steps(id, task);
@@ -1754,29 +1812,9 @@ void MaaHubWindow::draw_task_ctx_menu() {
                 auto it2 = task_alias_.find(id + "|" + task);
                 rename_buf_ = it2 == task_alias_.end() ? "" : it2->second;
             } else if (cmd == "copy") {
-                // 复制：把该任务的参数复制为同名副本（别名加 (副本)）
-                auto it2 = task_ui_.find(id);
-                if (it2 != task_ui_.end()) {
-                    auto t2 = it2->second.find(task);
-                    if (t2 != it2->second.end()) {
-                        std::string alias_key = id + "|" + task;
-                        std::string base = task_alias_.count(alias_key)
-                            ? task_alias_[alias_key] : task;
-                        task_alias_[alias_key] = base + " (\u526f\u672c)";
-                        save_task_alias();
-                        set_notice("\u5df2\u590d\u5236\u4efb\u52a1\u8bbe\u7f6e");
-                    }
-                }
+                duplicate_task(id, task);
             } else if (cmd == "remove") {
-                // 移出列表：等价于在添加新任务里取消勾选
-                if (task_list_.find(id) == task_list_.end()) {
-                    for (auto& t : catalog_of(kind_of(id))) {
-                        std::string s = t.get_str("name", "");
-                        task_list_[id].insert(s);
-                    }
-                }
-                task_list_[id].erase(task);
-                save_task_list();
+                remove_task(id, task);
                 set_notice("\u5df2\u5c06\u4efb\u52a1\u79fb\u51fa\u5217\u8868");
             }
             return;
@@ -1864,6 +1902,138 @@ std::string MaaHubWindow::kind_of(const std::string& id) const {
     ExecutorEntry e;
     if (hub_->get_executor(id, e)) return e.kind;
     return "maa";
+}
+
+std::string MaaHubWindow::next_task_key(const std::string& id, const std::string& type) const {
+    int used = 1;
+    auto lit = task_list_.find(id);
+    if (lit != task_list_.end()) {
+        for (const auto& key : lit->second) {
+            if (key == type) continue;
+            if (key.rfind(type + "#", 0) != 0) continue;
+            try { used = (std::max)(used, std::stoi(key.substr(type.size() + 1)) + 1); }
+            catch (...) {}
+        }
+    }
+    for (int n = used;; ++n) {
+        std::string key = type + "#" + std::to_string(n);
+        if (lit == task_list_.end() || !lit->second.count(key)) return key;
+    }
+}
+
+void MaaHubWindow::duplicate_task(const std::string& id, const std::string& key) {
+    auto uit = task_ui_.find(id);
+    if (uit == task_ui_.end()) return;
+    auto src = uit->second.find(key);
+    if (src == uit->second.end()) return;
+    std::string type = task_type_name(key);
+    if (task_list_.find(id) == task_list_.end()) {
+        for (auto& t : add_builtin_maa_tasks(kind_of(id), catalog_of(kind_of(id))))
+            task_list_[id].insert(t.get_str("name", ""));
+    }
+    if (task_order_[id].empty()) {
+        auto entries = ordered_task_entries(id,
+            add_builtin_maa_tasks(kind_of(id), catalog_of(kind_of(id))));
+        for (auto& entry : entries) task_order_[id].push_back(entry.first);
+    }
+    std::string copy_key = next_task_key(id, type);
+    TaskUiState copied = src->second;
+    copied.selected = true;
+    src->second.selected = false;
+    uit->second[copy_key] = std::move(copied);
+    mj::Value copied_params = hub_->task_params(id, key);
+    if (auto state = uit->second.find(copy_key); state != uit->second.end()) {
+        for (auto& kv : state->second.params) copied_params.set(kv.first, kv.second);
+    }
+    for (auto& kv : copied_params.members())
+        hub_->set_task_param(id, copy_key, kv.first, kv.second);
+    task_list_[id].insert(copy_key);
+    auto& order = task_order_[id];
+    auto pos = std::find(order.begin(), order.end(), key);
+    order.insert(pos == order.end() ? order.end() : pos + 1, copy_key);
+    if (task_ui_[id][copy_key].checked) task_checks_[id].insert(copy_key);
+    auto alias = task_alias_.find(id + "|" + key);
+    std::string base = alias == task_alias_.end() ? type : alias->second;
+    task_alias_[id + "|" + copy_key] = base + " (\u526f\u672c)";
+    save_task_list();
+    save_task_order();
+    save_task_checks();
+    save_task_alias();
+    set_notice("\u5df2\u521b\u5efa\u4efb\u52a1\u526f\u672c");
+}
+
+void MaaHubWindow::remove_task(const std::string& id, const std::string& key) {
+    if (task_list_.find(id) == task_list_.end()) {
+        for (auto& t : add_builtin_maa_tasks(kind_of(id), catalog_of(kind_of(id))))
+            task_list_[id].insert(t.get_str("name", ""));
+    }
+    task_list_[id].erase(key);
+    auto oit = task_order_.find(id);
+    if (oit != task_order_.end()) {
+        oit->second.erase(std::remove(oit->second.begin(), oit->second.end(), key), oit->second.end());
+    }
+    task_checks_[id].erase(key);
+    auto uit = task_ui_.find(id);
+    if (uit != task_ui_.end()) uit->second.erase(key);
+    task_alias_.erase(id + "|" + key);
+    save_task_list();
+    save_task_order();
+    save_task_checks();
+    save_task_alias();
+}
+
+std::vector<std::pair<std::string, mj::Value>> MaaHubWindow::ordered_task_entries(
+    const std::string& id, const std::vector<mj::Value>& catalog) {
+    std::vector<std::pair<std::string, mj::Value>> grouped;
+    auto lit = task_list_.find(id);
+    bool filtering = lit != task_list_.end();
+    for (auto& spec : catalog) {
+        std::string type = spec.get_str("name", "");
+        if (type.empty()) continue;
+        std::vector<std::string> keys;
+        if (!filtering) {
+            keys.push_back(type);
+        } else {
+            for (const auto& key : lit->second)
+                if (task_type_name(key) == type) keys.push_back(key);
+        }
+        std::sort(keys.begin(), keys.end(), [&](const std::string& a, const std::string& b) {
+            if (a == type) return b != type;
+            if (b == type) return false;
+            auto suffix = [&](const std::string& s) {
+                try { return std::stoi(s.substr(type.size() + 1)); } catch (...) { return 0; }
+            };
+            return suffix(a) < suffix(b);
+        });
+        for (auto& key : keys) grouped.emplace_back(key, spec);
+    }
+    auto oit = task_order_.find(id);
+    if (oit == task_order_.end() || oit->second.empty()) return grouped;
+    std::vector<std::pair<std::string, mj::Value>> sorted;
+    std::set<std::string> used;
+    for (const auto& key : oit->second) {
+        for (auto& entry : grouped) {
+            if (entry.first == key && used.insert(key).second) {
+                sorted.push_back(entry);
+                break;
+            }
+        }
+    }
+    for (auto& entry : grouped)
+        if (used.insert(entry.first).second) sorted.push_back(entry);
+    return sorted;
+}
+
+std::vector<std::string> MaaHubWindow::debug_task_keys(const std::string& id) {
+    std::vector<std::string> keys;
+    for (auto& entry : ordered_task_entries(id,
+             add_builtin_maa_tasks(kind_of(id), catalog_of(kind_of(id)))))
+        keys.push_back(entry.first);
+    return keys;
+}
+
+void MaaHubWindow::debug_duplicate_task(const std::string& id, const std::string& key) {
+    duplicate_task(id, key);
 }
 
 // 连接状态中文文案
@@ -2109,6 +2279,9 @@ void MaaHubWindow::page_executor(RECT content) {
     std::string id = ex.get_str("id", "");
     std::string kind = ex.get_str("kind", "");
     std::string conn = ex.get_str("conn", "unknown");
+    std::string erun = ex.get_str("run", "");
+    bool busy = hub_->is_seq_running(id) || !hub_->running_task_of(id).empty()
+             || ex.get_bool("busy", false) || erun == "running" || erun == "stopping";
     std::string acc_label = ex.get_str("account_label", "");
     int64_t task_count = ex.get_int("task_count", 0);
     std::string core_version = ex.get_str("core_version", "");
@@ -2137,33 +2310,10 @@ void MaaHubWindow::page_executor(RECT content) {
             }
         }
     }
-    std::vector<mj::Value> tasks;   // 过滤内部入口任务 + 用户未添加的任务
-    auto tl_it = task_list_.find(id);
-    bool filtering = (tl_it != task_list_.end());
-    for (auto& t : all_tasks) {
-        std::string nm = t.get_str("name", "");
-        if (filtering && tl_it->second.count(nm) == 0) continue;
-        tasks.push_back(t);
-    }
-    // 应用用户拖拽后的顺序
-    auto oit = task_order_.find(id);
-    if (oit != task_order_.end() && !oit->second.empty()) {
-        std::vector<mj::Value> sorted;
-        sorted.reserve(tasks.size());
-        for (auto& nm : oit->second) {
-            for (auto& t : tasks) {
-                if (t.get_str("name", "") == nm) { sorted.push_back(t); break; }
-            }
-        }
-        for (auto& t : tasks) {
-            bool found = false;
-            for (auto& s : sorted) {
-                if (s.get_str("name", "") == t.get_str("name", "")) { found = true; break; }
-            }
-            if (!found) sorted.push_back(t);
-        }
-        tasks.swap(sorted);
-    }
+    auto task_entries = ordered_task_entries(id, all_tasks);
+    std::vector<mj::Value> tasks;
+    tasks.reserve(task_entries.size());
+    for (auto& entry : task_entries) tasks.push_back(entry.second);
 
     // 官方 TaskQueueView：<Grid Margin="20"> + 三列 Width="*"（各占 1/3）
     //   col0 = 210 宽任务列表卡片 +「完成后」+ LinkStart/停止/等待并停止
@@ -2218,16 +2368,14 @@ void MaaHubWindow::page_executor(RECT content) {
     // ---------------- 右侧：任务设置 ----------------
     // 右侧展示的任务：优先用户选中项；未选中时按官方默认（理智作战 Fight）
     std::string sel_task;
-    for (auto& t : tasks) {
-        std::string nm = t.get_str("name", "");
-        if (task_ui_[id][nm].selected) { sel_task = nm; break; }
+    for (auto& entry : task_entries) {
+        if (task_ui_[id][entry.first].selected) { sel_task = entry.first; break; }
     }
-    if (sel_task.empty() && !tasks.empty()) {
-        // 官方 TaskQueueViewModel 默认选中理智作战（TaskSettingVisibilities.Fight）
-        for (auto& t : tasks) {
-            if (t.get_str("name", "") == "Fight") { sel_task = "Fight"; break; }
+    if (sel_task.empty() && !task_entries.empty()) {
+        for (auto& entry : task_entries) {
+            if (task_type_name(entry.first) == "Fight") { sel_task = entry.first; break; }
         }
-        if (sel_task.empty()) sel_task = tasks[0].get_str("name", "");
+        if (sel_task.empty()) sel_task = task_entries[0].first;
     }
 
     // 任务切换过渡动画（官方 TransitioningContentControl）：
@@ -2239,10 +2387,10 @@ void MaaHubWindow::page_executor(RECT content) {
     if (sel_task != panel_anim_task_ || id != panel_anim_exec_) {
         if (sel_task != panel_anim_task_) {
             int idx_new = -1, idx_old = -1;
-            for (size_t k = 0; k < tasks.size(); ++k) {
-                std::string nm = tasks[k].get_str("name", "");
-                if (nm == sel_task) idx_new = (int)k;
-                if (nm == panel_anim_task_) idx_old = (int)k;
+            for (size_t k = 0; k < task_entries.size(); ++k) {
+                const std::string& key = task_entries[k].first;
+                if (key == sel_task) idx_new = (int)k;
+                if (key == panel_anim_task_) idx_old = (int)k;
             }
             panel_anim_dir_ = (idx_old >= 0 && idx_new >= 0 && idx_new < idx_old) ? -1 : 1;
         }
@@ -2261,14 +2409,14 @@ void MaaHubWindow::page_executor(RECT content) {
 
     // col1：任务设置。MAA 底部有「今日关卡小提示」；终末地 (MaaEnd) 无此概念，腾出完整列高。
     const int PANEL_W = COL_W - 10 < 220 ? COL_W - 10 : 220;
-    const bool has_adv = !is_end && task_has_advanced(sel_task) && !sel_task.empty();
+    const bool has_adv = !is_end && task_has_advanced(task_type_name(sel_task)) && !sel_task.empty();
     const int TG_H = has_adv ? 28 : 0;      // 仅 Fight 拆分常规/高级页
     std::vector<std::wstring> tip_lines;
+    size_t activity_tip_begin = 0;
     if (!is_end) {
-        time_t adj = time(nullptr) - 4 * 3600;
-        struct tm tmv{};
-        localtime_s(&tmv, &adj);
-        int wday = tmv.tm_wday;
+        ensure_stage_catalog(id);
+        const double now = util::now_sec();
+        int wday = stage_catalog::game_day_of_week(now, stage_catalog_.server);
         if (wday == 2 || wday == 4 || wday == 6 || wday == 0) tip_lines.push_back(L"CE-6: \u9f99\u95e8\u5e01");
         if (wday == 1 || wday == 4 || wday == 6 || wday == 0) tip_lines.push_back(L"AP-5: \u7ea2\u7968");
         if (wday == 2 || wday == 3 || wday == 5 || wday == 0) tip_lines.push_back(L"CA-5: \u6280\u80fd");
@@ -2280,6 +2428,10 @@ void MaaHubWindow::page_executor(RECT content) {
         if (wday == 2 || wday == 3 || wday == 6 || wday == 0) tip_lines.push_back(L"PR-D-1/2: \u8fd1&\u7279\u82af\u7247");
         if (wday == 1) tip_lines.push_back(L"\u5468\u4e00\u4e86\uff0c\u53ef\u4ee5\u6253\u527f\u706d\u4e86~");
         if (wday == 0) tip_lines.push_back(L"\u5468\u65e5\u4e86\uff0c\u8bb0\u5f97\u6253\u527f\u706d\u54e6~");
+        activity_tip_begin = tip_lines.size();
+        for (const auto& line : stage_catalog::today_activity_tips(stage_catalog_, now)) {
+            tip_lines.push_back(gui::widen(line));
+        }
     }
     const int TIP_H = is_end ? 0 : (24 + (int)tip_lines.size() * 16);      // 终末地不显示「今日开放关卡」提示
     int c1x = col1.left + (COL_W - (PANEL_W + 10)) / 2;
@@ -2307,26 +2459,25 @@ void MaaHubWindow::page_executor(RECT content) {
     // 官方左列无「任务列表」标题文字，直接是 ListBox（MinHeight=220）
     int list_top = left_card.top + 10;
     int n = (int)tasks.size();
-    // 官方：ItemContainer MinHeight=24.5；Items.Count>9 时
-    //   MaxHeight = ActualHeight/(Items.Count+1.5)（上限 24.5）
-    int list_h = (left_card.bottom - ADD_ROW_H) - list_top;
+    // 官方 ItemContainer MinHeight=24.5；任务多时滚动，不压缩到难以点击。
     int item_h = 25;
-    if (n > 9) {
-        int fit = (int)((double)list_h / (n + 1.5));
-        if (fit < item_h) item_h = fit < 18 ? 18 : fit;
-    }
 
     // ---- 拖拽排序状态机（官方左列可拖动调整顺序，4px 移动阈值避免误触勾选/按钮）----
-    if (gui_.input().pressed
+    if (!busy && gui_.input().pressed
         && gui_.input().mouse.x >= left_col.left + 20 && gui_.input().mouse.x < left_col.right - 66
         && gui_.input().mouse.y >= list_top && gui_.input().mouse.y < left_card.bottom - ADD_ROW_H) {
         int idx = (gui_.input().mouse.y - (list_top - (int)scroll_["tasks-" + id])) / item_h;
         if (idx >= 0 && idx < n) {
-            drag_pending_task_ = tasks[idx].get_str("name", "");
+            drag_pending_task_ = task_entries[idx].first;
             drag_start_y_ = gui_.input().mouse.y;
         }
     }
-    if (!drag_pending_task_.empty() && gui_.input().down) {
+    if (busy) {
+        drag_pending_task_.clear();
+        drag_task_.clear();
+        drop_before_ = -1;
+    }
+    if (!drag_pending_task_.empty() && !busy && gui_.input().down) {
         if (std::abs(gui_.input().mouse.y - drag_start_y_) >= 4) {
             drag_task_ = drag_pending_task_;
             drag_pending_task_.clear();
@@ -2342,7 +2493,7 @@ void MaaHubWindow::page_executor(RECT content) {
         if (!gui_.input().down) {
             int from = -1;
             for (int k = 0; k < n; ++k) {
-                if (tasks[k].get_str("name", "") == drag_task_) { from = k; break; }
+                if (task_entries[k].first == drag_task_) { from = k; break; }
             }
             if (from >= 0 && drop_before_ >= 0 && drop_before_ != from
                 && drop_before_ != from + 1) {
@@ -2350,9 +2501,8 @@ void MaaHubWindow::page_executor(RECT content) {
                 if (to > from) --to;
                 std::string nm = drag_task_;
                 task_order_[id].clear();
-                for (auto& t : tasks) {
-                    std::string s = t.get_str("name", "");
-                    if (s != nm) task_order_[id].push_back(s);
+                for (auto& entry : task_entries) {
+                    if (entry.first != nm) task_order_[id].push_back(entry.first);
                 }
                 if (to < 0) to = 0;
                 if (to > (int)task_order_[id].size()) to = (int)task_order_[id].size();
@@ -2372,8 +2522,10 @@ void MaaHubWindow::page_executor(RECT content) {
                       n * item_h + 8, scroll_["tasks-" + id]);
     int y = list_top - (int)scroll_["tasks-" + id];
     for (int ti = 0; ti < n; ++ti) {
-        auto& t = tasks[ti];
-        std::string name = t.get_str("name", "");
+        auto& entry = task_entries[ti];
+        const mj::Value& t = entry.second;
+        std::string name = entry.first;
+        std::string type = task_type_name(name);
         TaskUiState& ui = task_ui_[id][name];
         if (task_ui_init_[id].insert(name).second) {
             // 没有勾选记录 = 首次使用该执行器，官方行为是新任务默认勾选
@@ -2391,10 +2543,11 @@ void MaaHubWindow::page_executor(RECT content) {
         //   状态色仅在本/上次运行有结果时叠加（InProgress 蓝 / Completed 绿 / Error 红，
         //   均为 #20 Alpha 叠在白底上）。当前显示设置的任务只由齿轮变 Primary 表示。
         std::string running = hub_->running_task_of(id);
-        std::string last_res = hub_->last_task_result(id, name);
+        std::string last_res = hub_->last_task_result(id, type);
         COLORREF fill_c;
-        if (running == name) fill_c = gui_.theme.status_running;
+        if (running == type) fill_c = gui_.theme.status_running;
         else if (last_res == "error") fill_c = gui_.theme.status_error;
+        else if (last_res == "skipped") fill_c = gui_.theme.status_skipped;
         else if (last_res == "ok") fill_c = gui_.theme.status_done;
         else if (hov) fill_c = gui_.theme.item_hover;
         else fill_c = gui_.theme.item_bg;
@@ -2403,8 +2556,8 @@ void MaaHubWindow::page_executor(RECT content) {
         // 官方 CheckBox MaxWidth=140
         // 官方 ItemContainer Padding=10,0,0,0
         // 复选框矩形 = 整个任务项（内部自行垂直居中）
-        RECT cbr{ item.left + 2, item.top, item.left + 2 + 164, item.bottom };
-        std::wstring label = display_name(kind, name);
+        RECT cbr{ item.left + 2, item.top, item.left + 2 + 140, item.bottom };
+        std::wstring label = display_name(kind, type);
         auto al = task_alias_.find(id + "|" + name);
         if (al != task_alias_.end() && !al->second.empty()) {
             label = gui::widen(al->second);
@@ -2419,24 +2572,25 @@ void MaaHubWindow::page_executor(RECT content) {
         const int gear_left = item.right - 22;   // 16px 图标 + 6px 右边距
         const int act_left = gear_left - 4 - ACT_W;
         RECT lr = cbr;
-        if (hov && act_left - 2 > lr.left + 40) lr.right = act_left - 2;
+        if (hov && !busy && act_left - 2 > lr.left + 40) lr.right = act_left - 2;
         CheckState st = ui.once ? CheckState::Once
                                 : (ui.checked ? CheckState::On : CheckState::Off);
-        gui_.checkbox3(("cb-" + id + "-" + name).c_str(), lr, label, st, nullptr, !hov);
+        gui_.checkbox3(("cb-" + id + "-" + name).c_str(), lr, label, st,
+                       nullptr, !hov, !busy);
         bool prev_checked = ui.checked;
         ui.checked = (st == CheckState::On);
         ui.once = (st == CheckState::Once);
-        if (ui.checked != prev_checked) sync_task_checks(id, tasks);
+        if (ui.checked != prev_checked) sync_task_checks(id, task_entries);
         bool act_hit = false;
-        if (hov) {
-            // hover 操作按钮（从左往右：删除、重命名、复制）
+        if (hov && !busy) {
+            // hover 操作按钮（从左往右：复制、重命名、删除）
             int bx = act_left;
             int by = item.top + ((item.bottom - item.top) - 22) / 2;
-            struct Act { const char* id; const wchar_t* tip; int kind; };
+            struct Act { const wchar_t* tip; int kind; };
             const Act acts[] = {
-                { "del",  L"\u5220\u9664", 2 },
-                { "ren",  L"\u91cd\u547d\u540d", 1 },
-                { "cpy",  L"\u590d\u5236", 0 },
+                { L"\u590d\u5236", 0 },
+                { L"\u91cd\u547d\u540d", 1 },
+                { L"\u5220\u9664", 2 },
             };
             for (auto& a : acts) {
                 RECT br{ bx, by, bx + 22, by + 22 };
@@ -2457,17 +2611,9 @@ void MaaHubWindow::page_executor(RECT content) {
                         auto alr = task_alias_.find(id + "|" + name);
                         rename_buf_ = alr == task_alias_.end() ? "" : alr->second;
                     } else if (a.kind == 0) {
-                        auto alc = task_alias_.find(id + "|" + name);
-                        std::string base = alc == task_alias_.end() ? name : alc->second;
-                        task_alias_[id + "|" + name] = base + " (\u526f\u672c)";
-                        save_task_alias();
+                        duplicate_task(id, name);
                     } else {
-                        // 删除 = 移出左列列表
-                        if (task_list_.find(id) == task_list_.end()) {
-                            for (auto& tt : tasks) task_list_[id].insert(tt.get_str("name", ""));
-                        }
-                        task_list_[id].erase(name);
-                        save_task_list();
+                        remove_task(id, name);
                         set_notice("\u5df2\u5c06\u4efb\u52a1\u79fb\u51fa\u5217\u8868");
                     }
                 }
@@ -2513,26 +2659,26 @@ void MaaHubWindow::page_executor(RECT content) {
         std::vector<RECT> cells;
         int hit = gui_.button_group(
             ("taskgrp-" + id).c_str(), { lx, ry, lx + rw, ry + 30 },
-            { L"", L"\u5168\u9009", L"\u53cd\u9009" }, { 30, 0, 0 }, 0, &cells);
+            { L"", L"\u5168\u9009", L"\u53cd\u9009" }, { 30, 0, 0 }, 0, &cells, !busy);
         if (cells.size() == 3) split_anchor = cells[2];
         if (hit == 0) {
             show_add_task_ = !show_add_task_;
             task_split_open_ = false;
         } else if (hit == 1) {
-            for (auto& t : tasks) task_ui_[id][t.get_str("name", "")].checked = true;
+            for (auto& entry : task_entries) task_ui_[id][entry.first].checked = true;
             task_split_open_ = false;
         } else if (hit == 2) {
             if (cells.size() == 3 && gui_.input().mouse.x >= cells[2].right - 18) {
                 task_split_open_ = !task_split_open_;
             } else {
-                for (auto& t : tasks) {
-                    TaskUiState& s = task_ui_[id][t.get_str("name", "")];
+                for (auto& entry : task_entries) {
+                    TaskUiState& s = task_ui_[id][entry.first];
                     s.checked = !s.checked;
                 }
                 task_split_open_ = false;
             }
         }
-        if (hit == 1 || (hit == 2 && !task_split_open_)) sync_task_checks(id, tasks);
+        if (hit == 1 || (hit == 2 && !task_split_open_)) sync_task_checks(id, task_entries);
         if (!cells.empty())
             gui_.icon_add_task({ cells[0].left + 8, cells[0].top + 8,
                                  cells[0].left + 22, cells[0].bottom - 8 },
@@ -2546,8 +2692,8 @@ void MaaHubWindow::page_executor(RECT content) {
     }
 
     bool sel_valid = false;
-    for (auto& t : tasks) {
-        if (t.get_str("name", "") == sel_task) { sel_valid = true; break; }
+    for (auto& entry : task_entries) {
+        if (entry.first == sel_task) { sel_valid = true; break; }
     }
     if (!sel_valid) {
         // 选中项不在当前目录中（任务下线/名称变化）：提示而不是静默显示别的任务
@@ -2564,6 +2710,7 @@ void MaaHubWindow::page_executor(RECT content) {
     }
 
     int rx = right_col.left;
+    const std::string sel_type = task_type_name(sel_task);
     if (!sel_task.empty() && sel_valid) {
         TaskUiState& ui = task_ui_[id][sel_task];
         // 参数加载改为事件驱动（r24 P0）：只在首次使用、切换执行器/任务、导入完成
@@ -2572,7 +2719,8 @@ void MaaHubWindow::page_executor(RECT content) {
         {
             std::string sync_key = id + "|" + sel_task;
             bool first_use = panel_loaded_.insert(sync_key).second;
-            if (panel_params_stale_ || first_use || sync_key != panel_synced_key_) {
+            bool need_reload = panel_params_stale_ || first_use || sync_key != panel_synced_key_;
+            if (need_reload && !gui_.focused_with_prefix(sync_key + ":")) {
                 panel_synced_key_ = sync_key;
                 panel_params_stale_ = false;
                 mj::Value saved = hub_->task_params(id, sel_task);
@@ -2587,8 +2735,8 @@ void MaaHubWindow::page_executor(RECT content) {
         // 官方：ScrollViewer Grid.Row=0 → SimpleStackPanel Width=220，
         // 面板直接坐在页面背景上——无大标题、无独立卡片、无左侧竖线
         const mj::Value* spec = nullptr;
-        for (auto& t : tasks) {
-            if (t.get_str("name", "") == sel_task) { spec = &t; break; }
+        for (auto& entry : task_entries) {
+            if (entry.first == sel_task) { spec = &entry.second; break; }
         }
         std::vector<mj::Value> specs;
         if (spec) {
@@ -2606,6 +2754,7 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.begin_scroll({ rx, right_col.top, right_col.right, RC_BOTTOM },
                           content_h, psy);
         // 滚动偏移必须真的减进内容起点，否则滚轮只动滚动条、内容不动
+        ensure_stage_catalog(id);
         PanelCtx pctx{ gui_, rx, panel_start_y, right_col.right,
                        ui.params, id, sel_task, advanced_view_,
                        nullptr,
@@ -2626,7 +2775,8 @@ void MaaHubWindow::page_executor(RECT content) {
                                    panel_params_stale_ = true;
                                }
                            });
-                       } };
+                       },
+                       [this] { return &stage_catalog_; } };
         draw_task_panel(pctx, &specs);
         measured = pctx.y - panel_start_y + 16;
         if (measured < panel_h) measured = panel_h;
@@ -2643,7 +2793,7 @@ void MaaHubWindow::page_executor(RECT content) {
 
     // 中列 Grid.Row=1：常规设置 / 高级设置（仅对拆分为两页的任务显示，避免无效切换）
     {
-        if (task_has_advanced(sel_task) && !sel_task.empty()) {
+        if (task_has_advanced(sel_type) && !sel_type.empty()) {
             int gh = gui_.option_strip(("tg-" + id + "-" + sel_task).c_str(),
                                        { RC_LEFT, TG_TOP, RC_LEFT + PANEL_W, TG_TOP + TG_H },
                                        { L"\u5e38\u89c4\u8bbe\u7f6e", L"\u9ad8\u7ea7\u8bbe\u7f6e" },
@@ -2664,7 +2814,9 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.text(hint_r.left + 4, hint_r.top + 1, L"?", gui_.theme.faint, gui_.font_small);
         for (size_t i = 0; i < tip_lines.size(); ++i) {
             RECT line_r{ tx + 12, TIP_TOP + 22 + (int)i * 16, tx + 200, TIP_TOP + 22 + (int)(i + 1) * 16 };
-            gui_.text_clipped(line_r, tip_lines[i], gui_.theme.trace_text, gui_.font_small);
+            gui_.text_clipped(line_r, tip_lines[i],
+                              i >= activity_tip_begin ? gui_.theme.primary : gui_.theme.trace_text,
+                              gui_.font_small);
         }
     }
 
@@ -2672,10 +2824,6 @@ void MaaHubWindow::page_executor(RECT content) {
     //   Row1 = 「完成后」：ActionTitle + Divider + ActionDescription，右侧齿轮 RadioButton
     //   Row2 = Link Start! / 停止（官方同一时刻只可见一个，Width=100 Height=50 Margin=5，居中）
     //          其下 = 自动重载资源（CanShowAutoReload 时可见）
-    std::string erun = ex.get_str("run", "");
-    bool busy = hub_->is_seq_running(id) || !hub_->running_task_of(id).empty()
-             || (connected && (ex.get_bool("busy", false) || erun == "running" || erun == "stopping"));
-
     // Grid.Row=1：完成后（官方 StackPanel Width=210 = 内层 185 文本 + 右侧齿轮）
     {
         int py = left_card.bottom;
@@ -2769,26 +2917,26 @@ void MaaHubWindow::page_executor(RECT content) {
         gui_.round_rect(pop, gui_.theme.panel, gui_.theme.border, 4);
         RECT r1{ pop.left + 2, pop.top + 2, pop.right - 2, pop.top + 27 };
         RECT r2{ pop.left + 2, pop.top + 29, pop.right - 2, pop.bottom - 2 };
-        if (gui_.button("split-invert", r1, L"\u53cd\u9009", 0)) {
-            for (auto& t : tasks) {
-                TaskUiState& s = task_ui_[id][t.get_str("name", "")];
+        if (gui_.button("split-invert", r1, L"\u53cd\u9009", 0, !busy)) {
+            for (auto& entry : task_entries) {
+                TaskUiState& s = task_ui_[id][entry.first];
                 s.checked = !s.checked;
             }
-            sync_task_checks(id, tasks);
+            sync_task_checks(id, task_entries);
             task_split_open_ = false;
-        } else if (gui_.button("split-clear", r2, L"\u6e05\u7a7a", 0)) {
-            for (auto& t : tasks) {
-                TaskUiState& s = task_ui_[id][t.get_str("name", "")];
+        } else if (gui_.button("split-clear", r2, L"\u6e05\u7a7a", 0, !busy)) {
+            for (auto& entry : task_entries) {
+                TaskUiState& s = task_ui_[id][entry.first];
                 s.checked = false;
                 s.once = false;
             }
-            sync_task_checks(id, tasks);
+            sync_task_checks(id, task_entries);
             task_split_open_ = false;
         } else if (gui_.input().pressed && !gui_.hovered(pop) && !gui_.hovered(split_anchor)) {
             task_split_open_ = false;
         }
     }
-    if (show_add_task_) draw_add_task_overlay(frame, id, kind);
+    if (show_add_task_) draw_add_task_overlay(frame, id, kind, busy);
     if (show_post_action_) draw_post_action(frame, id);
     draw_task_ctx_menu();
     draw_rename_box(frame, id);
@@ -4412,45 +4560,22 @@ std::vector<mj::Value> MaaHubWindow::catalog_of(const std::string& kind) const {
         for (auto& x : e->items()) {
             if (x.get_str("kind", "") != kind) continue;
             if (auto* c = x.find("catalog"); c && c->is_array() && !c->items().empty()) {
-                return c->items();
+                return add_builtin_maa_tasks(kind, c->items());
             }
         }
     }
-    return {};
+    return add_builtin_maa_tasks(kind, {});
 }
 
 // catalog → task_list_ 过滤 → 按 task_order_ 重排（与左列显示一致）
 std::vector<mj::Value> MaaHubWindow::ordered_catalog_items(const std::string& id) {
     mj::Value cat = hub_->executor_catalog(id);
     std::vector<mj::Value> items;
-    auto tl_it = task_list_.find(id);
-    bool filtering = (tl_it != task_list_.end());
-    if (cat.is_array()) {
-        for (auto& t : cat.items()) {
-            std::string nm = t.get_str("name", "");
-            if (filtering && tl_it->second.count(nm) == 0) continue;
-            items.push_back(t);
-        }
-    }
-    // 应用用户拖拽后的顺序（与左列显示一致）
-    auto oit = task_order_.find(id);
-    if (oit != task_order_.end() && !oit->second.empty()) {
-        std::vector<mj::Value> sorted;
-        for (auto& nm : oit->second) {
-            for (auto& t : items) {
-                if (t.get_str("name", "") == nm) { sorted.push_back(t); break; }
-            }
-        }
-        for (auto& t : items) {
-            bool found = false;
-            for (auto& s : sorted) {
-                if (s.get_str("name", "") == t.get_str("name", "")) { found = true; break; }
-            }
-            if (!found) sorted.push_back(t);
-        }
-        items.swap(sorted);
-    }
-    return items;
+    if (cat.is_array()) items = cat.items();
+    items = add_builtin_maa_tasks(kind_of(id), std::move(items));
+    std::vector<mj::Value> ordered;
+    for (auto& entry : ordered_task_entries(id, items)) ordered.push_back(entry.second);
+    return ordered;
 }
 
 // ================================================================ 后台线程
@@ -4466,12 +4591,14 @@ void MaaHubWindow::refresh_snapshot_fast() {
 void MaaHubWindow::debug_select_task(const std::string& task) {
     // MaaEnd 专属任务 -> 选 maaend 执行器；否则选 maa 执行器
     bool want_end = true;
+    const std::string base = task_type_name(task);
     static const char* kMaaOnly[] = { "StartUp", "CloseDown", "Fight", "Infrast",
                                       "Recruit", "Mall", "Award", "Roguelike",
                                       "Copilot", "Depot", "OperBox", "Reclamation",
-                                      "Custom" };
+                                      "Custom", "OperProgress", "UserDataUpdate",
+                                      "DepotMaintain", "SwitchTheme" };
     for (auto* t : kMaaOnly) {
-        if (task == t) { want_end = false; break; }
+        if (base == t) { want_end = false; break; }
     }
     auto ids = hub_->executors();
     std::string pick, fallback;
@@ -4531,6 +4658,93 @@ void MaaHubWindow::refresh_snapshot() {
     ++snap_version_;
 }
 
+std::string MaaHubWindow::stage_server(const std::string& id) const {
+    mj::Value startup = hub_->task_params(id, "StartUp");
+    if (auto* client = startup.find("client_type")) {
+        if (client->is_number()) {
+            static const char* const clients[] = {
+                "Official", "Bilibili", "txwy", "YoStarEN", "YoStarJP", "YoStarKR"
+            };
+            int64_t index = client->as_int(0);
+            if (index >= 0 && index < (int64_t)(sizeof(clients) / sizeof(clients[0]))) {
+                return clients[index];
+            }
+        } else if (client->is_string()) {
+            return client->as_string();
+        }
+    }
+    return "Official";
+}
+
+void MaaHubWindow::refresh_stage_activity() {
+    const std::string cache = util::exe_dir() + "\\state\\StageActivityV2.json";
+    AppSettings settings = hub_->app_settings();
+    std::string body = CoreManager::fetch_url(
+        "https://api.maa.plus/MaaAssistantArknights/api/gui/StageActivityV2.json",
+        8000, &settings);
+    if (!body.empty()) {
+        try {
+            mj::Value root = mj::Parser(body).parse();
+            if (!root.is_object()) body.clear();
+        } catch (...) {
+            body.clear();
+        }
+    }
+    if (body.empty()) {
+        util::trace("stage activity refresh failed; using cached data");
+        return;
+    }
+    stage_catalog::write_text_file(cache, body);
+    {
+        std::lock_guard<std::mutex> lk(stage_mtx_);
+        stage_activity_text_ = std::move(body);
+        ++stage_activity_revision_;
+    }
+    PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
+}
+
+void MaaHubWindow::ensure_stage_catalog(const std::string& id) {
+    ExecutorEntry executor;
+    if (!hub_->get_executor(id, executor)) return;
+    CoreInfo core;
+    if (!hub_->cores().get(executor.core_id, core)) {
+        core = hub_->cores().default_core("maa");
+    }
+    const std::string server = stage_catalog::normalize_server(stage_server(id));
+    uint64_t revision = 0;
+    {
+        std::lock_guard<std::mutex> lk(stage_mtx_);
+        revision = stage_activity_revision_;
+    }
+    const double now = util::now_sec();
+    std::string key = id + "|" + core.path + "|" + server + "|" + std::to_string(revision)
+                    + "|" + std::to_string((int64_t)(now / 60.0));
+    if (key == stage_catalog_key_) return;
+
+    mj::Value stage_root = mj::Value::array();
+    std::string stage_text = stage_catalog::read_text_file(core.path + "\\resource\\stages.json");
+    if (!stage_text.empty()) {
+        try { stage_root = mj::Parser(stage_text).parse(); } catch (...) {}
+    }
+    std::string activity_text;
+    {
+        std::lock_guard<std::mutex> lk(stage_mtx_);
+        activity_text = stage_activity_text_;
+    }
+    if (activity_text.empty()) {
+        activity_text = stage_catalog::read_text_file(util::exe_dir() + "\\state\\StageActivityV2.json");
+    }
+    if (activity_text.empty()) {
+        activity_text = stage_catalog::read_text_file(core.path + "\\cache\\gui\\StageActivityV2.json");
+    }
+    mj::Value activity_root = mj::Value::object();
+    if (!activity_text.empty()) {
+        try { activity_root = mj::Parser(activity_text).parse(); } catch (...) {}
+    }
+    stage_catalog_ = stage_catalog::build(stage_root, activity_root, server, now);
+    stage_catalog_key_ = std::move(key);
+}
+
 void MaaHubWindow::backend_loop() {
     // 渐进式启动：先立刻产出「即时快照」（只读持久化，毫秒级），
     // 让左侧执行器立即可见；worker 启动/核心加载在后台并行进行，就绪后增量刷新。
@@ -4550,7 +4764,14 @@ void MaaHubWindow::backend_loop() {
     if (!offscreen_ && hub_->settings().get().start_run) {
         hub_->run_startup_tasks();
     }
+    refresh_stage_activity();
+    stage_activity_checked_ = util::now_sec();
     while (running_) {
+        double stage_now = util::now_sec();
+        if (stage_activity_checked_ <= 0.0 || stage_now - stage_activity_checked_ > 6 * 3600.0) {
+            refresh_stage_activity();
+            stage_activity_checked_ = stage_now;
+        }
         // ---- 自动更新：启动检查 + 定时检查（对齐 MAA CheckOnStartup / CheckOnSchedule）
         // 二者都在 backend 线程执行，不占 UI 线程。
         {
@@ -4972,12 +5193,14 @@ void MaaHubWindow::draw_power_countdown_overlay() {
     }
 }
 
-void MaaHubWindow::run_post_actions(const std::string& id, const mj::Value& pa) {
-    if (!pa.is_object()) return;
+bool MaaHubWindow::run_post_actions(const std::string& id, const mj::Value& pa) {
+    if (!pa.is_object()) return false;
     auto on = [&](const char* k) {
         auto* v = pa.find(k);
         return v && v->as_bool(false);
     };
+    bool executed = false;
+    const bool critical_allowed = !on("if_no_other_maa") || !hub_->any_executor_busy(id);
     if (on("back_to_android_home")) {
         ExecutorEntry e;
         if (hub_->get_executor(id, e) && e.config.get_path_str("connect.mode", "") == "adb") {
@@ -4988,6 +5211,7 @@ void MaaHubWindow::run_post_actions(const std::string& id, const mj::Value& pa) 
                 util::run_capture(
                     util::utf8_to_wide("\"" + adb + "\" -s \"" + addr + "\" shell input keyevent 3"),
                     adb_out, 5000);
+                executed = true;
             }
         }
     }
@@ -5001,13 +5225,16 @@ void MaaHubWindow::run_post_actions(const std::string& id, const mj::Value& pa) 
             } else {
                 tid = hub_->run_on_executor(id, "CloseGamePC", mj::Value::object());
             }
-            if (tid > 0 && (on("exit_emulator") || on("lock_screen") || on("sleep")
-                            || on("hibernate") || on("shutdown") || on("exit_self"))) {
-                for (int i = 0; i < 30; ++i) {
-                    Sleep(500);
-                    mj::Value st = hub_->executor_status(id, 0);
-                    std::string r = st.get_str("run", "idle");
-                    if (!st.get_bool("busy", false) && r != "running" && r != "stopping") break;
+            if (tid > 0) {
+                executed = true;
+                if (on("exit_emulator") || on("lock_screen") || on("sleep")
+                            || on("hibernate") || on("shutdown") || on("exit_self")) {
+                    for (int i = 0; i < 30; ++i) {
+                        Sleep(500);
+                        mj::Value st = hub_->executor_status(id, 0);
+                        std::string r = st.get_str("run", "idle");
+                        if (!st.get_bool("busy", false) && r != "running" && r != "stopping") break;
+                    }
                 }
             }
         }
@@ -5023,6 +5250,7 @@ void MaaHubWindow::run_post_actions(const std::string& id, const mj::Value& pa) 
                     util::run_capture(
                         util::utf8_to_wide("\"" + adb + "\" -s \"" + addr + "\" emu kill"),
                         adb_out, 5000);
+                    executed = true;
                 }
             } else {
                 util::WindowInfo wi;
@@ -5031,28 +5259,32 @@ void MaaHubWindow::run_post_actions(const std::string& id, const mj::Value& pa) 
                                                      e.kind == "maa" ? "Arknights" : "Endfield");
                 if (util::find_window(cls, title, wi) && wi.hwnd) {
                     PostMessageW(wi.hwnd, WM_CLOSE, 0, 0);
+                    executed = true;
                 }
             }
         }
     }
-    if (on("lock_screen")) {
-        if (!hub_->any_executor_busy(id)) LockWorkStation();
+    if (on("lock_screen") && critical_allowed) {
+        LockWorkStation();
+        executed = true;
     }
     std::string pwr = on("shutdown") ? "shutdown"
                     : on("hibernate") ? "hibernate"
                     : on("sleep") ? "sleep" : "";
-    if (!pwr.empty()) {
+    if (!pwr.empty() && critical_allowed) {
         {
             std::lock_guard<std::mutex> lk(pa_mtx_);
             pending_power_action_ = pwr;
             pending_power_deadline_ = util::now_sec() + 15.0;
         }
         if (hwnd_) PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
-        return;
+        return true;
     }
     if (on("exit_self") && hwnd_) {
         PostMessageW(hwnd_, WM_COMMAND, IDM_TRAY_EXIT, 0);
+        executed = true;
     }
+    return executed;
 }
 
 void MaaHubWindow::action_connect(const std::string& id) {
@@ -5079,43 +5311,47 @@ std::vector<std::pair<std::string, mj::Value>> MaaHubWindow::collect_checked_ste
     const std::string& id, const std::string& from_task) {
     std::vector<std::pair<std::string, mj::Value>> steps;
     std::vector<mj::Value> items = ordered_catalog_items(id);
+    items = add_builtin_maa_tasks(kind_of(id), std::move(items));
+    auto entries = ordered_task_entries(id, items);
     size_t start = 0;
     if (!from_task.empty()) {
         bool found = false;
-        for (size_t i = 0; i < items.size(); ++i) {
-            if (items[i].get_str("name", "") == from_task) { start = i; found = true; break; }
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].first == from_task
+                || task_type_name(entries[i].first) == from_task) {
+                start = i;
+                found = true;
+                break;
+            }
         }
         if (!found) return steps;
     }
     auto it = task_ui_.find(id);
     auto cit = task_checks_.find(id);
-    for (size_t i = start; i < items.size(); ++i) {
-        std::string nm = items[i].get_str("name", "");
-        if (nm.empty()) continue;
+    for (size_t i = start; i < entries.size(); ++i) {
+        const std::string& key = entries[i].first;
+        if (key.empty()) continue;
         bool checked = false, once = false;
-        mj::Value params = mj::Value::object();
+        mj::Value params = hub_->task_params(id, key);
         if (it != task_ui_.end()) {
-            auto tit = it->second.find(nm);
+            auto tit = it->second.find(key);
             if (tit != it->second.end()) {
                 checked = tit->second.checked;
                 once = tit->second.once;
                 for (auto& kv : tit->second.params) params.set(kv.first, kv.second);
-                // 运行时立即兑现并复位「仅生效一次」（任务级与子选项级）
                 tit->second.once = false;
                 for (auto pt = tit->second.params.begin(); pt != tit->second.params.end(); ) {
                     if (pt->first.rfind("__once_", 0) == 0) pt = tit->second.params.erase(pt);
                     else ++pt;
                 }
             } else {
-                checked = (cit == task_checks_.end() || cit->second.count(nm) > 0);
-                params = hub_->task_params(id, nm);
+                checked = (cit == task_checks_.end() || cit->second.count(key) > 0);
             }
         } else {
-            checked = (cit == task_checks_.end() || cit->second.count(nm) > 0);
-            params = hub_->task_params(id, nm);
+            checked = (cit == task_checks_.end() || cit->second.count(key) > 0);
         }
         if (!checked && !once) continue;
-        steps.emplace_back(nm, Hub::resolve_once_params(params));
+        steps.emplace_back(task_type_name(key), Hub::resolve_once_params(params));
     }
     return steps;
 }
@@ -5135,7 +5371,19 @@ void MaaHubWindow::launch_ui_sequence(const std::string& id,
         id, std::move(steps), auto_reload_,
         [this, alive, id, pa](const std::string& status) {
             if (!alive || !alive->load()) return;
-            if (status == "done") run_post_actions(id, pa);
+            if (status != "done" && status != "partial") return;
+            if (pa.get_bool("skip_on_error", false) && status != "done") return;
+            bool executed = run_post_actions(id, pa);
+            if (executed && pa.get_bool("once", false)) {
+                post_action([this, id] {
+                    {
+                        std::lock_guard<std::mutex> lk(pa_mtx_);
+                        post_action_.erase(id);
+                    }
+                    save_post_action(id);
+                    set_notice("\u5b8c\u6210\u540e\u52a8\u4f5c\u5df2\u6267\u884c\u5e76\u6e05\u7a76");
+                }, "\u6e05\u7406\u5b8c\u6210\u540e\u52a8\u4f5c");
+            }
         });
     if (started) {
         set_notice(std::string(label_notice) + " (" + std::to_string(count) + " \u4e2a\u4efb\u52a1)");
@@ -5150,10 +5398,10 @@ bool MaaHubWindow::run_item_if_checked(const std::string& id, const std::string&
     auto tit = it->second.find(name);
     if (tit == it->second.end()) return false;
     if (!tit->second.checked && !tit->second.once) return false;
-    mj::Value params = mj::Value::object();
+    mj::Value params = hub_->task_params(id, name);
     for (auto& kv : tit->second.params) params.set(kv.first, kv.second);
     params = Hub::resolve_once_params(params);
-    if (hub_->run_on_executor(id, name, params) > 0) {
+    if (hub_->run_on_executor(id, task_type_name(name), params) > 0) {
         tit->second.once = false;
         for (auto pt = tit->second.params.begin(); pt != tit->second.params.end(); ) {
             if (pt->first.rfind("__once_", 0) == 0) pt = tit->second.params.erase(pt);

@@ -17,6 +17,7 @@
 #include "gui.hpp"
 #include "hub.hpp"
 #include "json.hpp"
+#include "stage_catalog.hpp"
 #include "util.hpp"
 #include "config_import.hpp"
 
@@ -50,6 +51,9 @@ public:
     void debug_open_add_task();
     void debug_open_ctx_menu(const std::string& task);
     void debug_open_new_exec();
+    static std::string task_type_name(const std::string& key);
+    std::vector<std::string> debug_task_keys(const std::string& id);
+    void debug_duplicate_task(const std::string& id, const std::string& key);
     // 离屏画布尺寸（真实窗口客户区为 800x600；不设置就按这个值建）
     void debug_set_client_size(int w, int h) { dump_w_ = w; dump_h_ = h; }
     // 离屏渲染专用：注入一条假的更新检查结果，用于核对「更新检查」面板的排版
@@ -93,7 +97,8 @@ private:
     // 右列日志区（官方 TaskQueueView Column=2）
     void draw_log_column(RECT area, const std::string& id, const std::string& kind);
     void page_executor(RECT content);
-    void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind);
+    void draw_add_task_overlay(RECT area, const std::string& id, const std::string& kind,
+                               bool busy = false);
     void draw_post_action(RECT area, const std::string& id);
     void draw_task_ctx_menu();
     void draw_rename_box(RECT area, const std::string& id);
@@ -113,14 +118,19 @@ private:
     std::wstring post_action_desc(const std::string& id);
     void load_post_action();
     mj::Value post_action_copy(const std::string& id);
-    void run_post_actions(const std::string& id, const mj::Value& pa);
+    bool run_post_actions(const std::string& id, const mj::Value& pa);
     void apply_startup_connect(const std::string& id);
     void save_task_list();
     void load_task_list();       // MAA 1:1 实例页
     void save_task_checks();     // 左列勾选状态（官方队列状态会持久化）
     void load_task_checks();
     void sync_task_checks(const std::string& id,
-                              const std::vector<mj::Value>& tasks);
+                          const std::vector<std::pair<std::string, mj::Value>>& tasks);
+    std::string next_task_key(const std::string& id, const std::string& type) const;
+    void duplicate_task(const std::string& id, const std::string& key);
+    void remove_task(const std::string& id, const std::string& key);
+    std::vector<std::pair<std::string, mj::Value>> ordered_task_entries(
+        const std::string& id, const std::vector<mj::Value>& catalog);
     // 官方 CopilotView（自动战斗）
     void page_copilot(RECT content);
     // 官方 ToolboxView（小工具）
@@ -195,7 +205,7 @@ private:
     void page_settings(RECT content);
 
     // MAA 官方任务显示名（取自 MaaWpfGui Res/Localizations/zh-cn.xaml）
-    std::wstring display_name(const std::string& kind, const std::string& task);
+    std::wstring display_name(const std::string& kind, std::string task);
     // MaaEnd 任务名→官方 label（取自 interface 的 locales），随快照变化重建
 
     const std::map<std::string, std::wstring>& end_labels();
@@ -209,6 +219,9 @@ private:
     void defer_ui(std::function<void()> fn);
     void refresh_snapshot();
     void refresh_snapshot_fast();   // 即时快照：只读持久化文件，启动首帧用
+    void refresh_stage_activity();
+    void ensure_stage_catalog(const std::string& id);
+    std::string stage_server(const std::string& id) const;
     void set_notice(const std::string& s);
 
     // 动作
@@ -274,6 +287,12 @@ private:
     std::string panel_synced_key_;      // 上次同步的 "exec|task"
     std::set<std::string> panel_loaded_; // 已从 Hub 同步过参数的 (exec,task)
     bool panel_params_stale_ = true;    // 导入配置等外部写入后置脏，下一帧重新加载
+    std::mutex stage_mtx_;
+    std::string stage_activity_text_;
+    uint64_t stage_activity_revision_ = 0;
+    double stage_activity_checked_ = 0.0;
+    std::string stage_catalog_key_;
+    stage_catalog::StageCatalog stage_catalog_;
     std::map<std::string, float> scroll_;
     // 滚动区内容高度（上一帧实测；scroll_ 的键一一对应）
     std::map<std::string, int> content_h_;

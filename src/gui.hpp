@@ -47,6 +47,7 @@ struct Theme {
     COLORREF status_running = RGB(0xEC, 0xF3, 0xFD);  // #206C9CF3 InProgress
     COLORREF status_done = RGB(0xEB, 0xF9, 0xEB);     // #2060D060 Completed
     COLORREF status_error = RGB(0xFF, 0xEC, 0xEC);    // #20FF6666 Error
+    COLORREF status_skipped = RGB(0xF2, 0xF2, 0xF2);  // Skipped
     COLORREF row_alt = RGB(0xF3, 0xF3, 0xF3);       // SecondaryRegionBrush（Light 覆盖为 #F3F3F3）
     // 官方背景层级：Light 下 RegionBrush=#FFFFFF，RegionBrushOpacity25=#40FFFFFF
     // 叠加在白根底上仍是纯白（Opacity 系列只在设置了背景图时才有可见差异）
@@ -87,6 +88,7 @@ struct Theme {
         t.status_running = RGB(0x1F, 0x26, 0x37);   // #20326CF3 叠 #1C1C1C
         t.status_done    = RGB(0x2B, 0x36, 0x2B);   // #2090EE90
         t.status_error   = RGB(0x37, 0x21, 0x21);   // #20FF4444
+        t.status_skipped = RGB(0x27, 0x27, 0x2B);
         t.trace_text     = RGB(0xA9, 0xA9, 0xA9);   // TraceLogBrush（Dark=DarkGray）
         t.hover          = RGB(0x2B, 0x2B, 0x30);
         t.row_alt        = RGB(0x1F, 0x1F, 0x22);
@@ -428,7 +430,8 @@ public:
     // 弹出层必须盖住本帧后续绘制的控件，所以 combo() 只登记，帧末由
     // 页面调 flush_combo_popup() 统一绘制并回收点击（选中结果下一帧生效）。
     int combo(const char* id, RECT r, const std::vector<std::wstring>& items, int cur,
-              const std::wstring& placeholder = L"", bool item_icon = false) {
+              const std::wstring& placeholder = L"", bool item_icon = false,
+              bool searchable = false) {
         std::string key = id;
         int picked = -1;
         std::string mark = key + "|";
@@ -436,50 +439,191 @@ public:
             picked = atoi(combo_pick_.c_str() + mark.size());
             combo_pick_.clear();
         }
+        int display_cur = picked >= 0 ? picked : cur;
+        std::wstring selected_txt = (display_cur >= 0 && display_cur < (int)items.size())
+                                  ? items[(size_t)display_cur] : placeholder;
+        bool was_open = combo_open_ == key;
         bool hov = hovered(r);
-        if (hov && in_.pressed) active_ = key;
+        if (searchable) {
+            std::string edit = combo_edit_[key];
+            if (focus_ != key) edit = util::wide_to_utf8(selected_txt);
+            combo_edit_[key] = edit;
+        }
+        if (hov && in_.pressed) {
+            if (combo_open_ != key) {
+                combo_open_.clear();
+                combo_scroll_ = 0;
+                combo_active_ = -1;
+                combo_search_.clear();
+                combo_filter_.clear();
+            }
+            active_ = key;
+            if (searchable) focus_ = key;
+            else focus_.clear();
+        }
         bool open = combo_open_ == key;
         if (hov && active_ == key && in_.released) {
-            combo_open_ = open ? std::string() : key;
-            combo_scroll_ = 0;
             open = !open;
+            combo_open_ = open ? key : std::string();
+            combo_scroll_ = 0;
+            if (open) {
+                combo_active_ = (display_cur >= 0 && display_cur < (int)items.size())
+                              ? display_cur : (items.empty() ? -1 : 0);
+                combo_search_.clear();
+                combo_filter_.clear();
+            } else if (searchable) {
+                combo_edit_[key] = util::wide_to_utf8(selected_txt);
+            }
         }
+        if (open && !was_open) {
+            combo_active_ = (display_cur >= 0 && display_cur < (int)items.size())
+                          ? display_cur : (items.empty() ? -1 : 0);
+        }
+
         round_rect(r, theme.card_bg, open ? theme.primary : theme.border, 4);
-        std::wstring txt = (cur >= 0 && cur < (int)items.size()) ? items[cur] : placeholder;
-        // 官方掉落材料下拉：IsEditable 收起态塞不进图片，用一个不命中的 16px 浮层贴在左端，
-        // ComboBox 以 Padding=28 为它让出文本起点；「不选择」项同位画描边圆环占位。
-        int tx0 = r.left + (item_icon ? 28 : 8);
-        if (item_icon)
-            circle_outline({ r.left + 12, (r.top + r.bottom) / 2 - 8,
-                             r.left + 28, (r.top + r.bottom) / 2 + 8 }, theme.border);
-        RECT tr{ tx0, r.top, r.right - 22, r.bottom };
-        push_clip(tr);
-        text_clipped(tr, txt, txt.empty() ? theme.trace_text : theme.text, font);
-        pop_clip();
+        if (searchable) {
+            bool keep_edit_focus = combo_open_ == key && focus_ == key
+                                && in_.pressed && !PtInRect(&r, in_.mouse);
+            text_input(key.c_str(), r, combo_edit_[key], nullptr, 0, false, false, 24);
+            if (keep_edit_focus) focus_ = key;
+            if (hov && in_.pressed && !text_edit_[key].value.empty()) {
+                text_edit_[key].anchor = 0;
+                text_edit_[key].caret = text_edit_[key].value.size();
+            }
+        } else {
+            int tx0 = r.left + (item_icon ? 28 : 8);
+            if (item_icon)
+                circle_outline({ r.left + 12, (r.top + r.bottom) / 2 - 8,
+                                 r.left + 28, (r.top + r.bottom) / 2 + 8 }, theme.border);
+            RECT tr{ tx0, r.top, r.right - 22, r.bottom };
+            push_clip(tr);
+            text_clipped(tr, selected_txt, selected_txt.empty() ? theme.trace_text : theme.text, font);
+            pop_clip();
+        }
         icon_chevron_down({ r.right - 18, r.top, r.right - 4, r.bottom }, theme.dim);
+
         if (open) {
-            combo_pop_.key = key;
-            combo_pop_.box = r;
-            combo_pop_.items = items;
-            combo_pop_.cur = cur;
-            combo_pop_.live = true;
+            std::wstring filter;
+            if (searchable) {
+                std::wstring typed = widen(combo_edit_[key]);
+                if (typed != selected_txt) filter = typed;
+            }
+            if (filter != combo_filter_) {
+                combo_filter_ = filter;
+                combo_scroll_ = 0;
+                combo_active_ = items.empty() ? -1 : 0;
+            }
+            std::vector<int> visible;
+            visible.reserve(items.size());
+            for (int i = 0; i < (int)items.size(); ++i) {
+                if (filter.empty()) {
+                    visible.push_back(i);
+                    continue;
+                }
+                std::wstring haystack = items[(size_t)i];
+                std::wstring needle = filter;
+                auto lower = [](wchar_t ch) {
+                    return ch >= L'A' && ch <= L'Z' ? (wchar_t)(ch - L'A' + L'a') : ch;
+                };
+                for (auto& ch : haystack) ch = lower(ch);
+                for (auto& ch : needle) ch = lower(ch);
+                if (haystack.find(needle) != std::wstring::npos) visible.push_back(i);
+            }
+            int count = (int)visible.size();
+            if (count > 0) {
+                if (combo_active_ < 0 || combo_active_ >= count) combo_active_ = 0;
+                if (!searchable) {
+                    if (!combo_search_.empty() && GetTickCount() - combo_search_ms_ > 1000)
+                        combo_search_.clear();
+                    bool searched = false;
+                    for (wchar_t ch : in_.char_inputs) {
+                        if (ch < 32) continue;
+                        combo_search_.push_back(ch);
+                        searched = true;
+                    }
+                    if (searched) {
+                        combo_search_ms_ = GetTickCount();
+                        std::wstring prefix = combo_search_;
+                        auto lower = [](wchar_t ch) {
+                            return ch >= L'A' && ch <= L'Z' ? (wchar_t)(ch - L'A' + L'a') : ch;
+                        };
+                        for (auto& ch : prefix) ch = lower(ch);
+                        for (int step = 1; step <= count; ++step) {
+                            int pos = (combo_active_ + step) % count;
+                            std::wstring label = items[(size_t)visible[(size_t)pos]];
+                            for (auto& ch : label) ch = lower(ch);
+                            if (label.rfind(prefix, 0) == 0) {
+                                combo_active_ = pos;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!searchable && in_.vk == VK_UP) combo_active_ = (combo_active_ + count - 1) % count;
+                if (!searchable && in_.vk == VK_DOWN) combo_active_ = (combo_active_ + 1) % count;
+                if (!searchable && in_.vk == VK_HOME) combo_active_ = 0;
+                if (!searchable && in_.vk == VK_END) combo_active_ = count - 1;
+                if (in_.vk == VK_PRIOR) combo_active_ = (std::max)(0, combo_active_ - 8);
+                if (in_.vk == VK_NEXT) combo_active_ = (std::min)(count - 1, combo_active_ + 8);
+                if ((in_.vk == VK_RETURN || in_.vk == VK_TAB) && count > 0) {
+                    int original = visible[(size_t)combo_active_];
+                    combo_pick_ = key + "|" + std::to_string(original);
+                    if (searchable) combo_edit_[key] = util::wide_to_utf8(items[(size_t)original]);
+                    combo_open_.clear();
+                    combo_scroll_ = 0;
+                    focus_.clear();
+                    open = false;
+                }
+            }
+            if (in_.vk == VK_ESCAPE) {
+                combo_open_.clear();
+                combo_scroll_ = 0;
+                if (searchable) combo_edit_[key] = util::wide_to_utf8(selected_txt);
+                focus_.clear();
+                open = false;
+            }
+            if (open) {
+                combo_pop_.key = key;
+                combo_pop_.box = r;
+                combo_pop_.items = items;
+                combo_pop_.cur = display_cur;
+                combo_pop_.filter = filter;
+                combo_pop_.searchable = searchable;
+                combo_pop_.live = true;
+            }
         }
         return picked;
     }
 
-    // 帧末调用：绘制展开中的下拉层，并处理「点选项」/「点外部关闭」
+    // 帧末调用：绘制展开中的下拉层，并处理选项、滚动、键盘与点击外部关闭。
     void flush_combo_popup() {
         if (!combo_pop_.live) return;
         combo_pop_.live = false;
         RECT b = combo_pop_.box;
-        int n = (int)combo_pop_.items.size();
-        if (n <= 0) return;
+        std::vector<int> visible;
+        visible.reserve(combo_pop_.items.size());
+        for (int i = 0; i < (int)combo_pop_.items.size(); ++i) {
+            if (combo_pop_.filter.empty()) {
+                visible.push_back(i);
+                continue;
+            }
+            std::wstring haystack = combo_pop_.items[(size_t)i];
+            std::wstring needle = combo_pop_.filter;
+            auto lower = [](wchar_t ch) {
+                return ch >= L'A' && ch <= L'Z' ? (wchar_t)(ch - L'A' + L'a') : ch;
+            };
+            for (auto& ch : haystack) ch = lower(ch);
+            for (auto& ch : needle) ch = lower(ch);
+            if (haystack.find(needle) != std::wstring::npos) visible.push_back(i);
+        }
+        int n = (int)visible.size();
         const int row = 26;
+        int shown = (std::max)(1, n);
         int avail_below = clip_.bottom - (b.bottom + 2) - 4;
         int avail_above = (b.top - 2) - clip_.top - 4;
-        bool flip_up = avail_below < (std::min)(n, 4) * row && avail_above > avail_below;
+        bool flip_up = avail_below < (std::min)(shown, 4) * row && avail_above > avail_below;
         int avail_h = flip_up ? avail_above : avail_below;
-        int max_vis = (std::min)(n, (std::max)(1, (std::min)(avail_h / row, 9)));
+        int max_vis = n == 0 ? 1 : (std::min)(n, (std::max)(1, (std::min)(avail_h / row, 9)));
         int pop_h = max_vis * row;
         RECT list = flip_up
             ? RECT{ b.left, b.top - 2 - pop_h, b.right, b.top - 2 }
@@ -495,42 +639,87 @@ public:
         } else {
             combo_scroll_ = 0;
         }
+        if (combo_active_ >= 0) {
+            if (combo_active_ < combo_scroll_) combo_scroll_ = combo_active_;
+            if (combo_active_ >= combo_scroll_ + max_vis)
+                combo_scroll_ = combo_active_ - max_vis + 1;
+            if (combo_scroll_ < 0) combo_scroll_ = 0;
+            if (n > max_vis && combo_scroll_ > n - max_vis) combo_scroll_ = n - max_vis;
+        }
 
         fill(list, theme.card_bg);
         round_rect(list, CLR_INVALID, theme.border, 4);
         bool hit = false;
-        for (int k = 0; k < max_vis; ++k) {
-            int i = combo_scroll_ + k;
-            if (i >= n) break;
+        RECT scroll_hit{ list.right - 8, list.top, list.right, list.bottom };
+        bool scroll_hov = n > max_vis && hovered(scroll_hit);
+        if (n == 0) {
+            hit = hovered(list);
+            RECT tr{ list.left + 8, list.top, list.right - 8, list.bottom };
+            text_clipped(tr, L"\u65e0\u5339\u914d\u9879", theme.faint, font);
+        }
+        for (int k = 0; k < max_vis && n > 0; ++k) {
+            int pos = combo_scroll_ + k;
+            if (pos >= n) break;
+            int i = visible[(size_t)pos];
             RECT ir{ list.left + 1, list.top + k * row, list.right - 1, list.top + (k + 1) * row };
-            bool hov = hovered(ir);
+            bool hov = hovered(ir) && !scroll_hov;
             if (hov) {
                 hit = true;
+                if (in_.pressed) combo_active_ = pos;
                 push_clip(ir);
                 fill(ir, theme.item_hover);
                 pop_clip();
             }
+            if (scroll_hov) hit = true;
             RECT tr{ ir.left + 8, ir.top, ir.right - 8, ir.bottom };
             push_clip(tr);
-            text_clipped(tr, combo_pop_.items[i],
-                         i == combo_pop_.cur ? theme.primary : theme.text, font);
+            text_clipped(tr, combo_pop_.items[(size_t)i],
+                         i == combo_pop_.cur || pos == combo_active_ ? theme.primary : theme.text,
+                         font);
             pop_clip();
             if (hov && in_.pressed) {
                 combo_pick_ = combo_pop_.key + "|" + std::to_string(i);
+                if (combo_pop_.searchable)
+                    combo_edit_[combo_pop_.key] = util::wide_to_utf8(combo_pop_.items[(size_t)i]);
                 combo_open_.clear();
                 combo_scroll_ = 0;
+                focus_.clear();
                 return;
             }
         }
         if (n > max_vis) {
             int thumb_h = (std::max)(16, pop_h * max_vis / n);
-            int ty = list.top + (pop_h - thumb_h) * combo_scroll_ / (std::max)(1, n - max_vis);
-            round_rect({ list.right - 5, ty + 2, list.right - 2, ty + thumb_h - 2 },
+            int track_h = pop_h - thumb_h;
+            int ty = list.top + track_h * combo_scroll_ / (std::max)(1, n - max_vis);
+            RECT thumb{ list.right - 5, ty + 2, list.right - 2, ty + thumb_h - 2 };
+            if (in_.pressed && scroll_hov) {
+                if (hovered(thumb)) {
+                    combo_scroll_drag_ = true;
+                    combo_scroll_drag_off_ = in_.mouse.y - ty;
+                } else {
+                    combo_scroll_ = (in_.mouse.y - list.top - thumb_h / 2)
+                                  * (n - max_vis) / (std::max)(1, track_h);
+                    if (combo_scroll_ < 0) combo_scroll_ = 0;
+                    if (combo_scroll_ > n - max_vis) combo_scroll_ = n - max_vis;
+                }
+            }
+            if (combo_scroll_drag_ && in_.down && track_h > 0) {
+                combo_scroll_ = (in_.mouse.y - list.top - combo_scroll_drag_off_)
+                              * (n - max_vis) / track_h;
+                if (combo_scroll_ < 0) combo_scroll_ = 0;
+                if (combo_scroll_ > n - max_vis) combo_scroll_ = n - max_vis;
+            }
+            int drag_ty = list.top + track_h * combo_scroll_ / (std::max)(1, n - max_vis);
+            round_rect({ list.right - 5, drag_ty + 2, list.right - 2, drag_ty + thumb_h - 2 },
                        RGB(0xA0, 0xA4, 0xAE), CLR_INVALID, 1);
+        } else {
+            combo_scroll_drag_ = false;
         }
+        if (!in_.down) combo_scroll_drag_ = false;
         if (in_.pressed && !hit && !PtInRect(&b, in_.mouse)) {
             combo_open_.clear();
             combo_scroll_ = 0;
+            if (focus_ == combo_pop_.key) focus_.clear();
         }
     }
 
@@ -603,7 +792,10 @@ public:
                 bool enabled = true) {
         bool hov = hovered(r) && enabled;
         bool click = false;
-        if (hov && in_.pressed) active_ = id;
+        if (hov && in_.pressed) {
+            active_ = id;
+            focus_.clear();
+        }
         if (hov && active_ == id && in_.released) click = true;
 
         // 官方 MaaButtonDefaultStyle：Background=RegionBrushOpacity25(约#FBFBFB)、
@@ -643,7 +835,7 @@ public:
     // 返回被点击的格下标，未点击返回 -1。
     int button_group(const char* id, RECT r, const std::vector<std::wstring>& labels,
                      const std::vector<int>& widths, int style = 0,
-                     std::vector<RECT>* cells = nullptr) {
+                     std::vector<RECT>* cells = nullptr, bool enabled = true) {
         int n = (int)labels.size();
         if (n <= 0) return -1;
         std::vector<RECT> cs(n);
@@ -665,13 +857,18 @@ public:
         COLORREF base_fill = style == 1 ? theme.primary : theme.card_bg;
         COLORREF hov_fill = style == 1 ? theme.primary_dark : theme.hover;
         COLORREF txt_c = style == 1 ? RGB(255, 255, 255) : theme.text;
+        if (!enabled) {
+            base_fill = theme.disabled_bg;
+            hov_fill = theme.disabled_bg;
+            txt_c = theme.disabled_text;
+        }
 
         // 外框先画（含底色），再叠 hover 底色，最后分隔线与文字
         round_rect(r, base_fill, theme.border, 4);
 
         int clicked = -1;
         for (int i = 0; i < n; ++i) {
-            bool hov = hovered(cs[i]);
+            bool hov = enabled && hovered(cs[i]);
             std::string iid = std::string(id) + "#" + std::to_string(i);
             if (hov && in_.pressed) active_ = iid;
             if (hov && active_ == iid && in_.released) clicked = i;
@@ -748,9 +945,12 @@ public:
     // wrap：窄矩形下是否折行。任务列表行 hover 时右侧要让出工具按钮，
     //       此时传 false 走「单行 + 省略号」，避免折行溢出到下一行。
     bool checkbox3(const char* id, RECT r, const std::wstring& label, CheckState& st,
-                   int* label_lines = nullptr, bool wrap = true) {
-        bool hov = hovered(r);
-        if (hov && in_.pressed) active_ = id;
+                   int* label_lines = nullptr, bool wrap = true, bool enabled = true) {
+        bool hov = enabled && hovered(r);
+        if (hov && in_.pressed) {
+            active_ = id;
+            focus_.clear();
+        }
         bool changed = false;
         if (hov && active_ == id && in_.released) {
             st = (st == CheckState::On) ? CheckState::Off : CheckState::On;
@@ -783,6 +983,11 @@ public:
         // 官方 CheckBox 文字 TextWrapping=Wrap：窄列下长标签换行显示，不被裁切
         // null 态文字色 = TraceLogBrush（Light #808080），这是官方唯一的「仅一次」提示
         COLORREF label_c = (st == CheckState::Once) ? theme.trace_text : theme.text;
+        if (!enabled) {
+            fill_c = theme.disabled_bg;
+            line_c = theme.border;
+            label_c = theme.disabled_text;
+        }
         int tx = r.left + box + 8;
         int avail = r.right - tx;
         SIZE full = text_size(label, font);
@@ -816,73 +1021,87 @@ public:
 
 
     void text_input(const char* id, RECT r, std::string& value, const wchar_t* hint = nullptr,
-                    int align = 0, bool password = false) {
+                    int align = 0, bool password = false, bool border = true, int right_pad = 4) {
+        auto prev_utf8 = [](const std::string& s, size_t pos) {
+            if (pos == 0) return size_t(0);
+            --pos;
+            while (pos > 0 && ((unsigned char)s[pos] & 0xC0) == 0x80) --pos;
+            return pos;
+        };
+        auto next_utf8 = [](const std::string& s, size_t pos) {
+            if (pos >= s.size()) return s.size();
+            ++pos;
+            while (pos < s.size() && ((unsigned char)s[pos] & 0xC0) == 0x80) ++pos;
+            return pos;
+        };
+        auto clamp_pos = [](const std::string& s, size_t pos) {
+            if (pos >= s.size()) return s.size();
+            while (pos > 0 && ((unsigned char)s[pos] & 0xC0) == 0x80) --pos;
+            return pos;
+        };
+        TextEdit& edit = text_edit_[id];
+        if (edit.value != value) {
+            edit.value = value;
+            edit.anchor = edit.caret = value.size();
+            edit.scroll = 0;
+        }
+
         bool hov = hovered(r);
         if (hov && in_.pressed) {
             active_ = id;
             focus_ = id;
+            std::wstring w = widen(edit.value);
+            int used = 0;
+            size_t pos = 0;
+            while (pos < edit.value.size()) {
+                size_t next = next_utf8(edit.value, pos);
+                int width = text_size(widen(edit.value.substr(pos, next - pos)), font).cx;
+                if (in_.mouse.x < r.left + 7 + used + width / 2) break;
+                used += width;
+                pos = next;
+            }
+            edit.caret = pos;
+            edit.anchor = pos;
+            edit.scroll = 0;
+            edit.dragging = true;
+            (void)w;
         }
         bool focused = focus_ == id;
         if (focused && in_.pressed && !hov) {
             focus_.clear();
             focused = false;
         }
-        // 官方 MaaTextBoxDefaultStyle：Background=RegionBrushOpacity25、圆角 4
-        round_rect(r, theme.card_bg, focused ? theme.primary : theme.border, 4);
-        std::wstring w = widen(value);
-        std::wstring disp = password ? std::wstring(w.size(), L'\u2022') : w;
-        int ty = r.top + ((r.bottom - r.top) - text_size(L"Ag", font).cy) / 2;
-        RECT tr{ r.left + 4, r.top + 1, r.right - 4, r.bottom - 1 };
-        push_clip(tr);
-        if (disp.empty() && hint) {
-            if (align == 1) {
-                SIZE hs = text_size(hint, font);
-                text((r.left + r.right - hs.cx) / 2, ty, hint, theme.faint, font);
-            } else {
-                text(r.left + 8, ty, hint, theme.faint, font);
+        if (focused && edit.dragging && in_.down) {
+            std::wstring w = widen(edit.value);
+            int used = 0;
+            size_t pos = 0;
+            while (pos < edit.value.size()) {
+                size_t next = next_utf8(edit.value, pos);
+                int width = text_size(widen(edit.value.substr(pos, next - pos)), font).cx;
+                if (in_.mouse.x < r.left + 7 + used + width / 2) break;
+                used += width;
+                pos = next;
             }
-        } else {
-            // 水平滚动以露出光标
-            int maxw = r.right - r.left - 14;
-            SIZE sz = text_size(disp, font);
-            int x = (align == 1) ? (r.left + r.right - sz.cx) / 2 : r.left + 7;
-            if (sz.cx > maxw) x = r.left + 7 - (sz.cx - maxw) - 8;
-            text(x, ty, disp, theme.text, font);
-            if (focused && (GetTickCount() / 530) % 2 == 0) {
-                int cx = std::min<int>(x + sz.cx + 1, (int)r.right - 3);
-                HPEN p = CreatePen(PS_SOLID, 1, theme.text);
-                HGDIOBJ old = SelectObject(dc_, p);
-                MoveToEx(dc_, cx, r.top + 6, nullptr);
-                LineTo(dc_, cx, r.bottom - 6);
-                SelectObject(dc_, old);
-                DeleteObject(p);
-            }
+            edit.caret = pos;
+            (void)w;
         }
-        pop_clip();
-        // 键盘输入
+        if (!in_.down) edit.dragging = false;
+
         if (focused) {
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            if (ctrl && in_.vk == 'V') {
-                if (OpenClipboard(hwnd_)) {
-                    HANDLE h = GetClipboardData(CF_UNICODETEXT);
-                    if (h) {
-                        const wchar_t* p = (const wchar_t*)GlobalLock(h);
-                        if (p) {
-                            std::wstring clip(p);
-                            GlobalUnlock(h);
-                            std::wstring clean;
-                            clean.reserve(clip.size());
-                            for (wchar_t ch : clip) {
-                                if (ch != L'\r' && ch != L'\n') clean.push_back(ch);
-                            }
-                            value += util::wide_to_utf8(clean);
-                        }
-                    }
-                    CloseClipboard();
-                }
-            } else if (ctrl && in_.vk == 'C' && !password) {
+            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            size_t sel_a = (std::min)(edit.anchor, edit.caret);
+            size_t sel_b = (std::max)(edit.anchor, edit.caret);
+            bool has_selection = sel_a != sel_b;
+            auto replace_selection = [&](const std::string& inserted) {
+                edit.value.replace(sel_a, sel_b - sel_a, inserted);
+                edit.caret = sel_a + inserted.size();
+                edit.anchor = edit.caret;
+            };
+            auto copy_text = [&](const std::string& text) {
                 if (OpenClipboard(hwnd_)) {
                     EmptyClipboard();
+                    std::wstring w = util::utf8_to_wide(text);
                     size_t bytes = (w.size() + 1) * sizeof(wchar_t);
                     HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
                     if (hg) {
@@ -895,31 +1114,142 @@ public:
                     }
                     CloseClipboard();
                 }
-            }
-            if (!in_.char_inputs.empty()) {
-                for (size_t i = 0; i < in_.char_inputs.size(); ++i) {
-                    wchar_t ch = in_.char_inputs[i];
-                    if (ch >= 32 || ch == L'\t') {
-                        std::wstring unit(1, ch);
-                        if (ch >= 0xD800 && ch <= 0xDBFF && i + 1 < in_.char_inputs.size()) {
-                            wchar_t lo = in_.char_inputs[i + 1];
-                            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                                unit.push_back(lo);
-                                ++i;
+            };
+            auto move_caret = [&](size_t pos) {
+                pos = clamp_pos(edit.value, pos);
+                edit.caret = pos;
+                if (!shift) edit.anchor = pos;
+            };
+
+            if (ctrl && in_.vk == 'A') {
+                edit.anchor = 0;
+                edit.caret = edit.value.size();
+            } else if (ctrl && in_.vk == 'C' && !password) {
+                copy_text(has_selection ? edit.value.substr(sel_a, sel_b - sel_a) : edit.value);
+            } else if (ctrl && in_.vk == 'X' && !password && has_selection) {
+                copy_text(edit.value.substr(sel_a, sel_b - sel_a));
+                replace_selection("");
+            } else if (ctrl && in_.vk == 'V') {
+                if (OpenClipboard(hwnd_)) {
+                    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+                    if (h) {
+                        const wchar_t* p = (const wchar_t*)GlobalLock(h);
+                        if (p) {
+                            std::wstring clip(p);
+                            GlobalUnlock(h);
+                            std::string clean;
+                            clean.reserve(clip.size());
+                            for (wchar_t ch : clip) {
+                                if (ch != L'\r' && ch != L'\n') clean += util::wide_to_utf8(std::wstring(1, ch));
                             }
+                            replace_selection(clean);
                         }
-                        value += util::wide_to_utf8(unit);
-                    } else if (ch == L'\b' && !value.empty()) {
-                        // UTF-8 backspace: drop last complete UTF-8 char
-                        size_t n = value.size();
-                        while (n > 0 && ((unsigned char)value[n - 1] & 0xC0) == 0x80) --n;
-                        if (n > 0) --n;
-                        value.resize(n);
                     }
+                    CloseClipboard();
+                }
+            } else if (in_.vk == VK_LEFT) {
+                move_caret(prev_utf8(edit.value, edit.caret));
+            } else if (in_.vk == VK_RIGHT) {
+                move_caret(next_utf8(edit.value, edit.caret));
+            } else if (in_.vk == VK_HOME) {
+                move_caret(0);
+            } else if (in_.vk == VK_END) {
+                move_caret(edit.value.size());
+            } else if (in_.vk == VK_DELETE) {
+                if (has_selection) replace_selection("");
+                else if (edit.caret < edit.value.size()) {
+                    size_t next = next_utf8(edit.value, edit.caret);
+                    edit.value.erase(edit.caret, next - edit.caret);
+                }
+            } else if (in_.vk == VK_BACK) {
+                if (has_selection) replace_selection("");
+                else if (edit.caret > 0) {
+                    size_t prev = prev_utf8(edit.value, edit.caret);
+                    edit.value.erase(prev, edit.caret - prev);
+                    edit.caret = prev;
+                    edit.anchor = prev;
                 }
             }
-            if (in_.vk == VK_RETURN || in_.vk == VK_ESCAPE) focus_.clear();
+            for (size_t i = 0; i < in_.char_inputs.size(); ++i) {
+                wchar_t ch = in_.char_inputs[i];
+                if (ch == L'\b') {
+                    if (in_.vk != VK_BACK) {
+                        if (has_selection) replace_selection("");
+                        else if (edit.caret > 0) {
+                            size_t prev = prev_utf8(edit.value, edit.caret);
+                            edit.value.erase(prev, edit.caret - prev);
+                            edit.caret = prev;
+                            edit.anchor = prev;
+                        }
+                    }
+                    has_selection = false;
+                    sel_a = sel_b = edit.caret;
+                } else if (ch >= 32 || ch == L'\t') {
+                    std::wstring unit(1, ch);
+                    if (ch >= 0xD800 && ch <= 0xDBFF && i + 1 < in_.char_inputs.size()) {
+                        wchar_t lo = in_.char_inputs[i + 1];
+                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                            unit.push_back(lo);
+                            ++i;
+                        }
+                    }
+                    replace_selection(util::wide_to_utf8(unit));
+                    has_selection = false;
+                    sel_a = sel_b = edit.caret;
+                }
+            }
+            if (in_.vk == VK_RETURN || in_.vk == VK_ESCAPE) {
+                focus_.clear();
+                edit.anchor = edit.caret;
+            }
+            value = edit.value;
         }
+
+        if (border) round_rect(r, theme.card_bg, focused ? theme.primary : theme.border, 4);
+        std::wstring w = widen(edit.value);
+        std::wstring disp = password ? std::wstring(w.size(), L'\u2022') : w;
+        int ty = r.top + ((r.bottom - r.top) - text_size(L"Ag", font).cy) / 2;
+        RECT tr{ r.left + 4, r.top + 1, r.right - right_pad, r.bottom - 1 };
+        int maxw = r.right - r.left - 10 - right_pad;
+        auto width_to = [&](size_t pos) {
+            pos = clamp_pos(edit.value, pos);
+            return text_size(widen(edit.value.substr(0, pos)), font).cx;
+        };
+        int caret_w = width_to(edit.caret);
+        if (focused && align == 0) {
+            if (caret_w - edit.scroll > maxw) edit.scroll = caret_w - maxw + 8;
+            if (caret_w - edit.scroll < 0) edit.scroll = (std::max)(0, caret_w - 8);
+        }
+        SIZE sz = text_size(disp, font);
+        int x = align == 1 ? (r.left + r.right - sz.cx) / 2 : r.left + 7 - edit.scroll;
+        push_clip(tr);
+        if (disp.empty() && hint) {
+            if (align == 1) {
+                SIZE hs = text_size(hint, font);
+                text((r.left + r.right - hs.cx) / 2, ty, hint, theme.faint, font);
+            } else {
+                text(r.left + 8, ty, hint, theme.faint, font);
+            }
+        } else {
+            if (focused && edit.anchor != edit.caret && !password) {
+                size_t sel_a = (std::min)(edit.anchor, edit.caret);
+                size_t sel_b = (std::max)(edit.anchor, edit.caret);
+                int x1 = x + width_to(sel_a);
+                int x2 = x + width_to(sel_b);
+                fill({ x1, r.top + 4, x2, r.bottom - 4 }, theme.primary_light);
+            }
+            text(x, ty, disp, theme.text, font);
+            if (focused && (GetTickCount() / 530) % 2 == 0) {
+                int cx = (std::min)(x + caret_w + 1, (int)r.right - right_pad - 3);
+                HPEN p = CreatePen(PS_SOLID, 1, theme.text);
+                HGDIOBJ old = SelectObject(dc_, p);
+                MoveToEx(dc_, cx, r.top + 6, nullptr);
+                LineTo(dc_, cx, r.bottom - 6);
+                SelectObject(dc_, old);
+                DeleteObject(p);
+            }
+        }
+        pop_clip();
     }
 
     // 横向选项条：返回点击的索引，未点击返回 -1
@@ -1038,6 +1368,10 @@ public:
     }
 
     Input input() const { return in_; }
+    bool focused_with_prefix(const std::string& prefix) const {
+        return !focus_.empty() && focus_.rfind(prefix, 0) == 0;
+    }
+    void clear_focus() { focus_.clear(); }
 
 private:
     static HFONT make_font(int px, bool bold) {
@@ -1063,18 +1397,35 @@ private:
     // r32：数字输入框（number_input）的编辑缓冲，按控件 id 键控。
     // 聚焦期间以缓冲为权威（可清空/可插改），未聚焦时由真实值回填。
     std::map<std::string, std::string> num_edit_;
+    struct TextEdit {
+        std::string value;
+        size_t anchor = 0;
+        size_t caret = 0;
+        int scroll = 0;
+        bool dragging = false;
+    };
+    std::map<std::string, TextEdit> text_edit_;
     // 下拉框：展开中的控件、待登记的弹出层、帧末回收的点击
     struct ComboPop {
         std::string key;
         RECT box{};
         std::vector<std::wstring> items;
+        std::wstring filter;
         int cur = -1;
+        bool searchable = false;
         bool live = false;
     };
     std::string combo_open_;
     std::string combo_pick_;
+    std::map<std::string, std::string> combo_edit_;
     ComboPop combo_pop_;
+    std::wstring combo_filter_;
+    std::wstring combo_search_;
+    ULONGLONG combo_search_ms_ = 0;
+    int combo_active_ = -1;
     int combo_scroll_ = 0;
+    bool combo_scroll_drag_ = false;
+    int combo_scroll_drag_off_ = 0;
     bool wheel_used_ = false;
     // 滚动
     RECT scroll_rect_{};
