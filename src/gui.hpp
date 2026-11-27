@@ -200,6 +200,7 @@ public:
         if (radius * 2 > h) radius = h / 2;
         using namespace Gdiplus;
         Graphics g(dc_);
+        apply_gdiplus_dpi(g);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         g.SetPixelOffsetMode(PixelOffsetModeHalf);
         GraphicsPath path;
@@ -318,6 +319,7 @@ public:
     void icon_add_task(RECT r, COLORREF c) {
         using namespace Gdiplus;
         Graphics g(dc_);
+        apply_gdiplus_dpi(g);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         int w = r.right - r.left, h = r.bottom - r.top;
         int d = w < h ? w : h;
@@ -332,6 +334,7 @@ public:
     void icon_copy_task(RECT r, COLORREF c) {
         using namespace Gdiplus;
         Graphics g(dc_);
+        apply_gdiplus_dpi(g);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         int w = r.right - r.left, h = r.bottom - r.top;
         int bw = w * 6 / 10, bh = h * 6 / 10;
@@ -345,6 +348,7 @@ public:
     void icon_rename_task(RECT r, COLORREF c) {
         using namespace Gdiplus;
         Graphics g(dc_);
+        apply_gdiplus_dpi(g);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         int w = r.right - r.left, h = r.bottom - r.top;
         SolidBrush br(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
@@ -355,6 +359,7 @@ public:
     void icon_delete_task(RECT r, COLORREF c) {
         using namespace Gdiplus;
         Graphics g(dc_);
+        apply_gdiplus_dpi(g);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         int w = r.right - r.left, h = r.bottom - r.top;
         Pen pen(Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.6f);
@@ -367,6 +372,7 @@ public:
     void icon_gear(RECT r, COLORREF c) {
         using namespace Gdiplus;
         Graphics g(dc_);
+        apply_gdiplus_dpi(g);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
         int rad = (r.right - r.left) / 2 - 1;
@@ -471,6 +477,7 @@ public:
                               ? display_cur : (items.empty() ? -1 : 0);
                 combo_search_.clear();
                 combo_filter_.clear();
+                combo_follow_active_ = true;
             } else if (searchable) {
                 combo_edit_[key] = util::wide_to_utf8(selected_txt);
             }
@@ -512,6 +519,7 @@ public:
                 combo_filter_ = filter;
                 combo_scroll_ = 0;
                 combo_active_ = items.empty() ? -1 : 0;
+                combo_follow_active_ = true;
             }
             std::vector<int> visible;
             visible.reserve(items.size());
@@ -531,7 +539,10 @@ public:
             }
             int count = (int)visible.size();
             if (count > 0) {
-                if (combo_active_ < 0 || combo_active_ >= count) combo_active_ = 0;
+                if (combo_active_ < 0 || combo_active_ >= count) {
+                    combo_active_ = 0;
+                    combo_follow_active_ = true;
+                }
                 if (!searchable) {
                     if (!combo_search_.empty() && GetTickCount() - combo_search_ms_ > 1000)
                         combo_search_.clear();
@@ -542,6 +553,7 @@ public:
                         searched = true;
                     }
                     if (searched) {
+                        combo_follow_active_ = true;
                         combo_search_ms_ = GetTickCount();
                         std::wstring prefix = combo_search_;
                         auto lower = [](wchar_t ch) {
@@ -565,6 +577,9 @@ public:
                 if (!searchable && in_.vk == VK_END) combo_active_ = count - 1;
                 if (in_.vk == VK_PRIOR) combo_active_ = (std::max)(0, combo_active_ - 8);
                 if (in_.vk == VK_NEXT) combo_active_ = (std::min)(count - 1, combo_active_ + 8);
+                if (in_.vk == VK_UP || in_.vk == VK_DOWN || in_.vk == VK_HOME
+                    || in_.vk == VK_END || in_.vk == VK_PRIOR || in_.vk == VK_NEXT)
+                    combo_follow_active_ = true;
                 if ((in_.vk == VK_RETURN || in_.vk == VK_TAB) && count > 0) {
                     int original = visible[(size_t)combo_active_];
                     combo_pick_ = key + "|" + std::to_string(original);
@@ -632,6 +647,7 @@ public:
         if (n > max_vis) {
             if (hovered(list) && in_.wheel) {
                 combo_scroll_ -= in_.wheel * 2;
+                combo_follow_active_ = false;
                 wheel_used_ = true;
             }
             if (combo_scroll_ < 0) combo_scroll_ = 0;
@@ -639,12 +655,13 @@ public:
         } else {
             combo_scroll_ = 0;
         }
-        if (combo_active_ >= 0) {
+        if (combo_follow_active_ && combo_active_ >= 0) {
             if (combo_active_ < combo_scroll_) combo_scroll_ = combo_active_;
             if (combo_active_ >= combo_scroll_ + max_vis)
                 combo_scroll_ = combo_active_ - max_vis + 1;
             if (combo_scroll_ < 0) combo_scroll_ = 0;
             if (n > max_vis && combo_scroll_ > n - max_vis) combo_scroll_ = n - max_vis;
+            combo_follow_active_ = false;
         }
 
         fill(list, theme.card_bg);
@@ -693,6 +710,7 @@ public:
             int ty = list.top + track_h * combo_scroll_ / (std::max)(1, n - max_vis);
             RECT thumb{ list.right - 5, ty + 2, list.right - 2, ty + thumb_h - 2 };
             if (in_.pressed && scroll_hov) {
+                combo_follow_active_ = false;
                 if (hovered(thumb)) {
                     combo_scroll_drag_ = true;
                     combo_scroll_drag_off_ = in_.mouse.y - ty;
@@ -1355,12 +1373,21 @@ public:
     // 切换亮/暗主题（官方界面主题设置；影响所有控件配色）
     void set_theme_mode(bool dark) { theme.set_dark(dark); }
     void set_hwnd(HWND h) { hwnd_ = h; }
+    void set_dpi(int dpi) { dpi_ = (dpi > 0) ? dpi : 96; }
+    int dpi() const { return dpi_; }
 
     void set_dc(HDC dc, RECT client) {
         dc_ = dc;
         clip_ = client;
         clip_stack_.clear();
         dc_save_.clear();
+        if (dpi_ != 96) {
+            SetMapMode(dc_, MM_ANISOTROPIC);
+            SetWindowExtEx(dc_, 96, 96, nullptr);
+            SetViewportExtEx(dc_, dpi_, dpi_, nullptr);
+        } else {
+            SetMapMode(dc_, MM_TEXT);
+        }
         // 文字背景透明 + 高质量拉伸（缩放/位图时不出现块状）
         SetBkMode(dc_, TRANSPARENT);
         SetStretchBltMode(dc_, HALFTONE);
@@ -1374,6 +1401,13 @@ public:
     void clear_focus() { focus_.clear(); }
 
 private:
+    void apply_gdiplus_dpi(Gdiplus::Graphics& g) const {
+        if (dpi_ != 96) {
+            float sc = (float)dpi_ / 96.0f;
+            g.ScaleTransform(sc, sc);
+        }
+    }
+
     static HFONT make_font(int px, bool bold) {
         // CLEARTYPE_QUALITY：系统「字体平滑」开着时按子像素渲染，与 WPF 一致。
         // 之前用 ANTIALIASED_QUALITY 强制灰度抗锯齿，小字号下发虚，是「看不清」的主因。
@@ -1387,6 +1421,7 @@ private:
 
     HDC dc_ = nullptr;
     HWND hwnd_ = nullptr;
+    int dpi_ = 96;
     RECT clip_{ 0, 0, 0, 0 };
     std::vector<RECT> clip_stack_;
     std::vector<int> dc_save_;
@@ -1424,6 +1459,7 @@ private:
     ULONGLONG combo_search_ms_ = 0;
     int combo_active_ = -1;
     int combo_scroll_ = 0;
+    bool combo_follow_active_ = false;
     bool combo_scroll_drag_ = false;
     int combo_scroll_drag_off_ = 0;
     bool wheel_used_ = false;

@@ -404,9 +404,12 @@ int main() {
         assert(game_day_of_week(parse_activity_time("2026/11/24 19:59:00", 0), "Official") == 2);
         assert(game_day_of_week(parse_activity_time("2026/11/24 20:00:00", 0), "Official") == 3);
         assert(normalize_server("Bilibili") == "Official");
+        assert(valid_stage_code("SSReopen-OS"));
+        assert(valid_stage_code("WR-1"));
+        assert(!valid_stage_code("---"));
 
         mj::Value stages = mj::Value::array();
-        for (const char* code : { "1-7", "OS-9", "TL-9", "CE-6" }) {
+        for (const char* code : { "1-7", "OS-9", "TL-9", "CE-6", "WR-1", "OF-1" }) {
             mj::Value stage = mj::Value::object();
             stage.set("code", mj::Value(code));
             stages.push(std::move(stage));
@@ -423,8 +426,10 @@ int main() {
                   "TimeZone": 8
                 },
                 "Stages": [
+                  { "Display": "SSReopen-OS", "Value": "SSReopen-OS", "Drop": "代理1~9关" },
                   { "Display": "OS-9", "Value": "OS-9", "Drop": "31053" },
-                  { "Display": "OS-8", "Value": "OS-8", "Drop": "31083" }
+                  { "Display": "OS-8", "Value": "OS-8", "Drop": "30103" },
+                  { "Display": "OS-7", "Value": "OS-7", "Drop": "代理1~9关" }
                 ]
               },
               "TL": {
@@ -467,9 +472,16 @@ int main() {
           }
         })JSON";
         mj::Value activities = mj::Parser(activity_json).parse();
+        const char* item_json = R"JSON({
+          "31053": { "name": "化合切削液" },
+          "30103": { "name": "RMA70-12" },
+          "31113": { "name": "电极单元" }
+        })JSON";
+        mj::Value items = mj::Parser(item_json).parse();
         double now = parse_activity_time("2026/11/25 12:00:00", 0);
-        StageCatalog catalog = build(stages, activities, "Official", now);
-        bool found_os = false, found_tl = false;
+        StageCatalog catalog = build(stages, activities, items, "Official", now);
+        bool found_os = false, found_tl = false, found_wr = false;
+        bool found_of = false, found_annihilation = false, found_ssreopen = false;
         for (const auto& stage : catalog.stages) {
             if (stage.value == "OS-9") {
                 found_os = true;
@@ -480,20 +492,32 @@ int main() {
                 found_tl = true;
                 assert(stage.activity && !stage.open && stage.outdated);
             }
+            if (stage.value == "WR-1") found_wr = true;
+            if (stage.value == "OF-1") found_of = true;
+            if (stage.value == "Annihilation") {
+                found_annihilation = true;
+                assert(stage.display == "剿灭模式");
+            }
+            if (stage.value == "SSReopen-OS") found_ssreopen = true;
         }
-        assert(found_os && found_tl);
+        assert(found_os && found_tl && found_ssreopen && !found_wr && !found_of && found_annihilation);
         auto tips = today_activity_tips(catalog, now);
         bool tip_os = false, tip_tl = false, tip_os_mini = false;
         bool tip_tl_mini = false, tip_permanent_mini = false;
+        bool tip_material_name = false, tip_material_id = false, tip_text_drop = false;
         for (const auto& tip : tips) {
             if (tip.find("雪山降临1101复刻") != std::string::npos) tip_os = true;
             if (tip.find("OS-9") != std::string::npos) tip_os = true;
             if (tip.find("OS-喀兰贸易技术研发部") != std::string::npos) tip_os_mini = true;
+            if (tip.find("化合切削液") != std::string::npos) tip_material_name = true;
+            if (tip.find("31053") != std::string::npos) tip_material_id = true;
+            if (tip.find("代理1~9关") != std::string::npos) tip_text_drop = true;
             if (tip.find("TL-9") != std::string::npos) tip_tl = true;
             if (tip.find("TL-过期小游戏") != std::string::npos) tip_tl_mini = true;
             if (tip.find("常驻小游戏") != std::string::npos) tip_permanent_mini = true;
         }
-        assert(tip_os && tip_os_mini && !tip_tl && !tip_tl_mini && !tip_permanent_mini);
+        assert(tip_os && tip_os_mini && tip_material_name && tip_text_drop
+               && !tip_material_id && !tip_tl && !tip_tl_mini && !tip_permanent_mini);
         assert(!activity_open(catalog.activities[0], catalog.activities[0].start));
         assert(!activity_open(catalog.activities[0], catalog.activities[0].expire));
 
@@ -504,6 +528,28 @@ int main() {
             if (stage.value == "OS-9") kept_os = true;
         }
         assert(kept_closed_current && kept_os);
+        bool ap_closed = false;
+        for (const auto& stage : catalog.stages)
+            if (stage.value == "AP-5") ap_closed = !stage.open;
+        assert(ap_closed);
+        auto open_choices = choices_for(catalog, "", false);
+        bool listed_tl = false, listed_wr = false, listed_closed_ap = false;
+        for (const auto& stage : open_choices) {
+            if (stage.value == "TL-9") listed_tl = true;
+            if (stage.value == "WR-1") listed_wr = true;
+            if (stage.value == "AP-5") listed_closed_ap = true;
+        }
+        assert(!listed_tl && !listed_wr && listed_closed_ap);
+        auto hidden_choices = choices_for(catalog, "", true);
+        bool hidden_ap = false;
+        for (const auto& stage : hidden_choices)
+            if (stage.value == "AP-5") hidden_ap = true;
+        assert(!hidden_ap);
+        auto hidden_current = choices_for(catalog, "AP-5", true);
+        int current_ap_count = 0;
+        for (const auto& stage : hidden_current)
+            if (stage.value == "AP-5") ++current_ap_count;
+        assert(current_ap_count == 1);
         auto custom = choices_for(catalog, "CUSTOM-99", true);
         assert(!custom.empty() && custom.back().value == "CUSTOM-99");
     }
@@ -668,6 +714,41 @@ int main() {
             frame(idle, draw_search_combo);
             assert(search_cur == 1);
 
+            RECT scroll_combo_rect{ 20, 300, 220, 330 };
+            std::vector<std::wstring> scroll_items;
+            for (int i = 0; i < 20; ++i) scroll_items.push_back(L"Item-" + std::to_wstring(i));
+            int scroll_cur = 19;
+            auto draw_scroll_combo = [&] {
+                int hit = g.combo("test:scroll-combo", scroll_combo_rect, scroll_items, scroll_cur);
+                if (hit >= 0) scroll_cur = hit;
+            };
+            click.mouse = { 120, 315 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_scroll_combo);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_scroll_combo);
+            frame(idle, draw_scroll_combo);
+            click.mouse = { 217, 513 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_scroll_combo);
+            gui::Input scroll_drag = click;
+            scroll_drag.pressed = false;
+            scroll_drag.mouse.y = 334;
+            frame(scroll_drag, draw_scroll_combo);
+            scroll_drag.down = false;
+            scroll_drag.released = true;
+            frame(scroll_drag, draw_scroll_combo);
+            frame(idle, draw_scroll_combo);
+            click.mouse = { 120, 345 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_scroll_combo);
+            frame(idle, draw_scroll_combo);
+            assert(scroll_cur == 0);
+
             StageCatalog catalog;
             catalog.stages = {
                 StageChoice{ "OS-9", "OS-9", "31053", true, false, true },
@@ -699,9 +780,24 @@ int main() {
             frame(idle, draw_fight);
             assert(params["stage"].as_string() == "OS-8");
 
+            params["use_alternate_stage"] = mj::Value(false);
+            params["candidate_stages"] = mj::Value("");
+            frame(idle, draw_fight);
+            click.mouse = { 70, 267 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_fight);
+            click.pressed = false;
+            click.released = true;
+            frame(click, draw_fight);
+            frame(idle, draw_fight);
+            assert(params["use_alternate_stage"].as_bool());
+            assert(params["candidate_stages"].as_string() == "OS-8");
+
             params["use_custom_stage"] = mj::Value(true);
             frame(idle, draw_fight);
-            click.mouse = { fight_stage.left + 2, 231 };
+            click.mouse = { fight_stage.left + 24, 231 };
+            click.down = click.pressed = true;
             click.released = false;
             frame(click, draw_fight);
             typed.char_inputs = L"X";
@@ -725,6 +821,40 @@ int main() {
             frame(click, draw_fight);
             frame(idle, draw_fight);
             assert(params["candidate_stages"].as_string() == "OS-8");
+
+            params["candidate_stages"] = mj::Value("1-7,OS-8");
+            frame(idle, draw_fight);
+            click.mouse = { 137, 297 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_fight);
+            gui::Input candidate_drag = click;
+            candidate_drag.pressed = false;
+            candidate_drag.mouse.y = 265;
+            frame(candidate_drag, draw_fight);
+            candidate_drag.down = false;
+            candidate_drag.released = true;
+            frame(candidate_drag, draw_fight);
+            frame(idle, draw_fight);
+            assert(params["candidate_stages"].as_string() == "OS-8,1-7");
+
+            params["stage"] = mj::Value("OS-9");
+            params["candidate_stages"] = mj::Value("1-7,OS-8");
+            frame(idle, draw_fight);
+            click.mouse = { 137, 233 };
+            click.down = click.pressed = true;
+            click.released = false;
+            frame(click, draw_fight);
+            gui::Input primary_drag = click;
+            primary_drag.pressed = false;
+            primary_drag.mouse.y = 265;
+            frame(primary_drag, draw_fight);
+            primary_drag.down = false;
+            primary_drag.released = true;
+            frame(primary_drag, draw_fight);
+            frame(idle, draw_fight);
+            assert(params["stage"].as_string() == "1-7");
+            assert(params["candidate_stages"].as_string() == "OS-9,OS-8");
 
             hub::ParamMap infra_params;
             infra_params["mode"] = mj::Value((int64_t)0);

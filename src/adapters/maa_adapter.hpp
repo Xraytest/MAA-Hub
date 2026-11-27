@@ -50,8 +50,14 @@ public:
                                      | LOAD_LIBRARY_SEARCH_USER_DIRS);
         });
         cookie_ = AddDllDirectory(util::utf8_to_wide(st_.install_dir).c_str());
-        HMODULE h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!h) h = LoadLibraryW(dll.c_str());
+        // 限定安全搜索目录加载（禁止回退到裸 LoadLibraryW 以免受当前目录/PATH DLL 劫持）
+        HMODULE h = LoadLibraryExW(dll.c_str(), nullptr,
+                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+                                   | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                                   | LOAD_LIBRARY_SEARCH_USER_DIRS);
+        if (!h) {
+            h = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        }
         if (!h) {
             st_.error = "LoadLibrary failed: " + st_.core_dll + " err=" + std::to_string(GetLastError());
             if (cookie_) { RemoveDllDirectory(cookie_); cookie_ = nullptr; }
@@ -86,13 +92,22 @@ public:
     }
 
     void unload() override {
-        if (handle_) { fn_.AsstDestroy(handle_); handle_ = nullptr; }
+        std::lock_guard<std::mutex> op_lk(op_mtx_);
+        accepting_events_.store(false, std::memory_order_release);
+        void* old = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            old = handle_;
+            handle_ = nullptr;
+        }
+        if (old) { fn_.AsstDestroy(old); }
         if (cookie_) { RemoveDllDirectory(cookie_); cookie_ = nullptr; }
         if (lib_) { FreeLibrary(lib_); lib_ = nullptr; }
     }
 
     // ------------------------------------------------------------ 连接
     bool connect() override {
+        std::lock_guard<std::mutex> op_lk(op_mtx_);
         void* old = nullptr;
         bool need_recreate = false;
         {
@@ -106,6 +121,8 @@ public:
             st_.conn = "connecting";
         }
         if (need_recreate) {
+            // 销毁旧实例前屏蔽回调，防止旧实例尾回调在 clear() 之后污染 events_
+            accepting_events_.store(false, std::memory_order_release);
             if (old) {
                 fn_.AsstStop(old);
                 fn_.AsstDestroy(old);
@@ -114,6 +131,7 @@ public:
                 std::lock_guard<std::mutex> lk(ev_mtx_);
                 events_.clear();
             }
+            accepting_events_.store(true, std::memory_order_release);
             void* fresh = cb_ ? fn_.AsstCreateEx((void*)cb_, (void*)this) : nullptr;
             std::lock_guard<std::mutex> lk(st_mtx_);
             handle_ = fresh;
@@ -290,8 +308,10 @@ public:
     }
 
     void disconnect() override {
+        std::lock_guard<std::mutex> op_lk(op_mtx_);
         // 停止当前任务链并销毁/重建 AsstHandle，彻底关闭 MaaTouch adb shell 子进程，
         // 避免多个 MAA 执行器同时占用同一模拟器 ADB 的 MaaTouch 通道。
+        accepting_events_.store(false, std::memory_order_release);
         void* old = nullptr;
         {
             std::lock_guard<std::mutex> lk(st_mtx_);
@@ -310,6 +330,7 @@ public:
             std::lock_guard<std::mutex> lk(ev_mtx_);
             events_.clear();
         }
+        accepting_events_.store(true, std::memory_order_release);
         void* fresh = cb_ ? fn_.AsstCreateEx((void*)cb_, (void*)this) : nullptr;
         {
             std::lock_guard<std::mutex> lk(st_mtx_);
@@ -318,15 +339,20 @@ public:
     }
 
     bool is_connected() override {
+        std::lock_guard<std::mutex> op_lk(op_mtx_);
         if (!handle_) return false;
         return fn_.AsstConnected(handle_) != 0;
     }
 
     // ------------------------------------------------------------ 任务
     bool run_task(const std::string& task, const mj::Value& params, int64_t& out) override {
+        std::lock_guard<std::mutex> op_lk(op_mtx_);
         out = 0;
         if (!handle_) { st_.last_error = "not loaded"; return false; }
-        if (st_.conn != "connected" && !is_connected()) { st_.last_error = "not connected"; return false; }
+        if (st_.conn != "connected" && (!fn_.AsstConnected || fn_.AsstConnected(handle_) == 0)) {
+            st_.last_error = "not connected";
+            return false;
+        }
         std::string p = mj::Value::dump(params);
         int tid = fn_.AsstAppendTask(handle_, task.c_str(), p.c_str());
         if (tid <= 0) {
@@ -349,9 +375,14 @@ public:
     }
 
     bool stop() override {
+        std::lock_guard<std::mutex> op_lk(op_mtx_);
         if (!handle_) return false;
         bool ok = fn_.AsstStop(handle_) != 0;
-        if (ok) { st_.run = "idle"; chain_err_ = false; }
+        if (ok) {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            st_.run = "idle";
+            chain_err_ = false;
+        }
         return ok;
     }
 
@@ -471,6 +502,7 @@ private:
     CallbackT make_callback() { return &MaaAdapter::trampoline; }
 
     void on_callback(int msg, const std::string& raw) {
+        if (!accepting_events_.load(std::memory_order_acquire)) return;
         static const std::map<int, std::pair<const char*, const char*>> kMsg = {
             { 0, {"error", "InternalError"} },
             { 1, {"error", "InitFailed"} },
@@ -647,6 +679,8 @@ private:
     // MAA 报错链后紧跟 AllTasksCompleted，不锁住失败就会被冲成 idle，整串误报 done
     bool chain_err_ = false;
     mutable std::mutex st_mtx_;
+    mutable std::mutex op_mtx_;
+    std::atomic<bool> accepting_events_{ true };
     HMODULE lib_ = nullptr;
     DLL_DIRECTORY_COOKIE cookie_ = nullptr;
     void* handle_ = nullptr;

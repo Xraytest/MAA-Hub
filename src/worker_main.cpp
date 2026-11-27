@@ -136,8 +136,13 @@ int worker_main(const std::string& kind, const mj::Value& cfg) {
                 if (!ok) r.set("error", err);
                 r.set("app", status_to_json(adapter->status(), cfg));
                 reply(ok, std::move(r));
+            } else if (cmd == "ping") {
+                mj::Value r = mj::Value::object();
+                r.set("pong", true);
+                reply(true, std::move(r));
             } else if (cmd == "stop") {
-                reply(adapter->stop(), status_to_json(adapter->status(), cfg));            } else if (cmd == "status") {
+                reply(adapter->stop(), status_to_json(adapter->status(), cfg));
+            } else if (cmd == "status") {
                 reply(true, status_to_json(adapter->status(), cfg));
             } else if (cmd == "is_connected") {
                 reply(adapter->is_connected(), mj::Value::object());
@@ -163,6 +168,10 @@ int worker_main(const std::string& kind, const mj::Value& cfg) {
         } catch (const std::exception& e) {
             mj::Value er = mj::Value::object();
             er.set("error", e.what());
+            reply(false, std::move(er));
+        } catch (...) {
+            mj::Value er = mj::Value::object();
+            er.set("error", "unknown exception in worker");
             reply(false, std::move(er));
         }
 

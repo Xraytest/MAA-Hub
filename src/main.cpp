@@ -12,6 +12,7 @@
 #pragma comment(lib, "gdiplus.lib")
 #include <algorithm>
 #include <cstdio>
+#include <iostream>
 #include <atomic>
 #include <string>
 #include <thread>
@@ -749,11 +750,21 @@ int main(int argc, char** argv) {
             return 0;
         } else if (a == "--worker" && i + 2 < argc) {
             std::string kind = argv[++i];
-            std::string cfg_b64 = argv[++i];
-            std::string cfg = util::base64_decode(cfg_b64);
+            std::string cfg_arg = argv[++i];
+            std::string cfg;
+            if (cfg_arg == "--stdin-cfg") {
+                if (!std::getline(std::cin, cfg)) {
+                    fprintf(stderr, "[worker] failed to read config json from stdin\n");
+                    printf("{\"error\":\"missing worker config on stdin\"}\n");
+                    return 2;
+                }
+                if (!cfg.empty() && cfg.back() == '\r') cfg.pop_back();
+            } else {
+                cfg = util::base64_decode(cfg_arg);
+            }
             mj::Value cfgv;
             if (!mj::try_parse(cfg, cfgv)) {
-                fprintf(stderr, "[worker] bad config json (decoded): %s\n", cfg.c_str());
+                fprintf(stderr, "[worker] bad config json: %s\n", cfg.c_str());
                 printf("{\"error\":\"bad worker config json\"}\n");
                 return 2;
             }
@@ -996,6 +1007,17 @@ int main(int argc, char** argv) {
     }
 
     // ---------------- GUI 模式（原生窗口） ----------------
+    // 启用 Per-Monitor V2 DPI 感知（高分屏清晰渲染，不再由系统位图拉伸）
+    if (!offscreen) {
+        using SetDpiCtxFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        HMODULE u32 = GetModuleHandleW(L"user32.dll");
+        auto fn = u32 ? reinterpret_cast<SetDpiCtxFn>(
+                            GetProcAddress(u32, "SetProcessDpiAwarenessContext"))
+                      : nullptr;
+        if (!fn || !fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+            SetProcessDPIAware();
+        }
+    }
     HANDLE single_mtx = nullptr;
     if (!offscreen) {
         std::wstring key = util::instance_key();

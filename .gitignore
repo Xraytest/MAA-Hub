@@ -6,44 +6,42 @@ build/
 *.ilk
 *.exp
 
-# 内部管理的核心（MaaHub 自己拉取/导入，体积大且可按需重建）
+# 内部管理的核心（MaaHub 自行拉取/导入，体积大且可按需重建）
 cores/
 
-# 运行时状态（含账号信息，不提交）
+# 运行时状态与本机配置（含路径/账号信息，不提交）
 state/
 state-*/
+config.json
 
 # 下载缓存
 _download/
 
-# VS Code
+# VS Code / IDE
 .vs/
 
-# 系统
+# 系统与编辑器临时文件
 Thumbs.db
 desktop.ini
+._*
+*.tmp.*
 *.log
 maahub-crash.log
 
-# ɳ��̽�루������ʱ�����ύ��
+# 沙盒探针（本地临时，勿提交）
 _sandbox/
-_download/
 
-# ������ս�ͼ�����ز�����ύ��
+# 面板验收与审计截图（本地产物，勿提交）
 docs/audit-*.png
+docs/final-*.png
+docs/*.png
 
-# Python ����
+# Python 缓存
 __pycache__/
 *.pyc
 
-# ������ƽ�ͼ�����ز��
-docs/final-*.png
-
 # local temp compare dir (probe scripts/screenshots, do not commit)
 _cmp/
-
-# docs top-level loose screenshots (local artifacts; doc images live in docs/assets/)
-docs/*.png
 
 # GitHub 访问令牌（本地凭据，绝不提交）
 .github-token*

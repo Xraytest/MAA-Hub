@@ -27,77 +27,102 @@ public:
     ~WorkerClient() { shutdown(); }
 
     bool start() {
-        std::string exe = util::exe_dir() + "\\MaaHub.exe";
+        std::string exe_d = util::exe_dir();
+        std::string exe = exe_d + "\\MaaHub.exe";
+        // 配置通过首条 stdin JSON 下发，避免命令行 32K 上限及在进程列表中暴露配置/账号信息
         std::wstring cmd = L"\"" + util::utf8_to_wide(exe) + L"\" --worker "
-                           + util::utf8_to_wide(kind_) + L" "
-                           + util::utf8_to_wide(util::base64_encode_str(mj::Value::dump(cfg_)));
-        // 工作目录 = exe 所在目录的上级（项目根），与 Python 版一致
-        std::wstring workdir = util::utf8_to_wide(util::parent_dir(util::exe_dir()));
+                           + util::utf8_to_wide(kind_) + L" --stdin-cfg";
+        // 开发布局（build\MaaHub.exe）沿用项目根目录；安装/便携布局使用 exe 所在目录
+        std::string parent_d = util::parent_dir(exe_d);
+        std::string wd = util::dir_exists(parent_d + "\\src") ? parent_d : exe_d;
+        std::wstring workdir = util::utf8_to_wide(wd);
         if (!util::spawn_process(cmd, workdir, L"", proc_)) {
             return false;
         }
+        reader_exited_ = false;
+        ready_ = false;
         reader_ = std::thread([this] { read_loop(); });
-        // 等就绪
-        for (int i = 0; i < 200; ++i) {
-            if (ready_) return true;
-            if (!proc_.alive()) {
-                return false;
-            }
-            Sleep(100);
+
+        // 首条消息发送配置 JSON
+        std::string cfg_line = mj::Value::dump(cfg_) + "\n";
+        bool sent_cfg = false;
+        {
+            std::lock_guard<std::mutex> wlk(wmtx_);
+            sent_cfg = write_all(proc_.stdin_write, cfg_line);
         }
+        if (!sent_cfg) {
+            abort_start();
+            return false;
+        }
+
+        // 等就绪（可被 ready_ 或 reader_exited_ 提前唤醒）
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.wait_for(lk, std::chrono::seconds(20), [&] {
+                return ready_.load() || reader_exited_.load() || shutting_down_.load();
+            });
+        }
+        if (ready_.load()) return true;
+        abort_start();
         return false;
     }
 
     // 同步调用；timeout_ms 内无响应返回 false
     bool call(const std::string& cmd, mj::Value params, int timeout_ms, mj::Value& out_result) {
-        // 串行化所有调用：HTTP 线程与执行线程可能并发调用同一 worker，
-        // 而内部 mtx_/cv_ 不支持重入。
-        std::lock_guard<std::mutex> call_lk(call_mtx_);
-        if (!proc_.alive()) {
+        if (!proc_.alive() || reader_exited_.load()) {
             return false;
         }
-        std::unique_lock<std::mutex> lk(mtx_);
-        int64_t cid = ++seq_;
-        pending_[cid] = mj::Value::object();
-        mj::Value req = mj::Value::object();
-        req.set("cmd", cmd);
-        req.set("id", cid);
-        for (auto& kv : params.members()) req.set(kv.first, kv.second);
-        std::string line = mj::Value::dump(req) + "\n";
+        int64_t cid = 0;
+        std::string line;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            cid = ++seq_;
+            pending_[cid] = mj::Value::object();
+            mj::Value req = mj::Value::object();
+            req.set("cmd", cmd);
+            req.set("id", cid);
+            for (auto& kv : params.members()) req.set(kv.first, kv.second);
+            line = mj::Value::dump(req) + "\n";
+        }
         {
             std::lock_guard<std::mutex> wlk(wmtx_);
-            DWORD n = 0;
-            if (!WriteFile(proc_.stdin_write, line.data(), (DWORD)line.size(), &n, nullptr)) {
+            if (!proc_.stdin_write || !write_all(proc_.stdin_write, line)) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                pending_.erase(cid);
                 return false;
             }
         }
+        std::unique_lock<std::mutex> lk(mtx_);
         bool got = cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms), [&] {
             auto it = pending_.find(cid);
-            return it != pending_.end() && it->second.get_bool("__done__", false);
+            return (it != pending_.end() && it->second.get_bool("__done__", false))
+                   || reader_exited_.load();
         });
         auto it = pending_.find(cid);
-        if (got && it != pending_.end()) {
-            mj::Value resp = it->second;
+        if (got && it != pending_.end() && it->second.get_bool("__done__", false)) {
+            mj::Value resp = std::move(it->second);
             pending_.erase(it);
             lk.unlock();
-            ok_last_ = resp.get_bool("ok", false);
+            bool ok = resp.get_bool("ok", false);
             out_result = resp["result"];
-            return ok_last_;
+            return ok;
         }
-        pending_.erase(cid);
+        if (it != pending_.end()) pending_.erase(it);
         return false;
     }
 
-    bool alive() const { return proc_.alive(); }
+    bool alive() const { return proc_.alive() && !reader_exited_.load(); }
 
     void shutdown() {
         if (shutting_down_.exchange(true)) return;
         util::trace("shutdown begin " + kind_ + " " + id_);
         if (reader_.joinable()) {
             // 尝试优雅退出（短超时；worker 无响应也不阻塞太久）
-            mj::Value dummy;
-            bool ok = call("exit", mj::Value::object(), 2000, dummy);
-            util::trace("exit rpc ok=" + std::to_string(ok ? 1 : 0));
+            if (proc_.alive() && !reader_exited_.load()) {
+                mj::Value dummy;
+                bool ok = call("exit", mj::Value::object(), 1500, dummy);
+                util::trace("exit rpc ok=" + std::to_string(ok ? 1 : 0));
+            }
             bool exited = proc_.wait_exit(1500);
             util::trace("wait_exit=" + std::to_string(exited ? 1 : 0));
             if (!exited) {
@@ -106,23 +131,68 @@ public:
                 exited = proc_.wait_exit(1500);
                 util::trace("kill done exited=" + std::to_string(exited ? 1 : 0));
             }
-            // 先收 reader 线程，再关句柄：反序会让线程阻塞在已回收的句柄上
-            bool reader_done = WaitForSingleObject(reader_.native_handle(), 1500) == WAIT_OBJECT_0;
-            util::trace(std::string("reader ") + (reader_done ? "join" : "detach"));
-            if (reader_done) reader_.join();
-            else reader_.detach();   // 绝不让 shutdown 无限期挂住
-            if (exited && reader_done) {
-                proc_.close();
-                util::trace("proc closed");
+            // 关闭 stdin 写端并取消可能仍阻塞在 ReadFile 的同步 I/O，确保 reader_ 无条件可 join
+            {
+                std::lock_guard<std::mutex> wlk(wmtx_);
+                if (proc_.stdin_write) {
+                    CloseHandle(proc_.stdin_write);
+                    proc_.stdin_write = nullptr;
+                }
             }
+            if (!reader_exited_.load()) {
+                CancelSynchronousIo(static_cast<HANDLE>(reader_.native_handle()));
+            }
+            if (WaitForSingleObject(static_cast<HANDLE>(reader_.native_handle()), 1500) != WAIT_OBJECT_0) {
+                // 兜底：若子进程孙进程仍持有 stdout 写端导致 ReadFile 未返回，再次取消 I/O
+                CancelSynchronousIo(static_cast<HANDLE>(reader_.native_handle()));
+            }
+            reader_.join();
+            util::trace("reader joined");
+            proc_.close();
+            util::trace("proc closed");
         } else {
             if (!proc_.wait_exit(1500)) proc_.kill();
-            if (proc_.wait_exit(1500)) proc_.close();
+            proc_.wait_exit(1500);
+            proc_.close();
         }
+        cv_.notify_all();
         util::trace("shutdown end " + kind_);
     }
 
 private:
+    static bool write_all(HANDLE h, const std::string& data) {
+        if (!h) return false;
+        const char* p = data.data();
+        size_t rem = data.size();
+        while (rem > 0) {
+            DWORD chunk = rem > 65536 ? 65536 : (DWORD)rem;
+            DWORD n = 0;
+            if (!WriteFile(h, p, chunk, &n, nullptr) || n == 0) return false;
+            p += n;
+            rem -= n;
+        }
+        return true;
+    }
+
+    void abort_start() {
+        proc_.kill();
+        proc_.wait_exit(1500);
+        {
+            std::lock_guard<std::mutex> wlk(wmtx_);
+            if (proc_.stdin_write) {
+                CloseHandle(proc_.stdin_write);
+                proc_.stdin_write = nullptr;
+            }
+        }
+        if (reader_.joinable()) {
+            if (!reader_exited_.load()) {
+                CancelSynchronousIo(static_cast<HANDLE>(reader_.native_handle()));
+            }
+            reader_.join();
+        }
+        proc_.close();
+    }
+
     void read_loop() {
         std::string buf;
         char chunk[8192];
@@ -139,13 +209,22 @@ private:
                 if (!line.empty()) handle_line(line);
             }
         }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            reader_exited_ = true;
+        }
+        cv_.notify_all();
     }
 
     void handle_line(const std::string& line) {
         mj::Value msg;
         if (!mj::try_parse(line, msg)) return;
         if (msg.get_bool("ready", false)) {
-            ready_ = true;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                ready_ = true;
+            }
+            cv_.notify_all();
             return;
         }
         if (msg.has("event")) {
@@ -181,14 +260,13 @@ private:
     util::ProcHandle proc_;
     std::thread reader_;
     std::atomic<bool> ready_{ false };
+    std::atomic<bool> reader_exited_{ false };
     std::atomic<bool> shutting_down_{ false };
     std::mutex mtx_;
     std::condition_variable cv_;
     std::mutex wmtx_;                // 保护 stdin 写
-    std::mutex call_mtx_;            // 串行化 call()
     int64_t seq_ = 0;
     std::map<int64_t, mj::Value> pending_;
-    bool ok_last_ = false;
 };
 
 } // namespace hub

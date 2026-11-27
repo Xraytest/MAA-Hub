@@ -158,27 +158,32 @@ bool MaaHubWindow::create() {
     if (!hwnd_) return false;
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, (LONG_PTR)this);
     gui_.set_hwnd(hwnd_);
+    if (!offscreen_) {
+        using GetDpiForWinFn = UINT(WINAPI*)(HWND);
+        HMODULE u32 = GetModuleHandleW(L"user32.dll");
+        auto fn_dpi = u32 ? reinterpret_cast<GetDpiForWinFn>(
+                                GetProcAddress(u32, "GetDpiForWindow"))
+                          : nullptr;
+        int d = fn_dpi ? (int)fn_dpi(hwnd_) : 96;
+        if (d <= 0) {
+            HDC sdc = GetDC(hwnd_);
+            d = sdc ? GetDeviceCaps(sdc, LOGPIXELSY) : 96;
+            if (sdc) ReleaseDC(hwnd_, sdc);
+        }
+        dpi_ = d > 0 ? d : 96;
+        gui_.set_dpi(dpi_);
+        if (dpi_ != 96) {
+            RECT drc{ 0, 0, scale_dpi(w), scale_dpi(h) };
+            AdjustWindowRect(&drc, WS_OVERLAPPEDWINDOW, FALSE);
+            int sw = drc.right - drc.left;
+            int sh = drc.bottom - drc.top;
+            SetWindowPos(hwnd_, nullptr, (sx - sw) / 2, (sy - sh) / 2, sw, sh,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
 
     // 应用界面主题（官方 界面设置-界面主题：light/dark/system）
-    {
-        std::string tm = hub_->settings().get().theme;
-        bool dark = false;
-        if (tm == "dark") dark = true;
-        else if (tm == "system") {
-            // 跟随系统：读注册表 AppsUseLightTheme
-            HKEY hk = nullptr;
-            if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                    0, KEY_READ, &hk) == ERROR_SUCCESS) {
-                DWORD v = 1, sz = sizeof(v);
-                if (RegQueryValueExW(hk, L"AppsUseLightTheme", nullptr, nullptr,
-                        (LPBYTE)&v, &sz) == ERROR_SUCCESS)
-                    dark = (v == 0);
-                RegCloseKey(hk);
-            }
-        }
-        gui_.set_theme_mode(dark);
-    }
+    refresh_system_theme();
     gui_.init_fonts();
     if (offscreen_) {
         // 移到屏幕外并保持隐藏：窗口始终不可见，仅供离屏渲染
@@ -450,8 +455,8 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     }
     switch (m) {
     case WM_MOUSEMOVE: {
-        input_.mouse.x = GET_X_LPARAM(lp);
-        input_.mouse.y = GET_Y_LPARAM(lp);
+        input_.mouse.x = unscale_dpi(GET_X_LPARAM(lp));
+        input_.mouse.y = unscale_dpi(GET_Y_LPARAM(lp));
         uint64_t now = GetTickCount64();
         if (input_.down || now - last_move_paint_ms_ >= 16) {
             last_move_paint_ms_ = now;
@@ -459,6 +464,30 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_DPICHANGED: {
+        if (!offscreen_) {
+            int new_dpi = (int)HIWORD(wp);
+            if (new_dpi > 0 && new_dpi != dpi_) {
+                dpi_ = new_dpi;
+                gui_.set_dpi(dpi_);
+            }
+            if (const RECT* suggested = reinterpret_cast<const RECT*>(lp)) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_SETTINGCHANGE:
+        if (!offscreen_) {
+            refresh_system_theme();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
     case WM_CAPTURECHANGED:
         // r32 P0：只有「按住期间被别的窗口夺走 capture」才算失捕。
         // 自家 WM_LBUTTONUP 里的 ReleaseCapture() 会同步投递本消息（lParam=NULL），
@@ -477,36 +506,36 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO:
         if (!offscreen_) {
             auto* mmi = (MINMAXINFO*)lp;
-            mmi->ptMinTrackSize.x = 800 + RAIL_W;
-            mmi->ptMinTrackSize.y = 520;
+            mmi->ptMinTrackSize.x = scale_dpi(800 + RAIL_W);
+            mmi->ptMinTrackSize.y = scale_dpi(520);
         }
         return 0;
     case WM_LBUTTONDOWN:
-        input_.mouse.x = GET_X_LPARAM(lp);
-        input_.mouse.y = GET_Y_LPARAM(lp);
+        input_.mouse.x = unscale_dpi(GET_X_LPARAM(lp));
+        input_.mouse.y = unscale_dpi(GET_Y_LPARAM(lp));
         input_.down = true;
         input_.pressed = true;
         SetCapture(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_LBUTTONUP:
-        input_.mouse.x = GET_X_LPARAM(lp);
-        input_.mouse.y = GET_Y_LPARAM(lp);
+        input_.mouse.x = unscale_dpi(GET_X_LPARAM(lp));
+        input_.mouse.y = unscale_dpi(GET_Y_LPARAM(lp));
         input_.down = false;
         input_.released = true;
         ReleaseCapture();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_RBUTTONDOWN:
-        input_.mouse.x = GET_X_LPARAM(lp);
-        input_.mouse.y = GET_Y_LPARAM(lp);
+        input_.mouse.x = unscale_dpi(GET_X_LPARAM(lp));
+        input_.mouse.y = unscale_dpi(GET_Y_LPARAM(lp));
         input_.rdown = true;
         input_.rpressed = true;
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_RBUTTONUP:
-        input_.mouse.x = GET_X_LPARAM(lp);
-        input_.mouse.y = GET_Y_LPARAM(lp);
+        input_.mouse.x = unscale_dpi(GET_X_LPARAM(lp));
+        input_.mouse.y = unscale_dpi(GET_Y_LPARAM(lp));
         input_.rdown = false;
         input_.rreleased = true;
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -616,7 +645,9 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
             mem_old_bmp_ = SelectObject(mem_dc_, mem_bmp_);
             mem_size_ = { rc.right, rc.bottom };
         }
-        on_paint(mem_dc_, rc);
+        RECT logical_rc{ 0, 0, unscale_dpi(rc.right), unscale_dpi(rc.bottom) };
+        on_paint(mem_dc_, logical_rc);
+        SetMapMode(mem_dc_, MM_TEXT);
         BitBlt(dc, 0, 0, rc.right, rc.bottom, mem_dc_, 0, 0, SRCCOPY);
         EndPaint(hwnd, &ps);
         return 0;
@@ -624,7 +655,9 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PRINTCLIENT: {
         RECT rc;
         GetClientRect(hwnd, &rc);
-        on_paint((HDC)wp, rc);
+        RECT logical_rc{ 0, 0, unscale_dpi(rc.right), unscale_dpi(rc.bottom) };
+        on_paint((HDC)wp, logical_rc);
+        SetMapMode((HDC)wp, MM_TEXT);
         return 0;
     }
     case WM_PRINT: {
@@ -635,7 +668,9 @@ LRESULT MaaHubWindow::handle_msg(HWND hwnd, UINT m, WPARAM wp, LPARAM lp) {
         HDC tmp = CreateCompatibleDC(target);
         HBITMAP bmp = CreateCompatibleBitmap(target, rc.right, rc.bottom);
         HGDIOBJ old = SelectObject(tmp, bmp);
-        on_paint(tmp, rc);
+        RECT logical_rc{ 0, 0, unscale_dpi(rc.right), unscale_dpi(rc.bottom) };
+        on_paint(tmp, logical_rc);
+        SetMapMode(tmp, MM_TEXT);
         BitBlt(target, 0, 0, rc.right, rc.bottom, tmp, 0, 0, SRCCOPY);
         SelectObject(tmp, old);
         DeleteObject(bmp);
@@ -1739,10 +1774,8 @@ void MaaHubWindow::load_task_checks() {
 void MaaHubWindow::draw_task_ctx_menu() {
     if (!ctx_menu_open_) return;
     mj::Value ex;
-    std::string erun = find_executor(ctx_menu_exec_, ex) ? ex.get_str("run", "") : "";
-    bool busy = hub_->is_seq_running(ctx_menu_exec_)
-             || !hub_->running_task_of(ctx_menu_exec_).empty()
-             || ex.get_bool("busy", false) || erun == "running" || erun == "stopping";
+    find_executor(ctx_menu_exec_, ex);
+    bool busy = is_exec_busy(ctx_menu_exec_, ex);
     const int w = 168, row_h = 30;
     struct Item { const wchar_t* label; const char* cmd; };
     const Item items[] = {
@@ -2279,9 +2312,7 @@ void MaaHubWindow::page_executor(RECT content) {
     std::string id = ex.get_str("id", "");
     std::string kind = ex.get_str("kind", "");
     std::string conn = ex.get_str("conn", "unknown");
-    std::string erun = ex.get_str("run", "");
-    bool busy = hub_->is_seq_running(id) || !hub_->running_task_of(id).empty()
-             || ex.get_bool("busy", false) || erun == "running" || erun == "stopping";
+    bool busy = is_exec_busy(id, ex);
     std::string acc_label = ex.get_str("account_label", "");
     int64_t task_count = ex.get_int("task_count", 0);
     std::string core_version = ex.get_str("core_version", "");
@@ -2562,12 +2593,8 @@ void MaaHubWindow::page_executor(RECT content) {
         if (al != task_alias_.end() && !al->second.empty()) {
             label = gui::widen(al->second);
         }
-        // 官方任务项右侧：常态是 16px 齿轮（配置入口标识，点击效果等同点行选中）；
-        // hover 时让位给 复制/重命名/删除 三个 22x22 图标按钮（官方 TaskActionButtonStyle）。
-        // r32：原来齿轮与操作键画在同一处右端 16px —— 删除图标直接压在齿轮上；
-        // 而且复选框命中区一直铺到 164px，点「重命名/复制」会顺带切一次勾选。
-        // 现在：hover 时任务名矩形收窄到操作键左侧（单行 + 省略号），
-        // 图标与文字、齿轮与删除键两两互不重叠。
+        // 齿轮始终保留在右端；hover 时复制/重命名/删除出现在齿轮左侧。
+        // 任务名在 hover 时收窄，避免文字与操作按钮重叠。
         const int ACT_W = 66;                    // 3 × 22
         const int gear_left = item.right - 22;   // 16px 图标 + 6px 右边距
         const int act_left = gear_left - 4 - ACT_W;
@@ -2619,13 +2646,11 @@ void MaaHubWindow::page_executor(RECT content) {
                 }
                 bx += 22;
             }
-        } else {
-            // 非 hover：齿轮（配置入口标识）。点它等同于点行——行级选中在下方统一处理。
-            int isz = 16;
-            int iy = item.top + ((item.bottom - item.top) - isz) / 2;
-            gui_.icon_gear({ gear_left, iy, gear_left + isz, iy + isz },
-                           (name == sel_task) ? gui_.theme.primary : gui_.theme.dim);
         }
+        int isz = 16;
+        int iy = item.top + ((item.bottom - item.top) - isz) / 2;
+        gui_.icon_gear({ gear_left, iy, gear_left + isz, iy + isz },
+                       (name == sel_task) ? gui_.theme.primary : gui_.theme.dim);
         if (hov && !act_hit && gui_.input().pressed) {
             for (auto& kv : task_ui_[id]) kv.second.selected = false;
             ui.selected = true;
@@ -3055,106 +3080,193 @@ void MaaHubWindow::page_accounts(RECT content) {
     gui_.end_scroll();
 }
 
+void MaaHubWindow::refresh_system_theme() {
+    std::string tm = hub_->settings().get().theme;
+    bool dark = false;
+    if (tm == "dark") dark = true;
+    else if (tm == "system") {
+        HKEY hk = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                0, KEY_READ, &hk) == ERROR_SUCCESS) {
+            DWORD v = 1, sz = sizeof(v);
+            if (RegQueryValueExW(hk, L"AppsUseLightTheme", nullptr, nullptr,
+                    (LPBYTE)&v, &sz) == ERROR_SUCCESS)
+                dark = (v == 0);
+            RegCloseKey(hk);
+        }
+    }
+    gui_.set_theme_mode(dark);
+}
+
+bool MaaHubWindow::is_exec_busy(const std::string& id, const mj::Value& ex) const {
+    if (id.empty()) return false;
+    std::string erun = ex.get_str("run", "");
+    return hub_->is_seq_running(id)
+        || !hub_->running_task_of(id).empty()
+        || ex.get_bool("busy", false)
+        || erun == "running"
+        || erun == "stopping";
+}
+
 // ================================================================ 核心管理
 void MaaHubWindow::inspect_copilot_file(const std::string& path) {
-    copilot_preview_path_ = path;
-    copilot_preview_ = {};
-    copilot_preview_.path = path;
-    if (path.empty() || !util::file_exists(path)) return;
-    std::string raw;
-    if (!util::read_file(path, raw)) return;
-    mj::Value j;
-    if (!mj::try_parse(raw, j) || !j.is_object()) return;
-    copilot_preview_.stage = j.get_str("stage_name", "");
-    if (auto* doc = j.find("doc"); doc && doc->is_object()) {
-        copilot_preview_.title = doc->get_str("title", "");
-        copilot_preview_.details = doc->get_str("details", "");
-    }
-    if (copilot_preview_.title.empty()) {
-        size_t pos = path.find_last_of("\\/");
-        copilot_preview_.title = (pos == std::string::npos) ? path : path.substr(pos + 1);
-    }
-    if (auto* ops = j.find("opers"); ops && ops->is_array() && !ops->items().empty()) {
-        std::string names;
-        int n = (int)ops->items().size();
-        for (int i = 0; i < n && i < 6; ++i) {
-            std::string nm = ops->items()[i].get_str("name", "");
-            if (nm.empty()) continue;
-            if (!names.empty()) names += ", ";
-            names += nm;
+    {
+        std::lock_guard<std::mutex> lk(copilot_mtx_);
+        if (path.empty()) {
+            copilot_preview_path_.clear();
+            copilot_inspecting_path_.clear();
+            copilot_preview_ = {};
+            return;
         }
-        if (n > 6) names += " ...";
-        copilot_preview_.opers_summary = std::to_string(n) + " \u540d\u5e72\u5458"
-            + (names.empty() ? "" : (": " + names));
+        if (copilot_inspecting_path_ == path) return;
+        copilot_inspecting_path_ = path;
+        copilot_preview_path_ = path;
     }
-    if (copilot_stage_.empty() && !copilot_preview_.stage.empty()) {
-        copilot_stage_ = copilot_preview_.stage;
+    auto parse_one = [](const std::string& p) {
+        CopilotFileEntry entry;
+        entry.path = p;
+        if (!util::file_exists(p)) return entry;
+        std::string raw;
+        if (!util::read_file(p, raw)) return entry;
+        mj::Value j;
+        if (!mj::try_parse(raw, j) || !j.is_object()) return entry;
+        entry.stage = j.get_str("stage_name", "");
+        if (auto* doc = j.find("doc"); doc && doc->is_object()) {
+            entry.title = doc->get_str("title", "");
+            entry.details = doc->get_str("details", "");
+        }
+        if (entry.title.empty()) {
+            size_t pos = p.find_last_of("\\/");
+            entry.title = (pos == std::string::npos) ? p : p.substr(pos + 1);
+        }
+        if (auto* ops = j.find("opers"); ops && ops->is_array() && !ops->items().empty()) {
+            std::string names;
+            int n = (int)ops->items().size();
+            for (int i = 0; i < n && i < 6; ++i) {
+                std::string nm = ops->items()[i].get_str("name", "");
+                if (nm.empty()) continue;
+                if (!names.empty()) names += ", ";
+                names += nm;
+            }
+            if (n > 6) names += " ...";
+            entry.opers_summary = std::to_string(n) + " \u540d\u5e72\u5458"
+                + (names.empty() ? "" : (": " + names));
+        }
+        return entry;
+    };
+    if (offscreen_) {
+        CopilotFileEntry entry = parse_one(path);
+        std::lock_guard<std::mutex> lk(copilot_mtx_);
+        copilot_preview_ = std::move(entry);
+        copilot_inspecting_path_.clear();
+        if (copilot_stage_.empty() && !copilot_preview_.stage.empty()) {
+            copilot_stage_ = copilot_preview_.stage;
+        }
+        return;
     }
+    post_action([this, path, parse_one] {
+        CopilotFileEntry entry = parse_one(path);
+        {
+            std::lock_guard<std::mutex> lk(copilot_mtx_);
+            if (copilot_preview_path_ == path) {
+                copilot_preview_ = std::move(entry);
+            }
+            if (copilot_inspecting_path_ == path) copilot_inspecting_path_.clear();
+        }
+        if (hwnd_) PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
+    }, "");
 }
 
 void MaaHubWindow::refresh_copilot_list(const std::string& maa_install_dir, bool force) {
-    if (!force && copilot_scanned_ && copilot_scan_dir_ == maa_install_dir) return;
-    copilot_scan_dir_ = maa_install_dir;
-    copilot_scanned_ = true;
-    copilot_files_.clear();
+    {
+        std::lock_guard<std::mutex> lk(copilot_mtx_);
+        if (copilot_scanning_) return;
+        if (!force && copilot_scanned_ && copilot_scan_dir_ == maa_install_dir) return;
+        copilot_scan_dir_ = maa_install_dir;
+        copilot_scanned_ = true;
+        copilot_scanning_ = true;
+    }
 
-    auto scan_dir = [&](const std::string& root, const std::string& default_cat) {
-        if (root.empty() || !util::dir_exists(root)) return;
-        std::vector<std::string> queue{ root };
-        while (!queue.empty() && copilot_files_.size() < 240) {
-            std::string d = queue.back();
-            queue.pop_back();
-            WIN32_FIND_DATAW fd;
-            HANDLE h = FindFirstFileW(util::utf8_to_wide(d + "\\*").c_str(), &fd);
-            if (h == INVALID_HANDLE_VALUE) continue;
-            do {
-                std::wstring wn = fd.cFileName;
-                if (wn == L"." || wn == L"..") continue;
-                std::string full = d + "\\" + util::wide_to_utf8(wn);
-                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                    queue.push_back(full);
-                    continue;
-                }
-                if (full.size() <= 5 || _stricmp(full.c_str() + full.size() - 5, ".json") != 0)
-                    continue;
-                std::string fname = util::wide_to_utf8(wn);
-                std::string cat = default_cat;
-                if (default_cat != "local") {
-                    if (fname.rfind("SSS_", 0) == 0 || full.find("\\SSS") != std::string::npos)
-                        cat = "sss";
-                    else if (full.find("Paradox") != std::string::npos || full.find("\xe6\x82\x96\xe8\xae\xba") != std::string::npos)
-                        cat = "paradox";
-                }
-                CopilotFileEntry entry;
-                entry.cat = cat;
-                entry.path = full;
-                std::string raw;
-                mj::Value j;
-                if (util::read_file(full, raw) && mj::try_parse(raw, j) && j.is_object()) {
-                    entry.stage = j.get_str("stage_name", "");
-                    if (auto* doc = j.find("doc"); doc && doc->is_object()) {
-                        entry.title = doc->get_str("title", "");
-                        entry.details = doc->get_str("details", "");
+    auto do_scan = [maa_install_dir]() {
+        std::vector<CopilotFileEntry> out;
+        auto scan_dir = [&](const std::string& root, const std::string& default_cat) {
+            if (root.empty() || !util::dir_exists(root)) return;
+            std::vector<std::string> queue{ root };
+            while (!queue.empty() && out.size() < 240) {
+                std::string d = queue.back();
+                queue.pop_back();
+                WIN32_FIND_DATAW fd;
+                HANDLE h = FindFirstFileW(util::utf8_to_wide(d + "\\*").c_str(), &fd);
+                if (h == INVALID_HANDLE_VALUE) continue;
+                do {
+                    std::wstring wn = fd.cFileName;
+                    if (wn == L"." || wn == L"..") continue;
+                    std::string full = d + "\\" + util::wide_to_utf8(wn);
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        queue.push_back(full);
+                        continue;
                     }
-                }
-                if (entry.title.empty()) entry.title = fname.substr(0, fname.size() - 5);
-                copilot_files_.push_back(std::move(entry));
-            } while (FindNextFileW(h, &fd) && copilot_files_.size() < 240);
-            FindClose(h);
-        }
+                    if (full.size() <= 5 || _stricmp(full.c_str() + full.size() - 5, ".json") != 0)
+                        continue;
+                    std::string fname = util::wide_to_utf8(wn);
+                    std::string cat = default_cat;
+                    if (default_cat != "local") {
+                        if (fname.rfind("SSS_", 0) == 0 || full.find("\\SSS") != std::string::npos)
+                            cat = "sss";
+                        else if (full.find("Paradox") != std::string::npos || full.find("\xe6\x82\x96\xe8\xae\xba") != std::string::npos)
+                            cat = "paradox";
+                    }
+                    CopilotFileEntry entry;
+                    entry.cat = cat;
+                    entry.path = full;
+                    std::string raw;
+                    mj::Value j;
+                    if (util::read_file(full, raw) && mj::try_parse(raw, j) && j.is_object()) {
+                        entry.stage = j.get_str("stage_name", "");
+                        if (auto* doc = j.find("doc"); doc && doc->is_object()) {
+                            entry.title = doc->get_str("title", "");
+                            entry.details = doc->get_str("details", "");
+                        }
+                    }
+                    if (entry.title.empty()) entry.title = fname.substr(0, fname.size() - 5);
+                    out.push_back(std::move(entry));
+                } while (FindNextFileW(h, &fd) && out.size() < 240);
+                FindClose(h);
+            }
+        };
+
+        if (!maa_install_dir.empty()) scan_dir(maa_install_dir + "\\resource\\copilot", "main");
+        scan_dir(util::exe_dir() + "\\state\\copilot", "local");
+
+        std::sort(out.begin(), out.end(),
+                  [](const CopilotFileEntry& a, const CopilotFileEntry& b) {
+                      auto rank = [](const std::string& c) {
+                          return c == "local" ? 0 : c == "main" ? 1 : c == "sss" ? 2 : 3;
+                      };
+                      if (rank(a.cat) != rank(b.cat)) return rank(a.cat) < rank(b.cat);
+                      return a.title < b.title;
+                  });
+        return out;
     };
 
-    if (!maa_install_dir.empty()) scan_dir(maa_install_dir + "\\resource\\copilot", "main");
-    scan_dir(util::exe_dir() + "\\state\\copilot", "local");
+    if (offscreen_) {
+        auto out = do_scan();
+        std::lock_guard<std::mutex> lk(copilot_mtx_);
+        copilot_files_ = std::move(out);
+        copilot_scanning_ = false;
+        return;
+    }
 
-    std::sort(copilot_files_.begin(), copilot_files_.end(),
-              [](const CopilotFileEntry& a, const CopilotFileEntry& b) {
-                  auto rank = [](const std::string& c) {
-                      return c == "local" ? 0 : c == "main" ? 1 : c == "sss" ? 2 : 3;
-                  };
-                  if (rank(a.cat) != rank(b.cat)) return rank(a.cat) < rank(b.cat);
-                  return a.title < b.title;
-              });
+    post_action([this, do_scan] {
+        auto out = do_scan();
+        {
+            std::lock_guard<std::mutex> lk(copilot_mtx_);
+            copilot_files_ = std::move(out);
+            copilot_scanning_ = false;
+        }
+        if (hwnd_) PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
+    }, "");
 }
 
 void MaaHubWindow::action_fetch_copilot_code(const std::string& code_or_url) {
@@ -3299,27 +3411,35 @@ void MaaHubWindow::page_copilot(RECT content) {
 
     // ---- 左侧：作业列表 ----
     {
+        std::vector<CopilotFileEntry> files_snap;
+        bool scanning = false;
+        {
+            std::lock_guard<std::mutex> lk(copilot_mtx_);
+            files_snap = copilot_files_;
+            scanning = copilot_scanning_;
+        }
         RECT card{ content.left, top_y, content.left + list_w, content.bottom };
         gui_.round_rect(card, gui_.theme.card_bg, gui_.theme.border, 4);
         gui_.text(card.left + 12, card.top + 10,
-                  L"\u4f5c\u4e1a\u5217\u8868 (" + std::to_wstring(copilot_files_.size()) + L")",
+                  L"\u4f5c\u4e1a\u5217\u8868 (" + std::to_wstring(files_snap.size()) + L")",
                   gui_.theme.dim, gui_.font_small);
         RECT ref_b{ card.right - 64, card.top + 6, card.right - 10, card.top + 26 };
-        if (gui_.button("copilot-refresh", ref_b, L"\u5237\u65b0", 0)) {
+        if (gui_.button("copilot-refresh", ref_b, L"\u5237\u65b0", 0, !scanning)) {
             refresh_copilot_list(maa_dir, true);
         }
         RECT list_r{ card.left + 8, card.top + 32, card.right - 8, card.bottom - 8 };
         const int ROW_H = 38;
-        int total_h = (int)copilot_files_.size() * ROW_H + 8;
+        int total_h = (int)files_snap.size() * ROW_H + 8;
         gui_.begin_scroll(list_r, total_h, scroll_["copilot-list"]);
         int ry = list_r.top + 4 - (int)scroll_["copilot-list"];
-        if (copilot_files_.empty()) {
+        if (files_snap.empty()) {
             gui_.text_clipped({ list_r.left + 6, ry + 8, list_r.right - 6, ry + 30 },
-                              L"\u672a\u53d1\u73b0\u4f5c\u4e1a JSON\uff0c\u53ef\u70b9\u53f3\u4fa7\u9009\u62e9",
+                              scanning ? L"\u6b63\u5728\u626b\u63cf\u4f5c\u4e1a\u76ee\u5f55..."
+                                       : L"\u672a\u53d1\u73b0\u4f5c\u4e1a JSON\uff0c\u53ef\u70b9\u53f3\u4fa7\u9009\u62e9",
                               gui_.theme.faint, gui_.font_small);
         }
-        for (size_t i = 0; i < copilot_files_.size(); ++i) {
-            const auto& cf = copilot_files_[i];
+        for (size_t i = 0; i < files_snap.size(); ++i) {
+            const auto& cf = files_snap[i];
             if (ry + ROW_H < list_r.top) { ry += ROW_H; continue; }
             if (ry > list_r.bottom) break;
             RECT ir{ list_r.left + 2, ry, list_r.right - 4, ry + ROW_H - 4 };
@@ -3408,26 +3528,41 @@ void MaaHubWindow::page_copilot(RECT content) {
     }
     y += 30;
 
-    if (copilot_path_ != copilot_preview_path_ && util::file_exists(copilot_path_)) {
-        inspect_copilot_file(copilot_path_);
+    {
+        std::string prev_path;
+        {
+            std::lock_guard<std::mutex> lk(copilot_mtx_);
+            prev_path = copilot_preview_path_;
+        }
+        if (copilot_path_ != prev_path && !copilot_path_.empty()) {
+            inspect_copilot_file(copilot_path_);
+        }
     }
 
     // 预览卡
     {
+        CopilotFileEntry preview_snap;
+        {
+            std::lock_guard<std::mutex> lk(copilot_mtx_);
+            preview_snap = copilot_preview_;
+        }
+        if (copilot_stage_.empty() && !preview_snap.stage.empty()) {
+            copilot_stage_ = preview_snap.stage;
+        }
         RECT pcard{ rx, y, rx + rw, y + 66 };
         gui_.round_rect(pcard, gui_.theme.card_bg_soft, gui_.theme.border, 4);
-        if (!copilot_preview_.title.empty() || !copilot_preview_.stage.empty()) {
-            std::wstring h1 = gui::widen(copilot_preview_.title)
-                + (copilot_preview_.stage.empty() ? L"" : (L"  [" + gui::widen(copilot_preview_.stage) + L"]"));
+        if (!preview_snap.title.empty() || !preview_snap.stage.empty()) {
+            std::wstring h1 = gui::widen(preview_snap.title)
+                + (preview_snap.stage.empty() ? L"" : (L"  [" + gui::widen(preview_snap.stage) + L"]"));
             gui_.text_clipped({ pcard.left + 10, pcard.top + 6, pcard.right - 10, pcard.top + 24 },
                               h1, gui_.theme.primary, gui_.font_small);
-            std::wstring h2 = copilot_preview_.opers_summary.empty()
+            std::wstring h2 = preview_snap.opers_summary.empty()
                 ? L"\u672a\u5305\u542b\u5e72\u5458\u9700\u6c42"
-                : gui::widen(copilot_preview_.opers_summary);
+                : gui::widen(preview_snap.opers_summary);
             gui_.text_clipped({ pcard.left + 10, pcard.top + 25, pcard.right - 10, pcard.top + 42 },
                               h2, gui_.theme.text, gui_.font_small);
             gui_.text_clipped({ pcard.left + 10, pcard.top + 43, pcard.right - 10, pcard.bottom - 4 },
-                              copilot_preview_.details.empty() ? gui::widen(copilot_preview_.path) : gui::widen(copilot_preview_.details),
+                              preview_snap.details.empty() ? gui::widen(preview_snap.path) : gui::widen(preview_snap.details),
                               gui_.theme.dim, gui_.font_small);
         } else {
             gui_.text_clipped({ pcard.left + 10, pcard.top + 22, pcard.right - 10, pcard.top + 44 },
@@ -3488,7 +3623,7 @@ void MaaHubWindow::page_copilot(RECT content) {
     gui_.end_scroll();
 
     {
-        bool busy = !id.empty() && (hub_->is_seq_running(id) || ex.get_bool("busy", false) || ex.get_str("run", "") == "running");
+        bool busy = is_exec_busy(id, ex);
         RECT sb{ rx, content.bottom - 34, rx + 120, content.bottom };
         if (busy) {
             if (gui_.button("copilot-stop", sb, L"\u505c\u6b62", 2)) {
@@ -3587,7 +3722,7 @@ void MaaHubWindow::page_toolbox(RECT content) {
             if (auto* ed = d->find(id); ed && ed->is_object()) exec_data = *ed;
         }
     }
-    bool busy = !id.empty() && (hub_->is_seq_running(id) || ex.get_bool("busy", false) || ex.get_str("run", "") == "running");
+    bool busy = is_exec_busy(id, ex);
 
     RECT body{ content.left, y, content.right, content.bottom };
     gui_.panel(body);
@@ -4704,6 +4839,14 @@ void MaaHubWindow::refresh_stage_activity() {
 }
 
 void MaaHubWindow::ensure_stage_catalog(const std::string& id) {
+    // 先把后台已构建好的目录切换给 UI 线程（O(1)，无阻塞 I/O）
+    {
+        std::lock_guard<std::mutex> lk(stage_mtx_);
+        if (stage_catalog_ready_) {
+            stage_catalog_ = std::move(stage_catalog_pending_);
+            stage_catalog_ready_ = false;
+        }
+    }
     ExecutorEntry executor;
     if (!hub_->get_executor(id, executor)) return;
     CoreInfo core;
@@ -4719,30 +4862,58 @@ void MaaHubWindow::ensure_stage_catalog(const std::string& id) {
     const double now = util::now_sec();
     std::string key = id + "|" + core.path + "|" + server + "|" + std::to_string(revision)
                     + "|" + std::to_string((int64_t)(now / 60.0));
-    if (key == stage_catalog_key_) return;
-
-    mj::Value stage_root = mj::Value::array();
-    std::string stage_text = stage_catalog::read_text_file(core.path + "\\resource\\stages.json");
-    if (!stage_text.empty()) {
-        try { stage_root = mj::Parser(stage_text).parse(); } catch (...) {}
-    }
-    std::string activity_text;
     {
         std::lock_guard<std::mutex> lk(stage_mtx_);
-        activity_text = stage_activity_text_;
+        if (key == stage_catalog_key_) return;
     }
-    if (activity_text.empty()) {
-        activity_text = stage_catalog::read_text_file(util::exe_dir() + "\\state\\StageActivityV2.json");
+
+    auto build_cat = [this, core_path = core.path, server, now]() {
+        mj::Value stage_root = mj::Value::array();
+        mj::Value item_root = mj::Value::object();
+        std::string item_text = stage_catalog::read_text_file(core_path + "\\resource\\item_index.json");
+        if (!item_text.empty()) {
+            try { item_root = mj::Parser(item_text).parse(); } catch (...) {}
+        }
+        std::string activity_text;
+        {
+            std::lock_guard<std::mutex> lk(stage_mtx_);
+            activity_text = stage_activity_text_;
+        }
+        if (activity_text.empty()) {
+            activity_text = stage_catalog::read_text_file(util::exe_dir() + "\\state\\StageActivityV2.json");
+        }
+        if (activity_text.empty()) {
+            activity_text = stage_catalog::read_text_file(core_path + "\\cache\\gui\\StageActivityV2.json");
+        }
+        mj::Value activity_root = mj::Value::object();
+        if (!activity_text.empty()) {
+            try { activity_root = mj::Parser(activity_text).parse(); } catch (...) {}
+        }
+        return stage_catalog::build(stage_root, activity_root, item_root, server, now);
+    };
+
+    if (offscreen_) {
+        stage_catalog_ = build_cat();
+        stage_catalog_key_ = std::move(key);
+        return;
     }
-    if (activity_text.empty()) {
-        activity_text = stage_catalog::read_text_file(core.path + "\\cache\\gui\\StageActivityV2.json");
+
+    {
+        std::lock_guard<std::mutex> lk(stage_mtx_);
+        if (stage_catalog_loading_key_ == key) return;
+        stage_catalog_loading_key_ = key;
     }
-    mj::Value activity_root = mj::Value::object();
-    if (!activity_text.empty()) {
-        try { activity_root = mj::Parser(activity_text).parse(); } catch (...) {}
-    }
-    stage_catalog_ = stage_catalog::build(stage_root, activity_root, server, now);
-    stage_catalog_key_ = std::move(key);
+    post_action([this, key, build_cat] {
+        auto built = build_cat();
+        {
+            std::lock_guard<std::mutex> lk(stage_mtx_);
+            stage_catalog_pending_ = std::move(built);
+            stage_catalog_ready_ = true;
+            stage_catalog_key_ = key;
+            if (stage_catalog_loading_key_ == key) stage_catalog_loading_key_.clear();
+        }
+        if (hwnd_) PostMessageW(hwnd_, WM_APP_SNAP, 0, 0);
+    }, "");
 }
 
 void MaaHubWindow::backend_loop() {

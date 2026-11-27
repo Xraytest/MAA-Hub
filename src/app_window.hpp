@@ -165,6 +165,9 @@ private:
     std::string copilot_last_clip_;
     std::string copilot_scan_dir_;
     bool copilot_scanned_ = false;
+    bool copilot_scanning_ = false;
+    std::string copilot_inspecting_path_;
+    mutable std::mutex copilot_mtx_;
     std::vector<CopilotFileEntry> copilot_files_;
     std::string copilot_preview_path_;
     CopilotFileEntry copilot_preview_;
@@ -249,6 +252,10 @@ private:
 
     // 数据辅助（返回拷贝：快照会被后台线程整体替换，指针会悬空）
     bool find_executor(const std::string& id, mj::Value& out) const;
+    bool is_exec_busy(const std::string& id, const mj::Value& ex) const;
+    int scale_dpi(int px) const { return dpi_ == 96 ? px : MulDiv(px, dpi_, 96); }
+    int unscale_dpi(int px) const { return dpi_ == 96 ? px : MulDiv(px, 96, dpi_); }
+    void refresh_system_theme();
     std::vector<mj::Value> catalog_of(const std::string& kind) const;
     // 取 executor 的 catalog 并按 task_order_（用户拖拽顺序）重排；
     // action_run_from / action_run_checked 共用同一排序口径（与左列显示一致）。
@@ -266,6 +273,7 @@ private:
     int dump_w_ = 0, dump_h_ = 0;   // 离屏客户区尺寸，0 = 用真实窗口的 800x600
 
     int topbar_h_ = 36;   // 官方 TabItem 高度约 30，加内边距
+    int dpi_ = 96;        // 当前窗口 DPI（离屏模式固定 96）
 
     gui::Gui gui_;
     gui::Input input_;
@@ -292,6 +300,9 @@ private:
     uint64_t stage_activity_revision_ = 0;
     double stage_activity_checked_ = 0.0;
     std::string stage_catalog_key_;
+    std::string stage_catalog_loading_key_;
+    bool stage_catalog_ready_ = false;
+    stage_catalog::StageCatalog stage_catalog_pending_;
     stage_catalog::StageCatalog stage_catalog_;
     std::map<std::string, float> scroll_;
     // 滚动区内容高度（上一帧实测；scroll_ 的键一一对应）

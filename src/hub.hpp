@@ -151,18 +151,11 @@ public:
     }
 
     ~Hub() {
-        // 通知执行线程退出，再并行关停 worker
+        // 通知执行线程退出，唤醒调度器，再并行关停 worker（让阻塞中的 RPC 立刻返回）
         util::trace("hub dtor begin");
         stopping_ = true;
+        sched_cv_.notify_all();
         stop_execution();
-        // 调度器线程可能正跑 run_task_sequence（同步、可长达数小时），不能无限等：
-        // sched_done_ 由调度器线程退出前自设，有界等 1.5s；仍没退就 detach
-        //（joinable 的 std::thread 析构 = terminate，必须先 detach 再销毁 Hub）
-        if (sched_thread_.joinable()) {
-            for (int i = 0; i < 150 && !sched_done_.load(); ++i) Sleep(10);
-            if (sched_done_.load()) sched_thread_.join();
-            else { util::trace("hub dtor sched still running, detach"); sched_thread_.detach(); }
-        }
         std::vector<std::thread> stops;
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -175,10 +168,25 @@ public:
         }
         for (auto& t : stops) t.join();
         util::trace("hub dtor workers stopped");
+        // 调度器只通过 dispatch_sequence 派发异步任务，不会阻塞在长任务上，且由 sched_cv_ 唤醒，可安全 join
+        if (sched_thread_.joinable()) {
+            sched_thread_.join();
+            util::trace("hub dtor sched joined");
+        }
+        // 所有 worker 已停，正在运行的序列线程的 RPC 均已解除阻塞，全部 join 避免悬空 this
+        std::vector<std::thread> to_join;
         {
-            std::unique_lock<std::mutex> lk(tp_mtx_);
-            seq_cv_.wait_for(lk, std::chrono::milliseconds(2000),
-                             [this] { return active_seq_count_ == 0; });
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            for (auto& st : seq_threads_) {
+                if (st.thread.joinable()) to_join.push_back(std::move(st.thread));
+            }
+            seq_threads_.clear();
+        }
+        for (auto& t : to_join) {
+            if (t.joinable()) t.join();
+        }
+        if (exec_thread_.joinable()) {
+            exec_thread_.join();
         }
         // r24：800ms 节流窗口内被挡住、尚未落盘的 task-params 尾写在退出前 flush
         //（防退出丢尾）。worker 已全部停止，这里只剩确定性的收尾写，不再拖慢关闭。
@@ -1181,10 +1189,16 @@ public:
         {
             std::lock_guard<std::mutex> lk(plans_mtx_);
             plans_.push_back(plan);
-            if (plans_.size() > 50) plans_.erase(plans_.begin());
+            if (plans_.size() > 50) {
+                auto evict = std::find_if(plans_.begin(), plans_.end(), [](const Plan& p) {
+                    return p.status != "running" && p.status != "pending";
+                });
+                if (evict != plans_.end()) plans_.erase(evict);
+            }
         }
-        std::thread([this, exec_id, plan = std::move(plan), auto_reload,
-                     on_done = std::move(on_done)]() mutable {
+        auto done_flag = std::make_shared<std::atomic<bool>>(false);
+        std::thread thr([this, exec_id, plan = std::move(plan), auto_reload,
+                         on_done = std::move(on_done), done_flag]() mutable {
             std::string status = "failed";
             try {
                 if (auto_reload) {
@@ -1211,7 +1225,9 @@ public:
             }
             seq_cv_.notify_all();
             if (on_done && !stopping_) on_done(status);
-        }).detach();
+            done_flag->store(true, std::memory_order_release);
+        });
+        track_seq_thread(std::move(thr), std::move(done_flag));
         return true;
     }
 
@@ -1224,7 +1240,8 @@ public:
             if (!seq_running_.insert(exec_id).second) return false;
             ++active_seq_count_;
         }
-        std::thread([this, exec_id, tasks = std::move(tasks)]() mutable {
+        auto done_flag = std::make_shared<std::atomic<bool>>(false);
+        std::thread thr([this, exec_id, tasks = std::move(tasks), done_flag]() mutable {
             try {
                 std::string st = run_task_sequence(exec_id, std::move(tasks));
                 util::trace("[sched] " + exec_id + " -> " + st);
@@ -1239,7 +1256,9 @@ public:
                 if (active_seq_count_ > 0) --active_seq_count_;
             }
             seq_cv_.notify_all();
-        }).detach();
+            done_flag->store(true, std::memory_order_release);
+        });
+        track_seq_thread(std::move(thr), std::move(done_flag));
         return true;
     }
 
@@ -2278,7 +2297,11 @@ private:
     void scheduler_loop() {
         util::trace("[sched] scheduler_loop start");
         while (!stopping_) {
-            for (int i = 0; i < 10 && !stopping_; ++i) Sleep(1000);   // 10s tick
+            {
+                std::unique_lock<std::mutex> lk(sched_wait_mtx_);
+                sched_cv_.wait_for(lk, std::chrono::seconds(10),
+                                   [this] { return stopping_.load(); });
+            }
             if (stopping_) break;
             try {
                 scheduler_tick(/*async_exec=*/true);
@@ -2456,8 +2479,35 @@ private:
     std::map<std::string, std::string> running_task_;   // exec_id -> 当前运行任务
     std::set<std::string> seq_running_;                 // 正在运行任务串的 exec_id
     std::set<std::string> exec_stop_flags_;             // 按执行器停止信号
+    struct TrackedThread {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+
+    void track_seq_thread(std::thread t, std::shared_ptr<std::atomic<bool>> done) {
+        std::vector<std::thread> finished;
+        {
+            std::lock_guard<std::mutex> lk(tp_mtx_);
+            for (auto it = seq_threads_.begin(); it != seq_threads_.end(); ) {
+                if (it->done && it->done->load(std::memory_order_acquire)) {
+                    if (it->thread.joinable()) finished.push_back(std::move(it->thread));
+                    it = seq_threads_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            seq_threads_.push_back(TrackedThread{ std::move(t), std::move(done) });
+        }
+        for (auto& ft : finished) {
+            if (ft.joinable()) ft.join();
+        }
+    }
+
+    std::vector<TrackedThread> seq_threads_;            // 异步序列线程（tp_mtx_ 保护，析构全量 join）
     int active_seq_count_ = 0;                          // 异步任务串计数（tp_mtx_ 保护）
     std::condition_variable seq_cv_;
+    std::mutex sched_wait_mtx_;
+    std::condition_variable sched_cv_;
     std::map<std::string, std::map<std::string, std::string>> task_result_;
     mutable std::mutex tp_mtx_;
     std::map<std::string, std::map<std::string, std::map<std::string, mj::Value>>>

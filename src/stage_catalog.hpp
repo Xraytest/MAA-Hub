@@ -46,6 +46,7 @@ struct StageCatalog {
     std::string server = "Official";
     std::vector<StageChoice> stages;
     std::vector<StageActivity> activities;
+    std::map<std::string, std::string> item_names;
 };
 
 inline std::string trim_bom(std::string text) {
@@ -157,47 +158,46 @@ inline bool weekly_stage_open(const std::string& code, int day_of_week) {
 
 inline bool valid_stage_code(const std::string& code) {
     if (code.empty() || code.size() > 64) return false;
-    bool has_digit = false;
+    bool has_alnum = false;
     for (unsigned char ch : code) {
         if (ch >= 0x80 || std::isspace(ch)) return false;
         if (!(std::isalnum(ch) || ch == '-' || ch == '_')) return false;
-        if (std::isdigit(ch)) has_digit = true;
+        if (std::isalnum(ch)) has_alnum = true;
     }
-    return has_digit;
+    return has_alnum;
 }
 
 inline std::vector<StageChoice> default_stages() {
     static const char* const codes[] = {
-        "1-7", "LS-6", "CE-6", "AP-5", "CA-5", "SK-5",
-        "PR-A-1", "PR-A-2", "PR-B-1", "PR-B-2", "PR-C-1", "PR-C-2", "PR-D-1", "PR-D-2"
+        "1-7", "R8-11", "12-17-HARD", "CE-6", "AP-5", "CA-5", "LS-6", "SK-5",
+        "Annihilation", "PR-A-1", "PR-A-2", "PR-B-1", "PR-B-2",
+        "PR-C-1", "PR-C-2", "PR-D-1", "PR-D-2"
     };
     std::vector<StageChoice> out;
     for (const char* code : codes) out.push_back(StageChoice{ code, code, "" });
+    for (auto& choice : out)
+        if (choice.value == "Annihilation") choice.display = util::wide_to_utf8(L"剿灭模式");
     return out;
 }
 
 inline std::vector<StageChoice> parse_stage_resource(const mj::Value& root, double now,
                                                       const std::string& server) {
-    std::vector<StageChoice> out;
-    if (root.is_array()) {
-        int day = game_day_of_week(now, server);
-        for (const auto& item : root.items()) {
-            if (!item.is_object()) continue;
-            std::string code = item.get_str("code", "");
-            if (!valid_stage_code(code)) continue;
-            StageChoice choice;
-            choice.value = code;
-            choice.display = code;
-            choice.open = weekly_stage_open(code, day);
-            out.push_back(std::move(choice));
-        }
-    }
-    if (out.empty()) {
-        out = default_stages();
-        int day = game_day_of_week(now, server);
-        for (auto& choice : out) choice.open = weekly_stage_open(choice.value, day);
-    }
+    (void)root;
+    std::vector<StageChoice> out = default_stages();
+    int day = game_day_of_week(now, server);
+    for (auto& choice : out) choice.open = weekly_stage_open(choice.value, day);
     return out;
+}
+
+inline std::map<std::string, std::string> parse_item_names(const mj::Value& root) {
+    std::map<std::string, std::string> names;
+    if (!root.is_object()) return names;
+    for (const auto& item : root.members()) {
+        if (!item.second.is_object()) continue;
+        std::string name = item.second.get_str("name", "");
+        if (!name.empty()) names[item.first] = std::move(name);
+    }
+    return names;
 }
 
 inline void parse_activity_entry(StageCatalog& catalog, const std::string& key,
@@ -291,10 +291,11 @@ inline void attach_related_entries(StageCatalog& catalog, const mj::Value& serve
 }
 
 inline StageCatalog build(const mj::Value& stage_resource, const mj::Value& activity_root,
-                          std::string server, double now) {
+                          const mj::Value& item_resource, std::string server, double now) {
     StageCatalog catalog;
     catalog.server = normalize_server(server);
     catalog.stages = parse_stage_resource(stage_resource, now, catalog.server);
+    catalog.item_names = parse_item_names(item_resource);
     std::map<std::string, size_t> index;
     for (size_t i = 0; i < catalog.stages.size(); ++i) index[catalog.stages[i].value] = i;
 
@@ -346,7 +347,8 @@ inline std::vector<StageChoice> choices_for(const StageCatalog& catalog,
     std::vector<StageChoice> out;
     bool found = false;
     for (const auto& choice : catalog.stages) {
-        if (hide_unavailable && !choice.open) continue;
+        if (choice.outdated) continue;
+        if (hide_unavailable && !choice.open && choice.value != current) continue;
         out.push_back(choice);
         if (choice.value == current) found = true;
     }
@@ -373,7 +375,10 @@ inline std::vector<std::string> today_activity_tips(const StageCatalog& catalog,
         if (!title.empty()) out.push_back("\xe9\x99\x90\xe6\x97\xb6 \xc2\xb7 " + title);
         for (const auto& stage : activity.stages) {
             std::string line = "  " + stage.display;
-            if (!stage.drop.empty()) line += " \xc2\xb7 " + stage.drop;
+            if (!stage.drop.empty()) {
+                auto item = catalog.item_names.find(stage.drop);
+                line += " \xc2\xb7 " + (item != catalog.item_names.end() ? item->second : stage.drop);
+            }
             out.push_back(std::move(line));
         }
         for (const auto& entry : activity.related_entries) {

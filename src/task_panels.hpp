@@ -399,9 +399,8 @@ inline bool panel_fight(PanelCtx& c) {
             c.y += RH;
         }
 
-        // Grid.Row=3：StagePlan。左列标签随「使用备选关卡」在 关卡 / 候选关卡 之间切换，
-        // 「添加候选」只有开启备选时才出现、且贴左列底部；右列是一个可增删行的列表框
-        // （关闭备选时 BorderThickness=0、只有一行）。
+        // Grid.Row=3：StagePlan。左列标签随备选模式在 关卡 / 候选关卡 之间切换，
+        // 添加按钮始终可见：未启用时点击直接开启备选并加入当前关卡。
         bool alt = c.get_bool("use_alternate_stage");
         bool custom_stage = c.get_bool("use_custom_stage");
         bool hide_unavailable = c.get_bool("hide_unavailable_stage");
@@ -427,19 +426,50 @@ inline bool panel_fight(PanelCtx& c) {
         const int ROWH = 32;
         int n = alt ? (int)cands.size() + 1 : 1;
         int list_h = alt ? (std::max)(75, n * ROWH + 4) : ROWH;
-        int total = (std::max)(RH, list_h + 2 * M);
+        int total = (std::max)(RH + 36, list_h + 2 * M);
         label_cell(alt ? L"候选关卡" : L"关卡");
         RECT lb{ c.x + LC + M, c.y + M, c.right - M, c.y + M + list_h };
         if (alt) c.g.round_rect(lb, c.g.theme.card_bg, c.g.theme.border, 4);
         std::vector<std::string> plan((size_t)n);
         plan[0] = c.get_str("stage");
         for (int i = 1; i < n; ++i) plan[i] = cands[(size_t)i - 1];
+        struct CandidateDrag { bool active = false; int from = -1; int target = -1; };
+        static std::map<std::string, CandidateDrag> candidate_drags;
+        std::string drag_key = c.exec_id + ":" + c.task;
+        CandidateDrag& drag = candidate_drags[drag_key];
+        if (!alt) drag = CandidateDrag{};
+        const gui::Input& in = c.g.input();
         int del = -1;
         for (int i = 0; i < n; ++i) {
-            RECT ir = alt ? RECT{ lb.left + 2, lb.top + 2 + i * ROWH, lb.right - 2,
-                                  lb.top + 2 + i * ROWH + 30 }
-                          : RECT{ lb.left, lb.top, lb.right, lb.top + 30 };
-            if (alt && i > 0) ir.right -= 24;
+            RECT row = alt ? RECT{ lb.left + 2, lb.top + 2 + i * ROWH, lb.right - 2,
+                                   lb.top + 2 + i * ROWH + 30 }
+                           : RECT{ lb.left, lb.top, lb.right, lb.top + 30 };
+            RECT ir = row;
+            RECT handle{};
+            if (drag.active) {
+                if (n > 1) {
+                    drag.target = (in.mouse.y - (lb.top + 2)) / ROWH;
+                    if (drag.target < 0) drag.target = 0;
+                    if (drag.target >= n) drag.target = n - 1;
+                }
+                if (drag.from == i) c.g.fill(row, c.g.theme.primary_light);
+            }
+            if (alt) {
+                handle = { ir.left, ir.top + 5, ir.left + 14, ir.bottom - 5 };
+                ir.left += 16;
+                ir.right -= 20;
+                bool handle_hov = c.g.hovered(handle);
+                if (handle_hov || (drag.active && drag.from == i))
+                    c.g.round_rect(handle, c.g.theme.hover, c.g.theme.hover, 3);
+                c.g.text(handle.left + 3, handle.top + 2, L"≡", c.g.theme.dim, c.g.font_small);
+                if (handle_hov && in.pressed) {
+                    drag.active = true;
+                    drag.from = i;
+                    drag.target = i;
+                    c.g.cancel_active();
+                    c.g.clear_focus();
+                }
+            }
             std::string widget_id = c.exec_id + ":" + c.task + ":stage" + std::to_string(i);
             if (custom_stage) {
                 c.g.text_input(widget_id.c_str(), ir, plan[i],
@@ -465,13 +495,27 @@ inline bool panel_fight(PanelCtx& c) {
                 }
             }
         }
-        for (int i = 1; i < n; ++i) cands[(size_t)i - 1] = plan[(size_t)i];
+        if (drag.active && drag.target >= 0 && drag.target < n) {
+            int line_y = lb.top + 2 + drag.target * ROWH;
+            c.g.fill({ lb.left + 16, line_y - 1, lb.right - 22, line_y + 1 }, c.g.theme.primary);
+        }
+        if (drag.active && !in.down) {
+            if (drag.from >= 0 && drag.target >= 0
+                && drag.from < n && drag.target < n && drag.from != drag.target) {
+                std::string moved = plan[(size_t)drag.from];
+                plan.erase(plan.begin() + drag.from);
+                plan.insert(plan.begin() + drag.target, std::move(moved));
+            }
+            drag = CandidateDrag{};
+        }
+        cands.clear();
+        for (int i = 1; i < n; ++i) cands.push_back(plan[(size_t)i]);
         if (del > 0 && del - 1 < (int)cands.size()) cands.erase(cands.begin() + (del - 1));
-        if (alt) {
-            RECT bb{ c.x + M, c.y + total - RH + M, c.x + LC - M, c.y + total - M };
-            if (c.g.button((c.exec_id + ":" + c.task + ":add_candidate").c_str(), bb, L"添加候选", 0)
-                && !plan[0].empty())
-                cands.push_back(plan[0]);
+        RECT bb{ c.x + M, c.y + total - RH + M, c.x + LC - M, c.y + total - M };
+        if (c.g.button((c.exec_id + ":" + c.task + ":add_candidate").c_str(), bb,
+                       alt ? L"添加候选" : L"添加备选", 0, !plan[0].empty())) {
+            c.set_bool("use_alternate_stage", true);
+            cands.push_back(plan[0]);
         }
         c.set_str("stage", plan[0]);
         {
@@ -541,7 +585,7 @@ inline bool panel_fight(PanelCtx& c) {
             c.y += 36;
         }
     }
-    pc_check(c, "use_alternate_stage", L"\u4f7f\u7528\u5907\u9009\u5173\u5361");
+    pc_check(c, "use_alternate_stage", L"\u542f\u7528\u591a\u5173\u5361\u5907\u9009");
     pc_check(c, "report_to_penguin", L"\u4e0a\u62a5\u6389\u843d\u7edf\u8ba1\u5230\u4f01\u9e45\u7269\u6d41");
     pc_check(c, "use_weekly_plan", L"\u542f\u7528\u5468\u8ba1\u5212");
     return true;
