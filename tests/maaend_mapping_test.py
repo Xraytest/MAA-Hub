@@ -21,7 +21,7 @@ BS = chr(92)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(ROOT, "build")
 EXE = os.path.join(BUILD, "MaaHub.exe")
-CORE = os.path.join(BUILD, "cores", "maaend-v5.15.0-beta.1")
+CORE = os.path.join(BUILD, "cores", "maaend-v5.16.0-beta.2")
 
 results = []
 known = []
@@ -216,11 +216,8 @@ def main():
     lost_default = [f"{n}.{p['name']}" for n, p in specs
                     if isinstance(opts.get(p["name"], {}).get("default_case"), list)
                     and "default" not in p]
-    defect("数组型 default_case 被 get_str 读成空串，官方默认勾选全丢", lost_default,
-           "; ".join(lost_default[:5]))
-    defect("apply_option 对无用户值的 checkbox 直接 sel=false，官方默认不进 override",
-           [f"{n}.{p['name']}" for n, p in multi],
-           "; ".join(f"{n}.{p['name']}" for n, p in multi[:5]))
+    check("数组型 default_case 保留到 catalog", not lost_default,
+          "; ".join(lost_default[:5]))
 
     # ---- 走真实映射路径：--cli override 全量核对 entry + pipeline_override ----
     proc2 = subprocess.run([EXE, "--cli", "override", exec_id, "*"],
@@ -254,8 +251,36 @@ def main():
         miss = sorted(want - got)
         if miss:
             lost_nodes.append(f"{n}.{p['name']} 缺 {','.join(miss[:3])}")
-    defect("官方默认勾选的节点没进 override，任务等于空跑", lost_nodes,
-           "; ".join(lost_nodes[:3]))
+    check("官方默认勾选的节点全部进入 override", not lost_nodes,
+          "; ".join(lost_nodes[:3]))
+
+    grow_spec = opts.get("SelectToGrowItems", {})
+    grow_defaults = grow_spec.get("default_case") or []
+    grow_attach = (((plans.get("DijiangRewards") or {}).get("override") or {})
+                   .get("GrowthChamberSelectTarget", {}).get("attach", {}))
+    check("DijiangRewards 默认种植对象完整",
+          len(grow_attach) == len(grow_defaults),
+          f"{len(grow_attach)}/{len(grow_defaults)}")
+
+    sell_spec = opts.get("SellProductSchedule", {})
+    sell_want = set()
+    for cs in (sell_spec.get("cases") or []):
+        if cs.get("name") in (sell_spec.get("default_case") or []):
+            sell_want |= set((cs.get("pipeline_override") or {}).keys())
+    sell_plans = {}
+    for flag in (True, False):
+        proc_flag = subprocess.run(
+            [EXE, "--cli", "override", exec_id, "SellProduct",
+             json.dumps({"SellProductSchedule": flag})],
+            capture_output=True, timeout=120)
+        lines = proc_flag.stdout.decode("utf-8", "replace").strip().splitlines()
+        sell_plans[flag] = json.loads(lines[-1]) if lines else {}
+    sell_true = set((sell_plans[True].get("override") or {}).keys())
+    sell_false = set((sell_plans[False].get("override") or {}).keys())
+    check("旧 bool=true 兼容 checkbox 默认值", sell_want <= sell_true,
+          "; ".join(sorted(sell_want - sell_true)[:3]))
+    check("旧 bool=false 保持全不选", not (sell_want & sell_false),
+          "; ".join(sorted(sell_want & sell_false)[:3]))
 
     # ---- 预设归属（DailyFull 铺默认勾选依赖它） ----
     with_presets = [t for t in catalog if t.get("presets")]

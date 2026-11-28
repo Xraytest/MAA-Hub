@@ -70,7 +70,9 @@ public:
             item.set("description", mj::Value(lbl.empty() ? key : lbl));
             if (auto* cases = spec.find("cases"); cases && cases->is_array()) {
                 mj::Value names = mj::Value::array();
-                std::string def_case = spec.get_str("default_case", "");
+                const mj::Value* def_value = spec.find("default_case");
+                std::string def_case = def_value && def_value->is_string()
+                    ? def_value->as_string() : "";
                 std::string def_label;
                 for (auto& cs : cases->items()) {
                     std::string cn = cs.is_object() ? cs.get_str("name", "")
@@ -95,6 +97,9 @@ public:
                     } else if (!def_label.empty()) {
                         item.set("default", mj::Value(def_label));
                     }
+                } else if (spec.get_str("type", "") == "checkbox"
+                           && def_value && def_value->is_array()) {
+                    item.set("default", *def_value);
                 }
             }
             if (!item.has("default") && spec.has("default")) item.set("default", spec["default"]);
@@ -636,10 +641,27 @@ public:
                 sel = false;
                 for (auto& e : user->items())
                     if (case_hit(task, key, cs, scalar_text(e))) { sel = true; break; }
+            } else if (type == "checkbox"
+                       && (!user || (user->is_bool() && user->as_bool()))) {
+                sel = false;
+                const mj::Value* defs = spec->find("default_case");
+                if (defs && defs->is_array()) {
+                    for (auto& d : defs->items()) {
+                        if (d.is_string() && norm_case_key(cs.get_str("name", ""))
+                            == norm_case_key(d.as_string())) {
+                            sel = true;
+                            break;
+                        }
+                    }
+                } else if (defs && defs->is_string()
+                           && norm_case_key(cs.get_str("name", ""))
+                              == norm_case_key(defs->as_string())) {
+                    sel = true;
+                }
             } else if (user) {
                 sel = case_hit(task, key, cs, scalar_text(*user));
             } else if (type == "checkbox") {
-                sel = false;   // 多选没有默认勾选，保持 nodes.json 原样
+                sel = false;
             } else if (!def.empty()) {
                 sel = norm_case_key(cs.get_str("name", "")) == def;
             } else {
@@ -966,6 +988,16 @@ public:
         RegCloseKey(hk);
     }
 
+    static void restore_game_window(HWND hwnd) {
+        if (!IsWindow(hwnd)) return;
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        RECT cr{};
+        if (GetClientRect(hwnd, &cr)
+            && (cr.right <= cr.left || cr.bottom <= cr.top)) {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+    }
+
     void check_and_refit_window() const {
         int fw = 0, fh = 0;
         if (!parse_fit_window(fw, fh)) return;
@@ -979,6 +1011,7 @@ public:
             last_refit_check_ = now;
         }
         RECT cr{};
+        restore_game_window(hwnd);
         if (!IsWindow(hwnd) || !GetClientRect(hwnd, &cr)) return;
         const int cur_w = (int)(cr.right - cr.left);
         const int cur_h = (int)(cr.bottom - cr.top);
@@ -1030,6 +1063,7 @@ public:
             st_.last_error = "game window not found (class=" + cls + ", title~/" + title + "/). 请先启动终末地客户端。";
             return false;
         }
+        restore_game_window(wi.hwnd);
         // 客户区必须与 pipeline 基准尺寸一致。游戏被拉成 1280x768 这类非 16:9
         // 尺寸后，UI 图标相对模板整体缩放，模板匹配会静默失败——DailyRewards
         // 就是在这里空转的（WorldMenu 图标在 ROI 内却匹配不上）。
@@ -1260,6 +1294,17 @@ public:
             std::lock_guard<std::mutex> lk(st_mtx_);
             st_.last_error = "not connected";
             return false;
+        }
+        HWND hwnd = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(st_mtx_);
+            hwnd = (HWND)(intptr_t)st_.ctrl_hwnd;
+        }
+        restore_game_window(hwnd);
+        if (IsWindow(hwnd) && GetForegroundWindow() != hwnd) {
+            SetForegroundWindow(hwnd);
+            if (GetForegroundWindow() != hwnd)
+                util::trace("maaend WARN failed to bring game window to foreground");
         }
         check_and_refit_window();
         mj::Value plan = build_plan(task, params);

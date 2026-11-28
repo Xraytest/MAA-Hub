@@ -2032,9 +2032,11 @@ private:
                 }
                 // 轮询任务完成；stopping_ 时立即退出，避免 Hub 析构后仍访问成员
                 int idle_rounds = 0;
+                int agent_dead_rounds = 0;
                 const double t0 = util::now_sec();
                 std::string run_state, run_error;
                 bool lost = false;
+                bool agent_lost = false;
                 while (!stop_flag_ && !stopping_ && !is_exec_stopped(step.exec_id)) {
                     Sleep(500);
                     mj::Value s2;
@@ -2050,6 +2052,20 @@ private:
                     }
                     run_state = s2.get_str("run", "idle");
                     run_error = s2.get_str("last_error", "");
+                    const int agents_alive = (int)s2.get_int("agents_alive", 0);
+                    const int agents_total = (int)s2.get_int("agents_total", 0);
+                    if (agents_total > 0 && agents_alive < agents_total) {
+                        if (++agent_dead_rounds >= 3) {
+                            agent_lost = true;
+                            step_err = step.task + ": agent 崩溃（"
+                                + std::to_string(agents_alive) + "/"
+                                + std::to_string(agents_total) + "）";
+                            util::trace("[exec] " + step_err + " exec=" + step.exec_id);
+                            break;
+                        }
+                    } else {
+                        agent_dead_rounds = 0;
+                    }
                     if (run_state == "running" || run_state == "stopping") {
                         idle_rounds = 0;
                         continue;
@@ -2060,6 +2076,14 @@ private:
                 }
                 if (stop_flag_ || stopping_ || is_exec_stopped(step.exec_id)) {
                     status = "stopped";
+                    fatal = true;
+                    break;
+                }
+                if (agent_lost) {
+                    mj::Value ignored;
+                    w->call("stop", mj::Value::object(), 10000, ignored);
+                    util::trace("[exec] restart worker after agent crash exec=" + step.exec_id);
+                    restart_worker(step.exec_id);
                     fatal = true;
                     break;
                 }
